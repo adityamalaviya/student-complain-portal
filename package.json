@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/**/*.test.mjs"
+    "test": "node --test tests/**/*.test.mjs",
+    "setup:appwrite": "node scripts/setup-appwrite.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
@@ -27,6 +28,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.17.0",
     "eslint-config-next": "^15.1.0",
+    "node-appwrite": "^31.0.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.0"
