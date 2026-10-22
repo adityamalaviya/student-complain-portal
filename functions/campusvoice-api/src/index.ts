@@ -1,23 +1,20 @@
-export interface AppwriteContext {
-  req: {
-    body: string | Record<string, unknown>;
-    headers: Record<string, string>;
-    method: string;
-    url: string;
-    path: string;
-  };
-  res: {
-    json: (data: Record<string, unknown>, statusCode?: number) => unknown;
-    empty: () => unknown;
-  };
-  log: (message: unknown) => void;
-  error: (message: unknown) => void;
-}
+import { verifyCaller } from './auth.js';
+import {
+  handleGetProfile,
+  handleCompleteOnboarding,
+  handleListDepartments,
+} from './handlers/profile.js';
+import type { AppwriteContext } from './types.js';
 
 export default async function main(context: AppwriteContext): Promise<unknown> {
   const { req, res, log } = context;
 
   log(`[campusvoice-api] Incoming execution: ${req.method} ${req.path}`);
+
+  // Safe CORS header inspection (Appwrite Function responses or standard triggers)
+  if (req.method === 'OPTIONS') {
+    return res.empty();
+  }
 
   // Parse payload safely
   let payload: Record<string, unknown> = {};
@@ -32,7 +29,9 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
   }
 
   const action = (payload.action as string) || (req.headers['x-action'] as string) || 'health';
+  const data = (payload.data as Record<string, unknown>) || payload;
 
+  // Unprotected / Public Actions
   if (action === 'health') {
     return res.json(
       {
@@ -49,12 +48,38 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
     );
   }
 
-  return res.json(
-    {
-      success: false,
-      error: `Action '${action}' is not yet implemented in Phase 1 setup scaffold.`,
-      code: 'ACTION_NOT_IMPLEMENTED',
-    },
-    501
-  );
+  if (action === 'list-departments') {
+    return handleListDepartments(context);
+  }
+
+  // Protected Actions requiring verified caller
+  const { caller, error: authError, statusCode } = await verifyCaller(context);
+  if (!caller) {
+    return res.json(
+      {
+        success: false,
+        error: authError || 'Unauthorized',
+        code: 'UNAUTHORIZED',
+      },
+      statusCode || 401
+    );
+  }
+
+  switch (action) {
+    case 'get-profile':
+      return handleGetProfile(context, caller);
+
+    case 'complete-onboarding':
+      return handleCompleteOnboarding(context, caller, data);
+
+    default:
+      return res.json(
+        {
+          success: false,
+          error: `Action '${action}' is not supported.`,
+          code: 'INVALID_ACTION',
+        },
+        400
+      );
+  }
 }
