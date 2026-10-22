@@ -35,5 +35,4 @@ yarn-error.log*
 next-env.d.ts
 
 # functions build artifacts
-functions/*/dist
 functions/*/node_modules

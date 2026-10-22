@@ -11,11 +11,9 @@
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
-    "node-appwrite": "^14.1.0",
-    "zod": "^3.24.1"
-  },
-  "devDependencies": {
     "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
+    "node-appwrite": "^14.1.0",
+    "typescript": "^5.7.0",
+    "zod": "^3.24.1"
   }
 }
