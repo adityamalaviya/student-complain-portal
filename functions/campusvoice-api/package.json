@@ -1,0 +1,21 @@
+{
+  "name": "campusvoice-api",
+  "version": "1.0.0",
+  "description": "Appwrite Cloud Function for CampusVoice institutional portal",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "node-appwrite": "^14.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
