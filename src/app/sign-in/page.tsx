@@ -16,7 +16,9 @@ function SignInContent(): React.ReactElement {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, profile, loading, isOnboarded, isAdmin, signIn } = useAuth();
-  const oauthError = searchParams.get('error');
+  const rawError = searchParams.get('error');
+  const errorMsg = searchParams.get('message') || searchParams.get('error_description') || (rawError && rawError !== 'oauth_failed' ? rawError : null);
+  const oauthError = Boolean(rawError);
 
   useEffect(() => {
     if (!loading && user) {
@@ -104,7 +106,7 @@ function SignInContent(): React.ReactElement {
                 Sign in to CampusVoice
               </h1>
               <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                Access your department grievance feed, track community issues, and support campus resolutions with your institutional account.
+                Access your department grievance feed, track community issues, and support campus resolutions with your Google account.
               </p>
             </div>
 
@@ -112,9 +114,20 @@ function SignInContent(): React.ReactElement {
             {oauthError && (
               <div className="mb-6 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-3.5 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
                 <WarningCircle size={20} weight="fill" className="mt-0.5 shrink-0 text-red-600 dark:text-red-400" />
-                <p className="text-xs font-medium">
-                  Google OAuth authentication could not be completed. Please ensure you select your institutional Google account and try again.
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold">
+                    Google sign-in could not be completed.
+                  </p>
+                  {errorMsg ? (
+                    <p className="text-xs font-mono text-red-700 dark:text-red-300">
+                      Reason: {errorMsg}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-red-700 dark:text-red-300">
+                      Please check the browser console or your OAuth credentials and try again.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 
@@ -150,7 +163,7 @@ function SignInContent(): React.ReactElement {
               <div className="relative flex items-center py-2">
                 <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
                 <span className="mx-4 text-[10px] font-bold tracking-wider text-slate-400 uppercase dark:text-slate-500">
-                  Institutional Workspace Auth
+                  Google Account Sign-In
                 </span>
                 <div className="flex-grow border-t border-slate-200 dark:border-slate-800"></div>
               </div>
@@ -161,10 +174,10 @@ function SignInContent(): React.ReactElement {
               <ShieldCheck size={20} weight="bold" className="mt-0.5 shrink-0 text-blue-700 dark:text-blue-400" />
               <div className="space-y-0.5">
                 <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                  Institutional Credentials Required
+                  Sign in with Google
                 </p>
                 <p className="text-xs leading-snug text-slate-600 dark:text-slate-400">
-                  Sign in with your registered college Google account. First-time students will complete a quick 1-step profile confirmation.
+                  Sign in with your Google account. First-time students will complete a quick 1-step profile confirmation.
                 </p>
               </div>
             </div>

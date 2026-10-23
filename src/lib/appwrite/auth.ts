@@ -13,7 +13,11 @@ export function signInWithGoogle(
   const successUrl = redirectSuccessUrl || `${origin}/auth/callback`;
   const failureUrl = redirectFailureUrl || `${origin}/sign-in?error=oauth_failed`;
 
-  account.createOAuth2Session(OAuthProvider.Google, successUrl, failureUrl);
+  account.createOAuth2Token(OAuthProvider.Google, successUrl, failureUrl);
+}
+
+export async function createSession(userId: string, secret: string): Promise<Models.Session> {
+  return account.createSession(userId, secret);
 }
 
 export async function signOut(): Promise<void> {

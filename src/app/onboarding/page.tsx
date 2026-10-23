@@ -207,7 +207,7 @@ export default function OnboardingPage(): React.ReactElement {
                 className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
               />
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Synced from institutional Google Account, verify spelling matches institutional register.
+                Synced from your Google Account, verify spelling matches college records.
               </p>
             </div>
 
