@@ -61,6 +61,17 @@
      - Implemented `DepartmentBadge` component (`src/components/DepartmentBadge.tsx`) with `@phosphor-icons/react` icons and dark mode variants.
      - Added automated frontend test suite in `tests/phase2.test.mjs` (100% passing).
 
+   - **Appwrite Cloud Infrastructure & Provisioning (`scripts/setup-appwrite.mjs`):**
+     - Created automated idempotent provisioner for Appwrite Cloud.
+     - Database `campusvoice` (Name: `CampusVoice`) created.
+     - Collections created with strict schemas and empty ACL permissions (`$permissions = []`):
+       - `departments`: `code` (unique index), `name`, `is_active`; seeded with `06` (Civil Department) and `07` (Computer Department).
+       - `profiles`: `user_id` (index), `auth_user_id`, `email`, `name`, `display_name`, `enrollment_no` (index), `department_code` (index), `department_name`, `role`, `is_locked`, `profile_status`, `created_at`, `updated_at`.
+       - `complaints`: `student_user_id` (index), `student_name`, `student_enrollment_no`, `department_code` (index), `department_name`, `title`, `location`, `description`, `priority`, `issue_type` (index), `status` (index), `official_response`, `resolved_at`, `support_count`, `attachment_file_id`, `created_at`, `updated_at`.
+       - `complaint_supports`: `complaint_id` (index), `user_id` (index), `supported_at`.
+     - Storage bucket `complaint-attachments` created with 10MB file limit and allowed extensions (`jpg`, `jpeg`, `png`, `pdf`, `webp`).
+     - Deployed `campusvoice-api` router to Appwrite Cloud with `Any` execute access and environment variables configured.
+
 ---
 
 ## C. Verification Results
