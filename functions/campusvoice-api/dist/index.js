@@ -1,5 +1,6 @@
 import { verifyCaller } from './auth.js';
 import { handleGetProfile, handleCompleteOnboarding, handleListDepartments, } from './handlers/profile.js';
+import { handleCreateComplaint, handleListComplaints, handleGetComplaint, handleSupportComplaint, handleGetSupportState, handleGetAdminDashboard, handleListAdminComplaints, handleUpdateAdminComplaint, } from './handlers/complaints.js';
 export default async function main(context) {
     const { req, res, log } = context;
     log(`[campusvoice-api] Incoming execution: ${req.method} ${req.path}`);
@@ -39,7 +40,7 @@ export default async function main(context) {
         return handleListDepartments(context);
     }
     // Protected Actions requiring verified caller
-    const { caller, error: authError, statusCode } = await verifyCaller(context);
+    const { caller, error: authError, statusCode } = await verifyCaller(context, payload);
     if (!caller) {
         return res.json({
             success: false,
@@ -52,6 +53,22 @@ export default async function main(context) {
             return handleGetProfile(context, caller);
         case 'complete-onboarding':
             return handleCompleteOnboarding(context, caller, data);
+        case 'create-complaint':
+            return handleCreateComplaint(context, caller, data);
+        case 'list-complaints':
+            return handleListComplaints(context, caller, data);
+        case 'get-complaint':
+            return handleGetComplaint(context, caller, data);
+        case 'support-complaint':
+            return handleSupportComplaint(context, caller, data);
+        case 'get-support-state':
+            return handleGetSupportState(context, caller, data);
+        case 'get-admin-dashboard':
+            return handleGetAdminDashboard(context, caller);
+        case 'list-admin-complaints':
+            return handleListAdminComplaints(context, caller, data);
+        case 'update-admin-complaint':
+            return handleUpdateAdminComplaint(context, caller, data);
         default:
             return res.json({
                 success: false,

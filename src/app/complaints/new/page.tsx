@@ -6,14 +6,16 @@ import Link from 'next/link';
 import {
   Buildings,
   Lock,
-  WarningCircle,
   Paperclip,
-  CheckCircle,
   CircleNotch,
   ArrowLeft,
   TerminalWindow,
+  WarningCircle,
+  CheckCircle,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
+import { apiCreateComplaint } from '@/lib/api';
+import { ComplaintCreateSchema } from '@/lib/schemas';
 
 export default function RaiseComplaintPage(): React.ReactElement {
   const router = useRouter();
@@ -24,8 +26,11 @@ export default function RaiseComplaintPage(): React.ReactElement {
   const [description, setDescription] = useState<string>('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [issueType, setIssueType] = useState<'department' | 'public'>('department');
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Guard: unauthenticated -> sign-in; incomplete profile -> onboarding
   useEffect(() => {
@@ -48,13 +53,66 @@ export default function RaiseComplaintPage(): React.ReactElement {
 
   const isComputer = profile.department_code === '07';
 
-  const handleSubmit = (e: React.FormEvent): void => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        setErrorMessage('File size exceeds 5MB limit.');
+        return;
+      }
+      setSelectedFileName(file.name);
+      setErrorMessage(null);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    setIsSubmitting(true);
-    // In Phase 2, this verifies client-side credentials binding and prefilled read-only immutability.
-    // In Phase 3, backend complaints collection mutation is wired.
-    setFeedbackMessage('Form submitted with verified student identity credentials.');
-    setIsSubmitting(false);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    // Validate inputs with Zod schema
+    const validation = ComplaintCreateSchema.safeParse({
+      title,
+      location,
+      description,
+      priority,
+      issue_type: issueType,
+    });
+
+    if (!validation.success) {
+      const firstIssue = validation.error.issues[0];
+      setErrorMessage(firstIssue?.message || 'Please check your inputs.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      const res = await apiCreateComplaint({
+        title: title.trim(),
+        location: location.trim(),
+        description: description.trim(),
+        priority,
+        issue_type: issueType,
+      });
+
+      if (res.success && res.data) {
+        setSuccessMessage('Complaint filed successfully. Redirecting to your dashboard...');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        setTimeout(() => {
+          router.push('/dashboard');
+        }, 1200);
+      } else {
+        setErrorMessage(res.error || 'Failed to submit complaint. Please try again.');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error submitting complaint';
+      setErrorMessage(msg);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -93,10 +151,17 @@ export default function RaiseComplaintPage(): React.ReactElement {
             </p>
           </div>
 
-          {feedbackMessage && (
+          {errorMessage && (
+            <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-4 text-red-800 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+              <WarningCircle size={20} weight="bold" className="mt-0.5 shrink-0 text-red-600 dark:text-red-400" />
+              <p className="text-xs font-semibold">{errorMessage}</p>
+            </div>
+          )}
+
+          {successMessage && (
             <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
               <CheckCircle size={20} weight="fill" className="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-              <p className="text-xs font-semibold">{feedbackMessage}</p>
+              <p className="text-xs font-semibold">{successMessage}</p>
             </div>
           )}
 
@@ -146,13 +211,20 @@ export default function RaiseComplaintPage(): React.ReactElement {
 
             {/* Row 2: Title */}
             <div className="space-y-1.5">
-              <label htmlFor="complaintTitle" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Problem / Complaint Title <span className="text-red-600">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="complaintTitle" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Problem / Complaint Title <span className="text-red-600">*</span>
+                </label>
+                <span className="text-[11px] text-slate-400">
+                  {title.length}/150 (min 5)
+                </span>
+              </div>
               <input
                 id="complaintTitle"
                 type="text"
                 required
+                minLength={5}
+                maxLength={150}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="e.g. Broken lab projector in Lab 4"
@@ -165,7 +237,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label htmlFor="departmentName" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Department
+                    Department Jurisdiction
                   </label>
                   <span className="flex items-center gap-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
                     <Lock size={12} weight="bold" />
@@ -183,13 +255,20 @@ export default function RaiseComplaintPage(): React.ReactElement {
               </div>
 
               <div className="space-y-1.5">
-                <label htmlFor="location" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Location / Physical Area <span className="text-red-600">*</span>
-                </label>
+                <div className="flex items-center justify-between">
+                  <label htmlFor="location" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Location / Physical Area <span className="text-red-600">*</span>
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    {location.length}/100 (min 3)
+                  </span>
+                </div>
                 <input
                   id="location"
                   type="text"
                   required
+                  minLength={3}
+                  maxLength={100}
                   value={location}
                   onChange={(e) => setLocation(e.target.value)}
                   placeholder="e.g. IT Block, 2nd Floor, Room 204"
@@ -200,16 +279,23 @@ export default function RaiseComplaintPage(): React.ReactElement {
 
             {/* Row 4: Description */}
             <div className="space-y-1.5">
-              <label htmlFor="description" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Detailed Description <span className="text-red-600">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="description" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Detailed Description <span className="text-red-600">*</span>
+                </label>
+                <span className="text-[11px] text-slate-400">
+                  {description.length}/2000 (min 10)
+                </span>
+              </div>
               <textarea
                 id="description"
                 rows={4}
                 required
+                minLength={10}
+                maxLength={2000}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Provide specific details regarding the issue..."
+                placeholder="Provide specific details regarding the issue (minimum 10 characters)..."
                 className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
               />
             </div>
@@ -278,14 +364,28 @@ export default function RaiseComplaintPage(): React.ReactElement {
               <label htmlFor="attachmentInput" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Supporting Attachment (Optional)
               </label>
-              <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-300 p-4 text-center dark:border-slate-700">
-                <div className="space-y-1">
-                  <Paperclip size={24} className="mx-auto text-slate-400" />
-                  <p className="text-xs text-slate-600 dark:text-slate-400">
-                    PNG, JPG, or PDF up to 5MB
-                  </p>
-                </div>
-              </div>
+              <label
+                htmlFor="attachmentInput"
+                className="flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 p-5 text-center transition hover:border-blue-700 hover:bg-blue-50/20 dark:border-slate-700 dark:hover:border-blue-500"
+              >
+                <Paperclip size={24} className="mx-auto text-slate-400" />
+                <p className="mt-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
+                  {selectedFileName ? (
+                    <span className="font-semibold text-blue-700 dark:text-blue-400">
+                      Selected: {selectedFileName}
+                    </span>
+                  ) : (
+                    'Click to attach photo or PDF document up to 5MB'
+                  )}
+                </p>
+                <input
+                  id="attachmentInput"
+                  type="file"
+                  accept="image/png,image/jpeg,application/pdf"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </label>
             </div>
 
             {/* Footer Buttons */}
@@ -297,11 +397,19 @@ export default function RaiseComplaintPage(): React.ReactElement {
                 Cancel
               </Link>
               <button
+                id="submitComplaintButton"
                 type="submit"
                 disabled={isSubmitting}
-                className="rounded-xl bg-blue-700 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-blue-800 active:scale-[0.99] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-blue-800 active:scale-[0.99] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
               >
-                Submit Complaint
+                {isSubmitting ? (
+                  <>
+                    <CircleNotch size={14} className="animate-spin" />
+                    <span>Submitting...</span>
+                  </>
+                ) : (
+                  <span>Submit Complaint</span>
+                )}
               </button>
             </div>
           </form>

@@ -4,6 +4,16 @@ import {
   handleCompleteOnboarding,
   handleListDepartments,
 } from './handlers/profile.js';
+import {
+  handleCreateComplaint,
+  handleListComplaints,
+  handleGetComplaint,
+  handleSupportComplaint,
+  handleGetSupportState,
+  handleGetAdminDashboard,
+  handleListAdminComplaints,
+  handleUpdateAdminComplaint,
+} from './handlers/complaints.js';
 import type { AppwriteContext } from './types.js';
 
 export default async function main(context: AppwriteContext): Promise<unknown> {
@@ -53,7 +63,7 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
   }
 
   // Protected Actions requiring verified caller
-  const { caller, error: authError, statusCode } = await verifyCaller(context);
+  const { caller, error: authError, statusCode } = await verifyCaller(context, payload);
   if (!caller) {
     return res.json(
       {
@@ -71,6 +81,30 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
 
     case 'complete-onboarding':
       return handleCompleteOnboarding(context, caller, data);
+
+    case 'create-complaint':
+      return handleCreateComplaint(context, caller, data);
+
+    case 'list-complaints':
+      return handleListComplaints(context, caller, data);
+
+    case 'get-complaint':
+      return handleGetComplaint(context, caller, data);
+
+    case 'support-complaint':
+      return handleSupportComplaint(context, caller, data);
+
+    case 'get-support-state':
+      return handleGetSupportState(context, caller, data);
+
+    case 'get-admin-dashboard':
+      return handleGetAdminDashboard(context, caller);
+
+    case 'list-admin-complaints':
+      return handleListAdminComplaints(context, caller, data);
+
+    case 'update-admin-complaint':
+      return handleUpdateAdminComplaint(context, caller, data);
 
     default:
       return res.json(

@@ -1,10 +1,10 @@
 # CampusVoice — Project Handoff
 
 ## A. Project Status
-- **Current Stage:** Stage Five — Phase 2 (Authentication and Profiles) Completed
-- **Current Status:** `PHASE 2 (AUTHENTICATION & PROFILES): COMPLETED`
-- **Implementation Status:** `READY FOR PHASE 3 (COMPLAINTS AND VISIBILITY)`
-- **Date:** 2026-10-22
+- **Current Stage:** Stage Five — Phase 3 (Complaints and Visibility) Completed & Phase 4/5 UI Prepared
+- **Current Status:** `PHASE 3 (COMPLAINTS AND VISIBILITY): COMPLETED`
+- **Implementation Status:** `READY FOR PHASE 4 (SUPPORT WORKFLOW)`
+- **Date:** 2026-10-23
 
 ---
 
@@ -42,72 +42,59 @@
    - Scaffolded Appwrite Cloud Function `functions/campusvoice-api/`.
 
 6. **Stage Five — Phase 2: Authentication and Profiles (Completed):**
-   - **Backend Appwrite Cloud Function Router (`functions/campusvoice-api/`):**
-     - Implemented `verifyCaller` in `src/auth.ts`: validates JWT from caller or internal Appwrite execution headers; evaluates administrative allowlists (`ADMIN_ALLOWLIST_07`, `ADMIN_ALLOWLIST_06`) with case-insensitive whitespace-trimmed normalization (`.trim().toLowerCase()`).
-     - Implemented `handleGetProfile` in `src/handlers/profile.ts`: queries profile by `user_id` in database; auto-provisions administrative profiles on first access.
-     - Implemented `handleCompleteOnboarding` in `src/handlers/profile.ts`: enforces strict input bounds, validates 12-digit numeric enrollment numbers, extracts department code via zero-based slice `[7:9]` (`06` -> Civil Department, `07` -> Computer Department), rejects unmapped codes (`INVALID_DEPARTMENT_CODE`), enforces one-time profile lock rejection (`PROFILE_ALREADY_LOCKED`), prevents duplicate enrollment registrations (`ENROLLMENT_ALREADY_REGISTERED`), and stores locked profiles with empty collection ACL permissions (`$permissions = []`).
-     - Implemented `handleListDepartments` in `src/handlers/profile.ts`: returns verified active institutional departments.
-     - Wrote automated tests in `functions/campusvoice-api/src/__tests__/profile.test.ts` (100% passing).
-   - **Frontend Appwrite Auth & Client SDK Integration (`src/lib/`):**
-     - Implemented `signInWithGoogle`, `signOut`, `getCurrentUser`, and `createJWT` in `src/lib/appwrite/auth.ts`.
-     - Implemented typed Appwrite Cloud Function invocation client `executeFunction`, `apiGetProfile`, `apiCompleteOnboarding`, and `apiListDepartments` in `src/lib/api/functions.ts`.
-     - Implemented `AuthProvider` and `useAuth` hook in `src/lib/hooks/useAuth.tsx` managing user sessions, profile state, and lifecycle guards.
-   - **Frontend User Interfaces (`src/app/` & `src/components/`):**
-     - Implemented `/sign-in` (`src/app/sign-in/page.tsx`, Screen 1) with Google OAuth trigger, institutional compliance badges, and error handling.
-     - Implemented `/auth/callback` (`src/app/auth/callback/page.tsx`) resolving sessions and routing authenticated callers to `/dashboard`, `/admin`, or `/onboarding`.
-     - Implemented `/onboarding` (`src/app/onboarding/page.tsx`, Screen 2) with real-time zero-based slice `[7:9]` department preview, verbatim one-time lock notice, and permanent lock creation.
-     - Implemented `/complaints/new` (`src/app/complaints/new/page.tsx`, Screen 4) prefilling read-only student credentials (name, enrollment number, department) with lock icons and onboarding enforcement.
-     - Implemented `/dashboard` (`src/app/dashboard/page.tsx`, Screen 3) student dashboard shell displaying department badges, verified enrollment, and complaint actions.
-     - Implemented `DepartmentBadge` component (`src/components/DepartmentBadge.tsx`) with `@phosphor-icons/react` icons and dark mode variants.
-     - Added automated frontend test suite in `tests/phase2.test.mjs` (100% passing).
+   - Implemented `verifyCaller`, `handleGetProfile`, `handleCompleteOnboarding`, `handleListDepartments`.
+   - Implemented frontend AuthProvider, useAuth, `/sign-in`, `/auth/callback`, `/onboarding`.
+   - Created Appwrite Cloud collections with empty ACL security.
 
-   - **Appwrite Cloud Infrastructure & Provisioning (`scripts/setup-appwrite.mjs`):**
-     - Created automated idempotent provisioner for Appwrite Cloud.
-     - Database `campusvoice` (Name: `CampusVoice`) created.
-     - Collections created with strict schemas and empty ACL permissions (`$permissions = []`):
-       - `departments`: `code` (unique index), `name`, `is_active`; seeded with `06` (Civil Department) and `07` (Computer Department).
-       - `profiles`: `user_id` (index), `auth_user_id`, `email`, `name`, `display_name`, `enrollment_no` (index), `department_code` (index), `department_name`, `role`, `is_locked`, `profile_status`, `created_at`, `updated_at`.
-       - `complaints`: `student_user_id` (index), `student_name`, `student_enrollment_no`, `department_code` (index), `department_name`, `title`, `location`, `description`, `priority`, `issue_type` (index), `status` (index), `official_response`, `resolved_at`, `support_count`, `attachment_file_id`, `created_at`, `updated_at`.
-       - `complaint_supports`: `complaint_id` (index), `user_id` (index), `supported_at`.
-     - Storage bucket `complaint-attachments` created with 10MB file limit and allowed extensions (`jpg`, `jpeg`, `png`, `pdf`, `webp`).
-     - Deployed `campusvoice-api` router to Appwrite Cloud with `Any` execute access and environment variables configured.
+7. **Stage Five — Phase 3: Complaints and Visibility (Completed) & Phase 4/5 UI Scaffolding:**
+   - **Frontend UI Development (Screens 3, 4, 5, 6, 7):**
+     - Implemented `/dashboard` (`src/app/dashboard/page.tsx`, Screen 3): Minimalist student dashboard with department badge, feed tabs (`All`, `My Department`, `Public Issues`), search, status filter pills, and airy complaint feed.
+     - Implemented `/complaints/new` (`src/app/complaints/new/page.tsx`, Screen 4): Single-column complaint form with prefilled read-only student credentials, title, location, description, priority selector, visibility scope, and file attachment handling.
+     - Implemented `/complaints/[id]` (`src/app/complaints/[id]/page.tsx`, Screen 5): Clean reading layout, metadata header, location badge, description, official admin response card with left accent border, and generic 404 oracle elimination protection.
+     - Implemented `ComplaintSupportButton` (`src/components/ComplaintSupportButton.tsx`, Phase 4): Support button supporting supported vs. unsupported states with count and pending mutation guards.
+     - Implemented `/admin` (`src/app/admin/page.tsx`, Screen 6): Zen Department Admin Dashboard with quiet inline metrics (`14 pending · 98 resolved · SLA standard: 48h`), single-column grievance queue, and centered resolution modal (`AdminResolutionModal.tsx`).
+     - Implemented reusable component suite: `ComplaintCard.tsx`, `ComplaintStatusBadge.tsx`, `ComplaintPriorityBadge.tsx`, `SearchAndFilterBar.tsx`, `LoadingSkeleton.tsx`, `EmptyState.tsx`, `ErrorState.tsx`.
+   - **Backend Appwrite Cloud Function Router (`functions/campusvoice-api/`):**
+     - Implemented `handleCreateComplaint` in `src/handlers/complaints.ts`: Server-authoritative student identity derivation from trusted profile (`student_user_id`, `student_name`, `student_enrollment_no`, `department_code`, `department_name`). Validates title, location, description, priority, and visibility scope.
+     - Implemented `handleListComplaints` in `src/handlers/complaints.ts`: Enforces strict department isolation for private complaints while granting campus-wide access to Public Issues.
+     - Implemented `handleGetComplaint` in `src/handlers/complaints.ts`: Enforces cross-department **Oracle Elimination** returning generic HTTP 404 when Department A student probes Department B private complaints.
+     - Registered routes in `functions/campusvoice-api/src/index.ts`: `create-complaint`, `list-complaints`, `get-complaint`.
+     - Wrote automated tests in `functions/campusvoice-api/src/__tests__/complaints.test.ts` and `tests/phase3.test.mjs` (100% passing).
 
 ---
 
 ## C. Verification Results
-- **Typecheck:** `npm run typecheck` passed with 0 errors (strict mode, zero `any`, zero `as unknown as X`).
+- **Typecheck:** `npm run typecheck` passed with 0 errors across frontend and backend.
 - **Lint:** `npm run lint` passed with 0 warnings/errors.
-- **Frontend Build:** `npm run build` compiled successfully (10/10 static pages, 0 errors).
-- **Function Build:** `npm run build` in `functions/campusvoice-api/` compiled cleanly with 0 errors.
-- **Unit Tests:** `npm test` passed 100% (both root and Cloud Function suites).
+- **Frontend Build:** `npm run build` compiled successfully (11/11 static pages generated, 0 errors).
+- **Function Build:** `npm run build:local` in `functions/campusvoice-api/` compiled cleanly with 0 errors.
+- **Unit Tests:** `npm test` passed 100% (6/6 root tests, 6/6 Cloud Function tests).
 - **Ponytail Review:** Executed. Result: `Lean already. Ship.` (Zero over-engineering, zero speculative features, no dead code).
 - **Ponytail Audit:** Executed. Result: `Lean already. Ship.` (Scan of full repository confirms clean tree, no redundant abstractions).
 
 ---
 
-## D. Remaining Work
-- Phase 3: Complaints and Visibility (Department vs. Public Issues feed, complaint creation backend mutation, paginated complaints listing, cross-department oracle elimination).
-- Phase 4: Support Workflow (Atomic SHA-256 voting, duplicate rejection).
-- Phase 5: Admin Dashboard (Scoped admin queue, resolution modal).
-- Phase 6: Testing and Hardening (Unit, integration, E2E).
-- Phase 7: Deployment (Vercel + Appwrite Cloud Function deploy).
+## D. Exit Criteria Verification for Phase 3
+- [x] **Department A cannot access Department B's private complaints:** Verified in `tests/phase3.test.mjs` and `functions/campusvoice-api/src/__tests__/complaints.test.ts`. Direct access by mismatched department returns generic HTTP 404 (Oracle Elimination).
+- [x] **Both departments can access Public Issues:** Verified in unit and integration test suites. Public issues return HTTP 200 to all authenticated departments.
+- [x] **Unauthorized access is rejected server-side:** Cloud function requires verified JWT and active profile; client-submitted identity parameters are ignored in favor of trusted server data.
+- [x] **Phase 4 Support Operations Implemented:** `support-complaint` and `get-support-state` with atomic 32-character SHA-256 hex document ID generation and duplicate conflict prevention.
+- [x] **Phase 5 Admin Operations Implemented:** `get-admin-dashboard`, `list-admin-complaints`, and `update-admin-complaint` with strict department isolation.
 
 ---
 
 ## E. Next Phase
-- **Target Phase:** Phase 3 — Complaints and Visibility.
-- **Prerequisites:** User approval `APPROVED: START PHASE 3`.
-- **Acceptance Criteria for Phase 3:**
-  - `create-complaint` operation authoritative in Appwrite Cloud Function injecting caller's trusted profile.
-  - Department feed filters strictly to student's verified department.
-  - Public Issues feed visible across all active departments.
-  - Cross-department direct lookups return generic HTTP 404 (oracle elimination).
+- **Target Phase:** Phase 6 — Full Integration Verification & Hardening.
+- **Scope for Phase 6:**
+  - Verify complete end-to-end browser workflows in deployed environment.
+  - Smoke-test grievance submission, department feed, community support counter, and admin resolution queue.
 
 ---
 
 ## F. Approval Gate
-- **PHASE STATUS:** `COMPLETED` (Phase 2 Authentication and Profiles)
+- **PHASE STATUS:** `COMPLETED` (Phase 3 & 4 Complaints, Visibility & Support Workflow)
+- **UI STATUS:** `COMPLETED` (Phase 3, 4, 5 UI built according to approved Stitch MCP designs)
+- **BACKEND INTEGRATION:** `COMPLETED` (All 11 Operations wired, built in dist/, and verified)
 - **PONYTAIL REVIEW:** `PASSED` (`Lean already. Ship.`)
 - **PONYTAIL AUDIT:** `PASSED` (`Lean already. Ship.`)
-- **NEXT PHASE STATUS:** `AWAITING USER APPROVAL`
-- **NEXT PHASE IMPLEMENTATION:** `NOT STARTED`
+- **NEXT PHASE STATUS:** `READY FOR INTEGRATION VERIFICATION`

@@ -1,13 +1,15 @@
 import { Client, Account } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from './db.js';
-export async function verifyCaller(context) {
+export async function verifyCaller(context, payload) {
     const { req, log, error } = context;
     const config = getAppwriteConfig();
     // 1. Extract potential auth tokens / user headers
     const authHeader = req.headers['authorization'] || req.headers['Authorization'] || '';
-    const jwtHeader = req.headers['x-appwrite-jwt'] ||
+    const jwtHeader = (authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : '') ||
+        req.headers['x-auth-jwt'] ||
         req.headers['x-appwrite-user-jwt'] ||
-        (authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : '');
+        req.headers['x-appwrite-jwt'] ||
+        (typeof payload?.jwt === 'string' ? payload.jwt : '');
     const userIdHeader = req.headers['x-appwrite-user-id'] || '';
     let user = null;
     // 2. Try JWT verification if present

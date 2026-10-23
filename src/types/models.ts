@@ -46,6 +46,8 @@ export interface Complaint {
   support_count: number;
   attachment_file_id?: string;
   attachment_url?: string;
+  created_at?: string;
+  updated_at?: string;
   $createdAt: string;
   $updatedAt: string;
 }

@@ -3,7 +3,8 @@ import { getAppwriteConfig, getServerClient } from './db.js';
 import type { AppwriteContext, AuthenticatedCaller, DepartmentCode, UserRole } from './types.js';
 
 export async function verifyCaller(
-  context: AppwriteContext
+  context: AppwriteContext,
+  payload?: Record<string, unknown>
 ): Promise<{ caller: AuthenticatedCaller | null; error?: string; statusCode?: number }> {
   const { req, log, error } = context;
   const config = getAppwriteConfig();
@@ -11,9 +12,11 @@ export async function verifyCaller(
   // 1. Extract potential auth tokens / user headers
   const authHeader = req.headers['authorization'] || req.headers['Authorization'] || '';
   const jwtHeader =
-    req.headers['x-appwrite-jwt'] ||
+    (authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : '') ||
+    req.headers['x-auth-jwt'] ||
     req.headers['x-appwrite-user-jwt'] ||
-    (authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : '');
+    req.headers['x-appwrite-jwt'] ||
+    (typeof payload?.jwt === 'string' ? payload.jwt : '');
   const userIdHeader = req.headers['x-appwrite-user-id'] || '';
 
   let user: { $id: string; email: string; name: string } | null = null;
