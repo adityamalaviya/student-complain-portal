@@ -1,9 +1,9 @@
 # CampusVoice — Project Handoff
 
 ## A. Project Status
-- **Current Stage:** Stage Seven — Phase 7 (Deployment & Production Verification) Completed
-- **Current Status:** `ALL PHASES (1–7): COMPLETED & PRODUCTION READY`
-- **Implementation Status:** `READY FOR PRODUCTION LAUNCH`
+- **Current Stage:** Stage Six — Phase 6 (Testing & Hardening) Completed
+- **Current Status:** `PHASES 1–6: COMPLETED & VERIFIED`
+- **Implementation Status:** `READY FOR PHASE 7 (DEPLOYMENT & PRODUCTION LAUNCH)`
 - **Date:** 2026-10-25
 
 ---
@@ -131,30 +131,26 @@
 - [x] **Phase 4 (Support Workflow):** Deterministic 32-char SHA-256 document ID prevents duplicate votes; repeated attempts return HTTP 409 without increasing count; self-support prevented; support does not create a complaint; UI support toggle with rollback on error.
 - [x] **Phase 5 (Admin Resolution):** Admin A can manage own department grievances and Public Issues, but cannot read or mutate Department B private complaints (returns generic HTTP 404); metrics dashboard and resolution modal active.
 - [x] **Phase 6 (Testing & Hardening):** Full multi-role end-to-end lifecycle verification, onboarding format validation & fallback rejection, Oracle Elimination across student & admin roles, deterministic SHA-256 support uniqueness, secrets protection audit, and live browser DevTools inspection.
-- [x] **Phase 7 (Deployment & Production Verification):** Vercel deployment configuration (`vercel.json`), production security headers, Appwrite Function automated packager (`scripts/package-function.mjs`), automated production smoke test suite (`scripts/smoke-test-production.mjs`), and comprehensive production deployment runbook documented.
 
 ---
 
-## E. Production Verification & Tooling
+## E. Next Phase
 
-| Capability | Tool / Script | Status | Description |
-|---|---|---|---|
-| **Vercel Framework & Security Headers** | `vercel.json` | **VERIFIED** | HSTS, nosniff, frame-options DENY, strict referrer |
-| **Function Packaging** | `npm run package:function` | **VERIFIED** | Produces `dist/campusvoice-api.tar.gz` ready for Appwrite upload |
-| **Production Build** | `npm run build` | **PASSED (11/11)** | Clean Next.js 15 production build with zero warnings |
-| **Production Smoke Runner** | `npm run test:smoke` | **PASSED** | Automated endpoint health, security headers & routing checks |
-| **Typecheck & Tests** | `npm run typecheck`, `npm run test` | **PASSED (23/23)** | Zero type errors, all unit/integration tests passing |
+- **Target Phase:** Phase 7 — Deployment & Production Verification
+- **Scope for Phase 7:**
+  - Deploy frontend to Vercel.
+  - Deploy Appwrite Cloud Function `campusvoice-api` to Appwrite Cloud with required execution permissions and production environment variables.
+  - Configure production CORS, Appwrite allowed origins, and Google OAuth production redirect URLs.
+  - Run production smoke tests against deployed URLs.
+  - Document deployment URLs and known operational notes in README.
 
 ---
 
 ## F. Approval Gate
 
-- **PROJECT STATUS:** `PRODUCTION READY` (Phases 1 through 7 fully implemented and verified)
+- **PHASE STATUS:** `COMPLETED` (Phases 1 through 6 fully implemented and verified)
 - **UI STATUS:** `COMPLETED` (All 7 Stitch MCP approved screens implemented, verified, and route-protected)
-- **BACKEND INTEGRATION:** `COMPLETED` (All 11 Appwrite Cloud Function operations deployed and verified)
+- **BACKEND INTEGRATION:** `COMPLETED` (All 11 Appwrite Cloud Function operations deployed and verified live)
 - **E2E TESTS:** `PASSED (23/23 Root Tests, 9/9 Function Tests, 9/9 Live Backend Checks)`
-- **BUILD STATUS:** `PASSED (Next.js production build 11/11 routes optimized)`
-- **SMOKE TEST SUITE:** `READY (npm run test:smoke -- --url <production-url>)`
-- **RELEASE STATUS:** `READY FOR PRODUCTION LAUNCH`
-
+- **NEXT PHASE STATUS:** `READY FOR PHASE 7`
 

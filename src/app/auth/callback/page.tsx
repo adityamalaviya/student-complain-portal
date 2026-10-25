@@ -40,21 +40,27 @@ export default function AuthCallbackPage(): React.ReactElement {
           const profileResponse = await apiGetProfile();
           if (isCancelled) return;
 
+          console.log('[auth-callback] apiGetProfile response:', profileResponse);
+
           if (profileResponse.success && profileResponse.data) {
             const { profile, is_onboarded } = profileResponse.data;
 
             if (profile?.role === 'department_admin') {
+              console.log('[auth-callback] Admin verified, routing to /admin');
               router.replace('/admin');
               return;
             }
 
             if (is_onboarded && profile?.is_locked) {
+              console.log('[auth-callback] Student verified, routing to /dashboard');
               router.replace('/dashboard');
               return;
             }
+          } else if (!profileResponse.success) {
+            console.warn('[auth-callback] Profile query returned failure:', profileResponse.error);
           }
         } catch (profileErr) {
-          console.warn('[auth-callback] Profile check notice, proceeding to onboarding:', profileErr);
+          console.warn('[auth-callback] Profile check exception, proceeding to onboarding:', profileErr);
         }
 
         // First-time student or profile not yet locked: route to onboarding

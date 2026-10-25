@@ -19,6 +19,19 @@ export async function handleGetProfile(
 
     if (listResult.total > 0 && listResult.documents[0]) {
       const doc = listResult.documents[0];
+      const isCallerAdmin = caller.role === 'department_admin';
+      const effectiveRole: 'student' | 'department_admin' = isCallerAdmin
+        ? 'department_admin'
+        : (doc.role as 'student' | 'department_admin') || 'student';
+      const effectiveDeptCode: DepartmentCode =
+        isCallerAdmin && caller.department_code
+          ? caller.department_code
+          : (doc.department_code as DepartmentCode) || '07';
+      const effectiveDeptName: string =
+        isCallerAdmin && caller.department_name
+          ? caller.department_name
+          : (doc.department_name as string) || '';
+
       const profile: UserProfile = {
         $id: doc.$id,
         user_id: (doc.user_id as string) || (doc.auth_user_id as string) || caller.id,
@@ -27,14 +40,34 @@ export async function handleGetProfile(
         name: (doc.name as string) || (doc.display_name as string) || caller.name,
         display_name: (doc.display_name as string) || (doc.name as string) || caller.name,
         enrollment_no: (doc.enrollment_no as string) || '',
-        department_code: (doc.department_code as DepartmentCode) || caller.department_code || '07',
-        department_name: (doc.department_name as string) || caller.department_name || '',
-        role: (doc.role as 'student' | 'department_admin') || caller.role,
+        department_code: effectiveDeptCode,
+        department_name: effectiveDeptName,
+        role: effectiveRole,
         is_locked: typeof doc.is_locked === 'boolean' ? doc.is_locked : true,
         profile_status: (doc.profile_status as 'complete' | 'incomplete') || 'complete',
         created_at: (doc.created_at as string) || doc.$createdAt,
         updated_at: (doc.updated_at as string) || doc.$updatedAt,
       };
+
+      // Auto-elevate existing document if caller is verified admin in allowlist
+      if (isCallerAdmin && doc.role !== 'department_admin') {
+        try {
+          await databases.updateDocument(
+            config.databaseId,
+            config.profilesCollectionId,
+            doc.$id,
+            {
+              role: 'department_admin',
+              department_code: effectiveDeptCode,
+              department_name: effectiveDeptName,
+              updated_at: new Date().toISOString(),
+            }
+          );
+          log(`[profile] Synchronized existing document ${doc.$id} to department_admin`);
+        } catch (syncErr) {
+          log(`[profile] Notice: Could not sync admin role to existing doc: ${String(syncErr)}`);
+        }
+      }
 
       return res.json(
         {
