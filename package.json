@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
@@ -14,11 +14,9 @@
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
     "appwrite": "^16.1.0",
-    "clsx": "^2.1.1",
     "next": "^15.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tailwind-merge": "^2.5.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {

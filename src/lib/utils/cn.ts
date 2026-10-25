@@ -1,6 +1,5 @@
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-export function cn(...inputs: ClassValue[]): string {
-  return twMerge(clsx(inputs));
+// ponytail: native class joining without clsx/tailwind-merge
+export function cn(...inputs: (string | boolean | undefined | null)[]): string {
+  return inputs.filter(Boolean).join(' ');
 }
+
