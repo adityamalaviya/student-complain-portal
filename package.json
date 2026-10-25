@@ -9,6 +9,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/**/*.test.mjs",
+    "test:smoke": "node scripts/smoke-test-production.mjs",
+    "package:function": "node scripts/package-function.mjs",
     "setup:appwrite": "node scripts/setup-appwrite.mjs"
   },
   "dependencies": {

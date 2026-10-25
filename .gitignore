@@ -36,3 +36,5 @@ next-env.d.ts
 
 # functions build artifacts
 functions/*/node_modules
+functions/*/dist
+/dist
