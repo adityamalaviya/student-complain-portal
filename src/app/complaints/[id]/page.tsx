@@ -97,6 +97,10 @@ export default function ComplaintDetailPage(): React.ReactElement {
   const handleSupportClick = async (_id?: string): Promise<void> => {
     if (hasSupported || !complaintId) return;
 
+    // Snapshot previous state for rollback
+    const prevSupported = hasSupported;
+    const prevCount = supportCount;
+
     // Optimistic UI update
     setHasSupported(true);
     setSupportCount((prev) => prev + 1);
@@ -106,10 +110,22 @@ export default function ComplaintDetailPage(): React.ReactElement {
       if (res.success && res.data) {
         setSupportCount(res.data.support_count);
         setHasSupported(res.data.has_supported);
-      } else if (res.error) {
-        console.warn('[handleSupportClick]', res.error);
+      } else {
+        // Rollback state
+        if (res.code === 'ALREADY_SUPPORTED') {
+          setHasSupported(true);
+          setSupportCount(prevCount);
+        } else {
+          setHasSupported(prevSupported);
+          setSupportCount(prevCount);
+        }
+        if (res.error) {
+          console.warn('[handleSupportClick]', res.error);
+        }
       }
     } catch (err: unknown) {
+      setHasSupported(prevSupported);
+      setSupportCount(prevCount);
       console.warn('[handleSupportClick] Network error:', err);
     }
   };

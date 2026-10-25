@@ -104,10 +104,14 @@ export default function StudentDashboardPage(): React.ReactElement {
     if (userSupportedIds.has(complaintId)) return;
 
     // Optimistic local state update
+    const prevSupported = userSupportedIds.has(complaintId);
+    const target = complaints.find((c) => c.$id === complaintId);
+    const prevCount = target ? (target.support_count || 0) : 0;
+
     setUserSupportedIds((prev) => new Set(prev).add(complaintId));
     setComplaints((prev) =>
       prev.map((c) =>
-        c.$id === complaintId ? { ...c, support_count: (c.support_count || 0) + 1 } : c
+        c.$id === complaintId ? { ...c, support_count: prevCount + 1 } : c
       )
     );
 
@@ -121,10 +125,42 @@ export default function StudentDashboardPage(): React.ReactElement {
               : c
           )
         );
-      } else if (res.error) {
-        console.warn('[handleSupportComplaint]', res.error);
+      } else {
+        if (res.code === 'ALREADY_SUPPORTED') {
+          // Keep supported state, restore previous count
+          setComplaints((prev) =>
+            prev.map((c) =>
+              c.$id === complaintId ? { ...c, support_count: prevCount } : c
+            )
+          );
+        } else {
+          // Revert both supported state and count
+          setUserSupportedIds((prev) => {
+            const next = new Set(prev);
+            if (!prevSupported) next.delete(complaintId);
+            return next;
+          });
+          setComplaints((prev) =>
+            prev.map((c) =>
+              c.$id === complaintId ? { ...c, support_count: prevCount } : c
+            )
+          );
+        }
+        if (res.error) {
+          console.warn('[handleSupportComplaint]', res.error);
+        }
       }
     } catch (err: unknown) {
+      setUserSupportedIds((prev) => {
+        const next = new Set(prev);
+        if (!prevSupported) next.delete(complaintId);
+        return next;
+      });
+      setComplaints((prev) =>
+        prev.map((c) =>
+          c.$id === complaintId ? { ...c, support_count: prevCount } : c
+        )
+      );
       console.warn('[handleSupportComplaint] Network error:', err);
     }
   };

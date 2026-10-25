@@ -381,6 +381,20 @@ export async function handleSupportComplaint(context, caller, data) {
     }
     try {
         const profile = await getCallerProfile(caller.id, config.databaseId, config.profilesCollectionId);
+        if (!profile || !profile.is_locked || !profile.enrollment_no) {
+            return res.json({
+                success: false,
+                error: 'Student profile must be complete and verified before supporting complaints.',
+                code: 'PROFILE_INCOMPLETE',
+            }, 400);
+        }
+        if (profile.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students are eligible to support complaints.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
         let doc;
         try {
             doc = (await databases.getDocument(config.databaseId, config.complaintsCollectionId, complaintId));
@@ -392,9 +406,17 @@ export async function handleSupportComplaint(context, caller, data) {
                 code: 'NOT_FOUND',
             }, 404);
         }
+        // Students cannot support their own complaints
+        if (doc.student_user_id === caller.id) {
+            return res.json({
+                success: false,
+                error: 'Students cannot support their own complaints.',
+                code: 'CANNOT_SUPPORT_OWN_COMPLAINT',
+            }, 400);
+        }
         // Oracle Elimination: Check visibility
         if (doc.issue_type === 'department') {
-            const callerDept = profile?.department_code || caller.department_code;
+            const callerDept = profile.department_code;
             if (callerDept !== doc.department_code) {
                 return res.json({
                     success: false,
@@ -535,27 +557,45 @@ export async function handleGetAdminDashboard(context, caller) {
     }
     try {
         const deptCode = caller.department_code;
-        const [openRes, inProgressRes, resolvedRes] = await Promise.all([
+        const [deptOpenRes, deptInProgRes, deptResolvedRes, pubOpenRes, pubInProgRes, pubResolvedRes] = await Promise.all([
             databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
                 Query.equal('department_code', deptCode),
+                Query.equal('issue_type', 'department'),
                 Query.equal('status', 'open'),
                 Query.limit(1),
             ]),
             databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
                 Query.equal('department_code', deptCode),
+                Query.equal('issue_type', 'department'),
                 Query.equal('status', 'in_progress'),
                 Query.limit(1),
             ]),
             databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
                 Query.equal('department_code', deptCode),
+                Query.equal('issue_type', 'department'),
+                Query.equal('status', 'resolved'),
+                Query.limit(1),
+            ]),
+            databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+                Query.equal('issue_type', 'public'),
+                Query.equal('status', 'open'),
+                Query.limit(1),
+            ]),
+            databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+                Query.equal('issue_type', 'public'),
+                Query.equal('status', 'in_progress'),
+                Query.limit(1),
+            ]),
+            databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+                Query.equal('issue_type', 'public'),
                 Query.equal('status', 'resolved'),
                 Query.limit(1),
             ]),
         ]);
         const metrics = {
-            total_open: openRes.total,
-            total_in_progress: inProgressRes.total,
-            total_resolved: resolvedRes.total,
+            total_open: deptOpenRes.total + pubOpenRes.total,
+            total_in_progress: deptInProgRes.total + pubInProgRes.total,
+            total_resolved: deptResolvedRes.total + pubResolvedRes.total,
             department_code: deptCode,
         };
         return res.json({
@@ -594,18 +634,28 @@ export async function handleListAdminComplaints(context, caller, data) {
         const status = data.status;
         const page = typeof data.page === 'number' && data.page > 0 ? data.page : 1;
         const limit = typeof data.limit === 'number' && data.limit > 0 && data.limit <= 50 ? data.limit : 20;
-        const offset = (page - 1) * limit;
-        const queries = [
+        const deptQueries = [
             Query.equal('department_code', deptCode),
-            Query.orderDesc('created_at'),
-            Query.limit(limit),
-            Query.offset(offset),
+            Query.equal('issue_type', 'department'),
+            ...(status && ['open', 'in_progress', 'resolved'].includes(status)
+                ? [Query.equal('status', status)]
+                : []),
+            Query.orderDesc('$createdAt'),
+            Query.limit(limit * 2),
         ];
-        if (status && ['open', 'in_progress', 'resolved'].includes(status)) {
-            queries.push(Query.equal('status', status));
-        }
-        const result = await databases.listDocuments(config.databaseId, config.complaintsCollectionId, queries);
-        const complaints = result.documents.map((doc) => ({
+        const publicQueries = [
+            Query.equal('issue_type', 'public'),
+            ...(status && ['open', 'in_progress', 'resolved'].includes(status)
+                ? [Query.equal('status', status)]
+                : []),
+            Query.orderDesc('$createdAt'),
+            Query.limit(limit * 2),
+        ];
+        const [deptResult, publicResult] = await Promise.all([
+            databases.listDocuments(config.databaseId, config.complaintsCollectionId, deptQueries),
+            databases.listDocuments(config.databaseId, config.complaintsCollectionId, publicQueries),
+        ]);
+        const mapDocToComplaint = (doc) => ({
             $id: doc.$id,
             student_user_id: doc.student_user_id,
             student_name: doc.student_name,
@@ -624,12 +674,24 @@ export async function handleListAdminComplaints(context, caller, data) {
             attachment_file_id: doc.attachment_file_id || undefined,
             created_at: doc.created_at || doc.$createdAt,
             updated_at: doc.updated_at || doc.$updatedAt,
-        }));
+        });
+        const seenIds = new Set();
+        const allComplaints = [];
+        for (const doc of [...deptResult.documents, ...publicResult.documents]) {
+            if (doc.$id && !seenIds.has(doc.$id)) {
+                seenIds.add(doc.$id);
+                allComplaints.push(mapDocToComplaint(doc));
+            }
+        }
+        allComplaints.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const total = allComplaints.length;
+        const startIndex = (page - 1) * limit;
+        const paginatedComplaints = allComplaints.slice(startIndex, startIndex + limit);
         return res.json({
             success: true,
             data: {
-                complaints,
-                total: result.total,
+                complaints: paginatedComplaints,
+                total,
             },
         }, 200);
     }
@@ -693,8 +755,10 @@ export async function handleUpdateAdminComplaint(context, caller, data) {
                 code: 'NOT_FOUND',
             }, 404);
         }
-        // Oracle Elimination: Must belong to caller's department
-        if (doc.department_code !== caller.department_code) {
+        // Oracle Elimination: Admin can manage own department and Public Issues, but cannot read or mutate Department B private complaints
+        const isOwnDepartment = doc.department_code === caller.department_code;
+        const isPublicIssue = doc.issue_type === 'public';
+        if (!isOwnDepartment && !isPublicIssue) {
             return res.json({
                 success: false,
                 error: 'Complaint not found.',

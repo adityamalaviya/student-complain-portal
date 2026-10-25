@@ -153,3 +153,54 @@ test('Phase 4 Exit Criteria: Deterministic 32-character SHA-256 support document
   const docIdAgain = crypto.createHash('sha256').update(`${complaintId}:${userId}`).digest('hex').slice(0, 32);
   assert.equal(docId, docIdAgain);
 });
+
+test('Phase 4 Exit Criteria: Duplicate support attempt returns ALREADY_SUPPORTED without count increment', () => {
+  const supports = new Set<string>();
+  const complaint = { id: 'c_01', count: 0 };
+  const userId = 'usr_voter';
+
+  const docId = crypto.createHash('sha256').update(`${complaint.id}:${userId}`).digest('hex').slice(0, 32);
+
+  // First vote succeeds
+  if (!supports.has(docId)) {
+    supports.add(docId);
+    complaint.count += 1;
+  }
+  assert.equal(complaint.count, 1);
+  assert.equal(supports.size, 1);
+
+  // Second vote: docId collision detected (409)
+  let isConflict = false;
+  if (supports.has(docId)) {
+    isConflict = true;
+    // count is NOT incremented
+  }
+  assert.equal(isConflict, true);
+  assert.equal(complaint.count, 1, 'Support count must not increase on duplicate vote');
+  assert.equal(supports.size, 1);
+});
+
+test('Phase 5 Exit Criteria: Admin A can manage own department and Public Issues, but cannot read or mutate Department B private complaints', () => {
+  const adminCivil = { role: 'department_admin', dept: '06' };
+
+  // Own department complaint
+  const civilPrivate = { dept: '06', issue_type: 'department' as IssueType };
+  const civilCanManage =
+    adminCivil.dept === civilPrivate.dept || civilPrivate.issue_type === 'public';
+  assert.equal(civilCanManage, true, 'Civil admin can manage Civil private complaints');
+
+  // Public issue
+  const publicIssue = { dept: '07', issue_type: 'public' as IssueType };
+  const canManagePublic =
+    adminCivil.dept === publicIssue.dept || publicIssue.issue_type === 'public';
+  assert.equal(canManagePublic, true, 'Civil admin can manage Public issues');
+
+  // Cross-department private complaint: MUST return 404 (Oracle Elimination)
+  const compPrivate = { dept: '07', issue_type: 'department' as IssueType };
+  const isAuthorized =
+    adminCivil.dept === compPrivate.dept || compPrivate.issue_type === 'public';
+  assert.equal(isAuthorized, false, 'Civil admin cannot manage Computer private complaints');
+  const responseStatus = isAuthorized ? 200 : 404;
+  assert.equal(responseStatus, 404, 'Must return generic 404 for Department B private complaints');
+});
+

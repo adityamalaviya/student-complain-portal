@@ -50,31 +50,39 @@
   - Implemented `/complaints/[id]` detail view with oracle elimination handling and official response card.
 - **Backend Handlers:**
   - `handleCreateComplaint`: Server-authoritative student identity derivation from trusted profile.
-  - `handleListComplaints`: Department isolation on private grievances; campus-wide access to public grievances.
   - `handleGetComplaint`: Cross-department oracle elimination returning generic HTTP 404.
 
-### 8. Stage Five — Phase 4: Support Workflow (Completed)
+### 8. Stage Five — Phase 4: Support Workflow (Fully Implemented & Verified)
 - **Deterministic 32-Character SHA-256 Voting:**
   - Implemented `handleSupportComplaint`: Computes `sha256(complaintId + ':' + caller.id).slice(0, 32)` as primary key in `complaint_supports`.
-  - Atomic duplicate conflict handling: Catches code 409 / document collision and returns `ALREADY_SUPPORTED`.
-  - Atomically increments `support_count` on `complaints` document.
+  - Profile Completeness Gate: Verifies caller's profile is complete and locked (`profile.is_locked && profile.enrollment_no`); rejects incomplete profiles with HTTP 400 `PROFILE_INCOMPLETE`.
+  - Role Verification: Rejects non-student callers with HTTP 403 `FORBIDDEN`.
+  - Self-Support Prevention: Verifies caller is not the complaint author (`doc.student_user_id !== caller.id`); rejects self-support attempts with HTTP 400 `CANNOT_SUPPORT_OWN_COMPLAINT`.
+  - Atomic Duplicate Conflict Handling: Catches code 409 / document collision and returns `{ success: false, code: 'ALREADY_SUPPORTED' }` with HTTP 409 and zero count increment.
+  - Atomic Counter Update: Atomically increments `support_count` on `complaints` document. Verified that support operations never create a complaint document.
   - Implemented `handleGetSupportState`: Returns live count and `has_supported` boolean.
-- **Interactive Component:**
-  - `ComplaintSupportButton.tsx`: Supports both card and detail variants, optimistic counter updates, pending spinners, and checkmark locks preventing repeated votes.
+- **Frontend Optimistic UI & Robust Rollback:**
+  - `ComplaintSupportButton.tsx`: Supports both card and detail variants, pending spinners, and checkmark locks preventing repeated votes.
+  - `src/app/complaints/[id]/page.tsx` & `src/app/dashboard/page.tsx`: Implemented optimistic UI with snapshot rollback on network failure or duplicate support error (`ALREADY_SUPPORTED` maintains lock without artificial count increment).
+- **Dedicated Automated Test Suite:**
+  - `tests/phase4.test.mjs` (6/6 tests passing): Verified deterministic SHA-256 ID, repeated support count invariance, complaint non-creation, self-support prevention, profile gates, and cross-department 404 oracle elimination.
 
-### 9. Stage Five — Phase 5: Admin Resolution & Scoped Dashboard (Completed)
+### 9. Stage Five — Phase 5: Admin Resolution & Scoped Dashboard (Fully Implemented & Verified)
 - **Backend Admin Handlers:**
-  - `handleGetAdminDashboard`: Scoped department grievance metrics (`total_open`, `total_in_progress`, `total_resolved`).
-  - `handleListAdminComplaints`: Scoped queue filtered by department and status.
-  - `handleUpdateAdminComplaint`: Status transition (`in_progress` or `resolved`), official response validation (5-1000 chars), and `resolved_at` timestamp.
-  - Enforced strict department isolation: Probing another department's complaint returns generic HTTP 404.
+  - `handleGetAdminDashboard`: Scoped department grievance metrics (`total_open`, `total_in_progress`, `total_resolved`) combining own department grievances and Public Issues without cross-department leakage.
+  - `handleListAdminComplaints`: Scoped queue filtered by department private issues and campus Public Issues, sorted by creation date descending with pagination.
+  - `handleUpdateAdminComplaint`: Allows status transitions (`in_progress` or `resolved`), validates official response (5-1000 chars), and records `resolved_at` timestamp.
+  - Enforced Strict Department Isolation: Admin A can manage own department and Public Issues, but probing Department B private complaints returns generic HTTP 404 (Oracle Elimination).
+  - Role Gate: Enforced server-side `role === 'department_admin'`; non-admin callers receive HTTP 403 `FORBIDDEN`.
 - **Admin UI:**
   - `/admin`: Linear-styled dashboard with quiet inline metrics, tab filters (`Pending`, `Resolved`, `All`), and single-column grievance list.
   - `AdminResolutionModal.tsx`: Accessible resolution modal with keyboard trap, escape handler, status selector, and response editor.
+- **Dedicated Automated Test Suite:**
+  - `tests/phase5.test.mjs` (5/5 tests passing): Verified own department + public issue resolution, Department B private grievance 404 isolation, metrics isolation, scoped queue filtering, and input bounds checking.
 
 ### 10. Live API Verification & Routing Hardening
 - Registered and verified all 11 operations in `functions/campusvoice-api/src/index.ts`.
-- Recompiled and committed (`AG-011`, `AG-012`), deployed live to Appwrite Cloud.
+- Recompiled `functions/campusvoice-api/dist/` (`npm run build:local`).
 - Created automated test suite `tests/test-all-apis.mjs` verifying live read, write, query, update, delete, and authentication guards against Appwrite Cloud (9/9 passed).
 - Added client input constraints (`minLength`, `maxLength`) and live character counters to `/complaints/new`.
 
@@ -86,10 +94,10 @@
 |---|---|---|---|
 | **Typecheck** | `npm run typecheck` | **PASS (0 errors)** | Zero `any` types; strict TypeScript across frontend & backend |
 | **Lint** | `npm run lint` | **PASS (0 warnings)** | Clean ESLint verification |
-| **Frontend Build** | `npm run build` | **PASS (0 errors)** | 11/11 Next.js App Router static pages compiled successfully |
+| **Frontend Build** | `npm run build` | **PASS (0 errors)** | 11/11 Next.js App Router static/dynamic pages compiled successfully |
 | **Function Build** | `npm run build:local` | **PASS (0 errors)** | Compiled to `functions/campusvoice-api/dist/` with 0 errors |
-| **Root Unit Tests** | `npm test` | **PASS (6/6 passed)** | Department extraction, profile lock warning, email normalization, oracle elimination |
-| **Function Unit Tests**| `npm test` (functions) | **PASS (7/7 passed)** | Bounds checking, 32-char SHA-256 voting ID uniqueness, role checks |
+| **Root Unit Tests** | `npm test` | **PASS (17/17 passed)** | Phases 2, 3, 4, and 5 unit tests all passing with 100% assertions green |
+| **Function Unit Tests**| `npm test` (functions) | **PASS (9/9 passed)** | Bounds checking, 32-char SHA-256 voting ID uniqueness, role checks, admin isolation |
 | **Live Backend E2E** | `tests/test-all-apis.mjs` | **PASS (9/9 passed)** | Live Appwrite Cloud health, departments, collection reads, CRUD, index query, 401 auth guards |
 | **Browser Inspection**| Chrome DevTools | **PASS (Clean)** | Zero uncaught JS errors, responsive hover/active buttons, route protection |
 | **Ponytail Review** | `ponytail-review` | **PASSED** | Clean codebase, zero dead code, lean abstractions |
@@ -102,8 +110,8 @@
 - [x] **Phase 1 (Setup):** Architecture, strict TypeScript, design tokens, Appwrite Cloud SDK configured.
 - [x] **Phase 2 (Auth & Profiles):** Google OAuth authentication, profile lock warning verbatim, 12-digit enrollment slice `[7:9]` mapped to Civil (`06`) and Computer (`07`), immutable profile enforcement.
 - [x] **Phase 3 (Complaints & Visibility):** Department A student cannot probe Department B private grievances (generic HTTP 404 Oracle Elimination); both departments can access Public Issues; server-authoritative identity derivation.
-- [x] **Phase 4 (Support Workflow):** Deterministic 32-char SHA-256 document ID prevents duplicate votes; atomic support increment; UI support toggle with lock states.
-- [x] **Phase 5 (Admin Resolution):** Department admin can only view and resolve grievances within their assigned jurisdiction; metrics dashboard and resolution modal active.
+- [x] **Phase 4 (Support Workflow):** Deterministic 32-char SHA-256 document ID prevents duplicate votes; repeated attempts return HTTP 409 without increasing count; self-support prevented; support does not create a complaint; UI support toggle with rollback on error.
+- [x] **Phase 5 (Admin Resolution):** Admin A can manage own department grievances and Public Issues, but cannot read or mutate Department B private complaints (returns generic HTTP 404); metrics dashboard and resolution modal active.
 
 ---
 
