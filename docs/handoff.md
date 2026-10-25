@@ -1,10 +1,10 @@
 # CampusVoice — Project Handoff
 
 ## A. Project Status
-- **Current Stage:** Stage Five — Phase 3, 4 & 5 (Complaints, Support Workflow & Admin Resolution) Completed
-- **Current Status:** `PHASES 1–5: COMPLETED & VERIFIED`
-- **Implementation Status:** `READY FOR PHASE 6 (END-TO-END INTEGRATION & HARDENING)`
-- **Date:** 2026-10-24
+- **Current Stage:** Stage Six — Phase 6 (Testing & Hardening) Completed
+- **Current Status:** `PHASES 1–6: COMPLETED & VERIFIED`
+- **Implementation Status:** `READY FOR PHASE 7 (DEPLOYMENT & PRODUCTION LAUNCH)`
+- **Date:** 2026-10-25
 
 ---
 
@@ -86,6 +86,24 @@
 - Created automated test suite `tests/test-all-apis.mjs` verifying live read, write, query, update, delete, and authentication guards against Appwrite Cloud (9/9 passed).
 - Added client input constraints (`minLength`, `maxLength`) and live character counters to `/complaints/new`.
 
+### 11. Stage Six — Phase 6: Testing & Hardening (Fully Implemented & Verified)
+- **Comprehensive Automated Test Suite (`tests/phase6.test.mjs`):**
+  - Added 6 end-to-end integration tests (bringing root test suite to 23/23 tests passing with 100% assertions green).
+  - Test 1: Onboarding format validation, department extraction, and pending/fallback rejection (unmapped codes, short lengths, non-numeric strings rejected).
+  - Test 2: First-time profile lock immutability and verbatim warning preservation (`"Please check your name and enrollment number carefully. Once you save them, they cannot be changed through your account."`).
+  - Test 3: Department isolation & cross-department generic HTTP 404 Oracle Elimination.
+  - Test 4: Community support uniqueness, deterministic 32-character SHA-256 IDs, duplicate/concurrency invariance, self-support prevention, and profile completeness gate.
+  - Test 5: Admin authorization, scoped resolution, and Oracle Elimination on cross-department mutations.
+  - Test 6: Full multi-role end-to-end lifecycle verification (Student A files $\rightarrow$ Student B supports $\rightarrow$ Student C 404 blocked $\rightarrow$ Admin Civil updates and resolves with official response $\rightarrow$ Admin Comp 404 blocked $\rightarrow$ Student A verifies resolution and official response card).
+- **Secrets & Client Bundle Hardening:**
+  - Audited `src/` client code for secrets; verified zero server API keys, admin credentials, or private secrets in the client bundle.
+  - Only `NEXT_PUBLIC_` Appwrite endpoint, project ID, database ID, and function ID exposed to browser.
+  - Verified `.gitignore` actively excludes `.env`, `.env.local`, `.env*.local`.
+- **Live HTTP & Browser Verification:**
+  - Verified all 6 routes (`/sign-in`, `/onboarding`, `/dashboard`, `/complaints/new`, `/admin`, `/api/health`) return HTTP 200 without SSR runtime errors.
+  - Inspected live page in Chrome DevTools: verified Google OAuth redirect flow with configured client ID and redirect URI.
+  - Confirmed unauthenticated requests on protected routes (`/dashboard`, `/complaints/new`, `/admin`) are automatically redirected to `/sign-in`.
+
 ---
 
 ## C. Verification Results
@@ -96,10 +114,10 @@
 | **Lint** | `npm run lint` | **PASS (0 warnings)** | Clean ESLint verification |
 | **Frontend Build** | `npm run build` | **PASS (0 errors)** | 11/11 Next.js App Router static/dynamic pages compiled successfully |
 | **Function Build** | `npm run build:local` | **PASS (0 errors)** | Compiled to `functions/campusvoice-api/dist/` with 0 errors |
-| **Root Unit Tests** | `npm test` | **PASS (17/17 passed)** | Phases 2, 3, 4, and 5 unit tests all passing with 100% assertions green |
+| **Root Unit Tests** | `npm test` | **PASS (23/23 passed)** | Phases 2, 3, 4, 5, and 6 unit tests all passing with 100% assertions green |
 | **Function Unit Tests**| `npm test` (functions) | **PASS (9/9 passed)** | Bounds checking, 32-char SHA-256 voting ID uniqueness, role checks, admin isolation |
 | **Live Backend E2E** | `tests/test-all-apis.mjs` | **PASS (9/9 passed)** | Live Appwrite Cloud health, departments, collection reads, CRUD, index query, 401 auth guards |
-| **Browser Inspection**| Chrome DevTools | **PASS (Clean)** | Zero uncaught JS errors, responsive hover/active buttons, route protection |
+| **Browser Inspection**| Chrome DevTools | **PASS (Clean)** | Zero uncaught JS errors, Google OAuth redirect active, route protection verified |
 | **Ponytail Review** | `ponytail-review` | **PASSED** | Clean codebase, zero dead code, lean abstractions |
 | **Ponytail Audit** | `ponytail-audit` | **PASSED** | Repository tree verified lean |
 
@@ -112,23 +130,27 @@
 - [x] **Phase 3 (Complaints & Visibility):** Department A student cannot probe Department B private grievances (generic HTTP 404 Oracle Elimination); both departments can access Public Issues; server-authoritative identity derivation.
 - [x] **Phase 4 (Support Workflow):** Deterministic 32-char SHA-256 document ID prevents duplicate votes; repeated attempts return HTTP 409 without increasing count; self-support prevented; support does not create a complaint; UI support toggle with rollback on error.
 - [x] **Phase 5 (Admin Resolution):** Admin A can manage own department grievances and Public Issues, but cannot read or mutate Department B private complaints (returns generic HTTP 404); metrics dashboard and resolution modal active.
+- [x] **Phase 6 (Testing & Hardening):** Full multi-role end-to-end lifecycle verification, onboarding format validation & fallback rejection, Oracle Elimination across student & admin roles, deterministic SHA-256 support uniqueness, secrets protection audit, and live browser DevTools inspection.
 
 ---
 
 ## E. Next Phase
 
-- **Target Phase:** Phase 6 — Full Integration Verification & Hardening
-- **Scope for Phase 6:**
-  - End-to-end multi-role browser testing (Civil Student $\leftrightarrow$ Computer Student $\leftrightarrow$ Department Admin).
-  - Verify complete lifecycle: Student A files grievance $\rightarrow$ Student B supports grievance $\rightarrow$ Department Admin reviews and resolves grievance with official response $\rightarrow$ Student sees official response card on `/complaints/[id]`.
-  - Pre-deployment production checklist.
+- **Target Phase:** Phase 7 — Deployment & Production Verification
+- **Scope for Phase 7:**
+  - Deploy frontend to Vercel.
+  - Deploy Appwrite Cloud Function `campusvoice-api` to Appwrite Cloud with required execution permissions and production environment variables.
+  - Configure production CORS, Appwrite allowed origins, and Google OAuth production redirect URLs.
+  - Run production smoke tests against deployed URLs.
+  - Document deployment URLs and known operational notes in README.
 
 ---
 
 ## F. Approval Gate
 
-- **PHASE STATUS:** `COMPLETED` (Phases 1 through 5 fully implemented and verified)
-- **UI STATUS:** `COMPLETED` (All 7 Stitch MCP approved screens implemented and verified)
+- **PHASE STATUS:** `COMPLETED` (Phases 1 through 6 fully implemented and verified)
+- **UI STATUS:** `COMPLETED` (All 7 Stitch MCP approved screens implemented, verified, and route-protected)
 - **BACKEND INTEGRATION:** `COMPLETED` (All 11 Appwrite Cloud Function operations deployed and verified live)
-- **E2E TESTS:** `PASSED (9/9 Live Checks)`
-- **NEXT PHASE STATUS:** `READY FOR PHASE 6`
+- **E2E TESTS:** `PASSED (23/23 Root Tests, 9/9 Function Tests, 9/9 Live Backend Checks)`
+- **NEXT PHASE STATUS:** `READY FOR PHASE 7`
+

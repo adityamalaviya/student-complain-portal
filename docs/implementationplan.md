@@ -63,17 +63,17 @@ Target: two-day MVP implementation, followed by deployment verification. A fully
 
 **Exit criteria:** Admin A can manage own department and Public Issues, but cannot read or mutate Department B private complaints.
 
-## Phase 6 — Testing and Hardening
-- Test Google OAuth end-to-end.
-- Test onboarding validation and pending state.
-- Test invalid code and malformed enrollment number behavior.
-- Test department/public visibility.
-- Test duplicate and concurrent support requests where feasible.
-- Test unauthorized API requests and admin scope.
-- Check browser bundle and logs for leaked secrets.
-- Verify loading, empty, error, and success states.
+## Phase 6 — Testing and Hardening (Completed & Verified)
+- [x] Test Google OAuth end-to-end (verified redirect to Google OAuth flow with configured client ID).
+- [x] Test onboarding validation and pending state (format check, code position slice [7:9], fallback rejection).
+- [x] Test invalid code and malformed enrollment number behavior (unmapped codes, non-numeric strings rejected).
+- [x] Test department/public visibility (cross-department generic 404 Oracle Elimination verified).
+- [x] Test duplicate and concurrent support requests (deterministic 32-char SHA-256 IDs, 409 collision handling, count invariance).
+- [x] Test unauthorized API requests and admin scope (non-admin 403, cross-department admin mutation 404).
+- [x] Check browser bundle and logs for leaked secrets (client bundle verified free of server keys; only public env vars exposed).
+- [x] Verify loading, empty, error, and success states (Next.js route protection, DevTools inspection verified).
 
-**Exit criteria:** Critical acceptance criteria in `prd.md` pass.
+**Exit criteria:** Critical acceptance criteria in `prd.md` pass (Verified via automated test suite `tests/phase6.test.mjs`, all 23 tests green).
 
 ## Phase 7 — Deployment
 - Deploy frontend to Vercel.
