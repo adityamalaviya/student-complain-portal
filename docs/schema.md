@@ -1,140 +1,213 @@
-# CampusVoice — Data Schema
+# CampusVoice — Database Schema Specification (Updated)
 
-## 1. Overview
-Initial release uses Appwrite Cloud Database with four logical collections:
-- `departments`
-- `profiles`
-- `complaints`
-- `complaint_supports`
-
-Use Appwrite document permissions conservatively. Appwrite Functions must enforce business authorization as well; collection permissions alone may not express every rule.
-
-## 2. Departments Collection
-Suggested fields:
-- `code`: string, unique application-level value; initial codes `06` and `07`
-- `name`: string
-- `is_active`: boolean
-- `created_at`: datetime
-
-Initial records are placeholders until department names are supplied:
-- code `06` → department name pending confirmation
-- code `07` → department name pending confirmation
-
-Do not treat the numeric code itself as the character position in an enrollment number.
-
-## 3. Profiles Collection
-Suggested fields:
-- `auth_user_id`: string, unique Appwrite authenticated user ID
-- `email`: string
-- `display_name`: string
-- `enrollment_no`: string, unique once verified
-- `department_code`: string, references an active department code
-- `role`: enum/string (`student`, `department_admin`)
-- `profile_status`: enum/string (`incomplete`, `pending_verification`, `complete`, `rejected`)
-- `created_at`: datetime
-- `updated_at`: datetime
-
-Rules:
-- `auth_user_id` is sourced from verified Appwrite identity, not request input.
-- `role` is assigned by a trusted provisioning process.
-- `department_code` is server-assigned and cannot be changed by a student.
-- Enrollment number is a string to preserve leading zeros.
-- Extract the department code from characters 8–9 (1-based indexing, zero-based slice `[7:9]`). Test against official examples and validate the full enrollment format before production.
-- Store only fields necessary for the product.
-
-## 4. Complaints Collection
-Suggested fields:
-- `title`: string, required, bounded length
-- `title`: string, required, bounded length
-- `location`: string, required, bounded length
-- `description`: string, required, bounded length
-- `priority`: enum/string (`low`, `medium`, `high`)
-- `attachment_file_id`: string or null, optional; store only a validated Appwrite Storage file ID (or the project-approved storage reference)
-- `category`: string or enum, required
-- `issue_type`: enum/string (`department`, `public`)
-- `department_code`: string or null
-- `created_by`: string, authenticated profile ID
-- `status`: enum/string (`Pending`, `In Progress`, `Resolved`)
-- `admin_response`: string or null
-- `created_at`: datetime
-- `updated_at`: datetime
-
-Rules:
-- For `department`, `department_code` is the creator's trusted assigned department.
-- For `public`, `department_code` is null unless a separate ownership model is explicitly chosen.
-- The client cannot set `created_by` to another user.
-- Public visibility is determined by `issue_type`, not by copying the same complaint into each department.
-- Validate status changes and administrative responses inside Appwrite Functions.
-
-## 5. Complaint Supports Collection
-Suggested fields:
-- `complaint_id`: string, required
-- `user_id`: string, required authenticated profile ID
-- `created_at`: datetime
-
-Invariant:
-- There must be at most one support record for each `(complaint_id, user_id)` pair.
-- Use a unique composite key if supported; otherwise create a deterministic document ID from a safe, stable representation of complaint and user IDs, or use an atomic mechanism supported by the chosen Appwrite version.
-- Test concurrent support requests. A query-then-create sequence without atomic uniqueness is insufficient by itself.
-- Count support records for the complaint, excluding duplicates by design.
-- Do not store an editable client-controlled counter as the source of truth.
-
-## 6. Relationships
-- One department has many student profiles.
-- One profile can create many complaints.
-- One complaint can have many support records.
-- One student can support many complaints.
-- A student can support a particular complaint at most once.
-- A public complaint is shared across active departments and is stored only once.
-
-## 7. Authorization Rules
-### Student
-- Read their own profile.
-- Update only permitted profile fields such as display name, if supported.
-- Cannot change role, enrollment verification state, or department.
-- Read department complaints for their assigned department and all public complaints.
-- Create complaints as themselves.
-- Create support records as themselves only for visible/eligible complaints.
-
-### Department administrator
-- Read their own admin profile.
-- Read and update complaints for their assigned department.
-- Read and update Public Issues.
-- Cannot manage another department's private complaints.
-- Cannot promote themselves or change their assigned department.
-
-### Trusted Appwrite Functions
-- Performs protected operations after verifying identity and role.
-- Uses Function-only server credentials with least-privilege scopes only when necessary.
-- Must apply explicit authorization checks before querying or mutating data.
-
-## 8. Indexes and Query Considerations
-Create indexes supported by the current Appwrite Database version for:
-- department code and active status
-- profile auth user ID
-- enrollment number
-- complaint issue type, department code, status, created time
-- support complaint ID and user ID
-
-Confirm current Appwrite limits and index syntax during implementation. Use pagination and avoid loading the entire complaint collection for counts.
-
-## 9. Migration to Five Departments
-The data model already supports more than two departments. Expansion requires:
-- Add three department records and confirmed codes.
-- Provision three additional admin profiles.
-- Add the verified enrollment mapping rules for all five codes.
-- Update tests and onboarding copy.
-- Do not duplicate Public Issues into separate department-specific complaint documents.
+**Version:** 2.0.0  
+**Date:** 10 November 2026  
+**Status:** Target schema; not yet a migration instruction
 
 
-## Complaint validation and attachments
+## Authoritative product rules (effective 10 November 2026)
 
-- `title`, `location`, `description`, and `priority` are required.
-- `priority` accepts only `low`, `medium`, or `high`.
-- Attachment is optional. Enforce allowed MIME types/extensions and a configured maximum size; do not trust browser-provided MIME metadata alone.
-- Student name, enrollment number, and department shown on the form are display-only. The create-complaint Function derives them from the authenticated user's profile; do not persist client-submitted values as authoritative identity data.
-- Complaint status is initialized by the backend to `Pending`; the student cannot submit a status value.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-## Profile identity immutability
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-After the first successful profile save, student-facing update operations must not change the saved `name` or `enrollment_number`. Enforce this in server-side business logic. Corrections require a separate authorized workflow. `Rahul` and `246510307054` are not defaults and must not be seeded for every student.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
+
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
+
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
+
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
+
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
+
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
+
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
+
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
+
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
+
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
+
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
+
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
+
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
+
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
+
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
+
+
+## 1. Modeling principles
+- Use stable department document IDs; do not overload a code string as a display name.
+- Profiles store `student_department_id` separately from any admin assignment.
+- Complaints store `student_department_id` and `maintenance_department_id`.
+- Keep creator identity in trusted complaint data for authorized access, but always redact it from peer API projections.
+- Original complaint content is immutable.
+- Timeline is authoritative for lifecycle events.
+- Support count is a derived invariant: one creator baseline plus active support records.
+
+## 2. Collections
+
+### `departments`
+Suggested attributes:
+- `$id`
+- `code` (unique string; only confirmed mappings enabled)
+- `name`
+- `is_academic` (boolean)
+- `is_maintenance` (boolean)
+- `is_active` (boolean)
+- timestamps
+
+Computer/Civil/Electrical/Mechanical: both flags true. Water/Sanitation: academic false, maintenance true.
+
+### `profiles`
+- `user_id` (unique)
+- `email`
+- `name`
+- `enrollment_no` (unique for students)
+- `student_department_id` (nullable for non-students)
+- `phone_number` (student profile)
+- `role` (`student`, `department_admin`, `principal`)
+- `profile_status`
+- `name_locked`
+- `enrollment_locked`
+- `phone_locked`
+- timestamps
+
+Do not treat profile `role` alone as sufficient for all scoped permissions; resolve active grants/assignments server-side.
+
+### `complaints`
+- `$id`
+- `student_user_id` (string 255, required, indexed)
+- `student_name` (string 255, required, trusted snapshot)
+- `student_enrollment_no` (string 32, required, trusted snapshot)
+- `student_department_id` (string 50, required, indexed)
+- `maintenance_department_id` (string 50, required, indexed)
+- `title` (string 255, required)
+- `location` (string 255, required)
+- `description` (string 5000, required)
+- `priority` (`low`, `medium`, `high`, default 'medium')
+- `status` (`Pending`, `In Progress`, `Resolved`, default 'Pending', indexed)
+- `support_count` (integer, default 1, min 1)
+- `last_meaningful_update_at` (string 64, optional/synchronized)
+- `attachment_file_id` (string 255, optional, private)
+- `created_at` (string 64, required)
+- `updated_at` (string 64, optional)
+
+Core attributes (`status`, `support_count`, `last_meaningful_update_at`) are maintained directly on the complaint record and synchronized transactionally/compensatingly alongside authoritative timeline and support records. This ensures high-performance feed filtering and sorting without unindexed cross-collection calculations. Original title, location, description, and department assignments remain permanently immutable.
+
+### `complaint_supports`
+- deterministic or otherwise unique `$id`
+- `complaint_id`
+- `user_id`
+- `status` (`active`, `revoked`) or a safe active-record lifecycle
+- `created_at`
+- `revoked_at` (optional)
+
+Must allow a student to support again after revocation while preventing duplicate active support.
+
+### `complaint_timeline`
+- `complaint_id`
+- `author_id`
+- `author_role`
+- `entry_type` (`status_change`, `progress_update`, `clarification_request`, `clarification_reply`, `admin_response`)
+- `content`
+- `old_status` / `new_status` where relevant
+- `is_substantive` where applicable
+- `created_at`
+
+### `phone_change_requests`
+- `student_user_id`
+- `academic_department_id`
+- `old_phone_number`
+- `requested_phone_number` only if policy permits storing before approval; otherwise store only after authorized submission
+- `reason`
+- `status` (`pending`, `approved`, `rejected`, `completed`)
+- `reviewed_by`
+- `decision_reason`
+- one-time permission reference/state
+- `permission_consumed`
+- timestamps
+
+Permission consumption must happen only after successful persistence of the new phone value. Design atomic or recoverable state handling based on actual Appwrite capabilities.
+
+### `complaint_warnings`
+- `complaint_id`
+- `issued_by_principal_id`
+- `warning_reason`
+- `days_delayed`
+- `admin_response`
+- `responded_at`
+- `created_at`
+
+Multiple warning records may exist while the complaint remains unresolved.
+
+### `department_admin_assignments` / `permission_grants`
+Store:
+- `user_id`
+- `department_id`
+- scope (`academic` or `maintenance`)
+- permission set
+- `is_active`
+- `assigned_by`
+- created/revoked timestamps
+
+Water/Sanitation maintenance assignments cannot carry academic phone-approval scope.
+
+### `audit_logs`
+- event/action
+- actor ID and resolved role
+- target resource type and ID
+- structured details
+- timestamp
+- optional request/correlation ID
+
+Do not store unnecessary secrets or sensitive payloads in audit details. Application-level audit operations are append-only; restrict update/delete paths and protect credentials.
+
+## 3. Required indexes
+Validate actual Appwrite index limits and supported compound index behavior before provisioning. Candidate indexes:
+- `profiles.user_id` unique
+- `profiles.enrollment_no` unique
+- `departments.code` unique
+- `complaints.student_department_id + created_at`
+- `complaints.maintenance_department_id + status`
+- `complaint_supports.complaint_id + user_id`
+- `complaint_timeline.complaint_id + created_at`
+- `phone_change_requests.student_user_id + status`
+- `complaint_warnings.complaint_id + created_at`
+- assignment lookup by `user_id + scope + is_active`
+- audit lookup by `actor_id`, `target_resource_id`, and `created_at`
+
+## 4. Permissions
+Sensitive collections must not be directly readable/writable by browser clients. Route all reads/writes through authenticated Appwrite Cloud Functions. Attachments remain private. Confirm exact Appwrite collection/document permission semantics against the deployed project before migration.
+
+## 5. Migration cautions
+Existing `department_code`, `issue_type`, `official_response`, status values, support_count, and attachment settings do not map cleanly to the new model. Do not blindly rename or drop fields. Build a reviewed migration plan with backups, mapping confirmation, dry-run counts, rollback strategy, and explicit approval.

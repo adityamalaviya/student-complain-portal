@@ -1,139 +1,97 @@
-# Architecture Decision Records (ADR) — Phase 0
+# CampusVoice — Architecture Decision Records (Updated)
 
-**Project:** CampusVoice  
-**Status:** Approved & Adopted  
-**Phase:** Phase 0 (Baseline Governance & Core Decisions)  
-**Date:** 2026-10-21  
+**Version:** 2.0.0 | **Date:** 10 November 2026  
+**Status:** Current requirements decisions; legacy ADRs superseded where conflicting
 
----
 
-## ADR-001: Active Department Mappings and Extensibility Strategy
+## Authoritative product rules (effective 10 November 2026)
 
-### Context
-CampusVoice requires strict department-level isolation for private student complaints. The institutional enrollment scheme embeds department codes within student enrollment numbers. Prior documentation identified multiple potential department codes, but Phase 0 requires formal confirmation of the active departments for the MVP release.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-### Decision
-1. **Confirmed Active Department Mappings:**
-   - **`07`** is definitively confirmed and mapped to **Computer Department**.
-   - **`06`** is definitively confirmed and mapped to **Civil Department**.
-2. **Initial Deployment Scope:**
-   - The initial release is strictly scoped to these **two active departments** and their respective students and administrators.
-3. **Database Representation:**
-   - The `departments` collection is pre-seeded with two active records:
-     - Record 1: `{ code: "07", name: "Computer Department", is_active: true }`
-     - Record 2: `{ code: "06", name: "Civil Department", is_active: true }`
-4. **Zero Guessing & Future Extensibility:**
-   - Other prospective department codes (e.g., `01`, `02`, `03`, `16`) mentioned in exploratory discussions are **unconfirmed** and will NOT be fabricated or assumed.
-   - Any enrollment number with a department slice other than `06` or `07` is treated as unmapped and routed to `pending_verification` fallback (or rejected).
-   - The architecture and schema are designed to be extensible to up to five departments by inserting records into the `departments` table and registering the code in the mapping dictionary without structural refactoring.
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-### Consequences
-- **Positive:** Guaranteed correctness for Computer and Civil students; zero risk of routing students to fictitious or unstaffed department queues.
-- **Negative:** Students from other departments cannot submit department complaints during the Phase 0/MVP release without manual administrative intervention.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
 
----
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
 
-## ADR-002: Administrator Allowlist Strategy & Identity Verification
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
 
-### Context
-The portal must support two department administrators—one for Computer Department (`07`) and one for Civil Department (`06`). Because administrators do not follow the student onboarding workflow (they do not possess student enrollment numbers) and student registration is self-service, administrative roles must be strictly protected against privilege escalation or spoofing.
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
 
-### Decision
-1. **Server-Managed Environment Allowlist:**
-   - Administrator accounts are provisioned via server-side environment variables configured in the Appwrite Cloud Function:
-     - `ADMIN_ALLOWLIST_07`: Verified Google email address of the Computer Department Administrator (e.g., `admin.computer@college.edu`).
-     - `ADMIN_ALLOWLIST_06`: Verified Google email address of the Civil Department Administrator (e.g., `admin.civil@college.edu`).
-2. **Strict Server-Side OAuth Email Verification:**
-   - Administrators authenticate through the standard Google OAuth 2.0 flow via Appwrite Auth.
-   - Upon authentication, the `campusvoice-api` Function inspects the verified email address attached to the Appwrite Account (`account.get()`).
-   - The server verifies whether the email matches `ADMIN_ALLOWLIST_07` or `ADMIN_ALLOWLIST_06`. Both the verified OAuth account email and allowlist variables are normalized via `.trim().toLowerCase()` prior to equality comparison to prevent case-sensitivity or whitespace mismatch.
-   - If a match is found:
-     - The user's profile is provisioned / updated with `role: "department_admin"` and `department_code: "07"` or `"06"`.
-     - `profile_status` is marked `complete`.
-     - The user is granted administrative access to their assigned department's complaints and public issues.
-   - If no match is found:
-     - The user is treated as a standard student.
-     - Any incoming client payload claiming `role: "department_admin"` or requesting administrative endpoints is immediately rejected with HTTP 403 Forbidden.
-3. **Immutability & Zero Client Trust:**
-   - Admin roles and assigned department codes cannot be updated, overridden, or claimed via client request bodies.
-   - Client-typed email inputs are never trusted as proof of admin identity; identity is derived exclusively from the authenticated session token / JWT.
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
 
-### Consequences
-- **Positive:** Complete protection against privilege escalation; zero administrative credentials exposed to the frontend; instantaneous role revocation by updating Function environment variables.
-- **Negative:** Admin email updates require redeploying / updating Function environment variables.
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
 
----
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
 
-## ADR-003: Appwrite Cloud Function Runtime Architecture (Single API Router)
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
 
-### Context
-CampusVoice requires 11 discrete backend operations:
-1. `get-profile`
-2. `complete-onboarding`
-3. `list-departments`
-4. `list-complaints`
-5. `get-complaint`
-6. `create-complaint`
-7. `support-complaint`
-8. `get-support-state`
-9. `get-admin-dashboard`
-10. `list-admin-complaints`
-11. `update-admin-complaint`
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
 
-Two deployment architectures were evaluated:
-- **Option A:** 11 discrete micro-functions deployed individually on Appwrite Cloud.
-- **Option B:** A single API Router Function (`campusvoice-api`) handling all endpoints through internal routing.
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
 
-### Decision
-We adopt **Option B: Single API Router Function (`campusvoice-api`)** built in Node.js / TypeScript.
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
 
-### Rationale & Alternatives Comparison
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
 
-| Evaluation Dimension | Option A: 11 Discrete Micro-Functions | Option B: Single API Router (`campusvoice-api`) [SELECTED] |
-|----------------------|-----------------------------------------|------------------------------------------------------------|
-| **Cold Start Performance** | 11 separate cold starts; each unused endpoint incurs latency on first request. | Amortized warm runtime across all endpoints; single cold start serves the whole app. |
-| **Environment & Configuration Overhead** | Requires managing 11 separate Function IDs in frontend `.env` (`NEXT_PUBLIC_APPWRITE_FN_GET_PROFILE`, etc.). | Single Function ID (`NEXT_PUBLIC_APPWRITE_FUNCTION_ID`). |
-| **Authentication & Middleware** | Duplicated token / JWT verification and profile resolution logic copied across 11 repositories or packages. | Centralized authentication middleware verifies `x-appwrite-user-id` and resolves profile once. |
-| **Appwrite Cloud Limits** | High risk of hitting project function count or concurrency limits on Appwrite Cloud plans. | Consumes exactly 1 function slot on Appwrite Cloud. |
-| **Deployment & CI/CD** | 11 deployment pipelines, increasing deployment failure probability by 11x. | Single unified deployment pipeline with atomic test and deploy. |
-| **Code Sharing** | Requires npm publishing or complex monorepo tooling to share validation schemas (`Zod`), extraction logic, and types. | Direct imports from shared modules (`src/lib/enrollment.ts`, schemas, types). |
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
 
-### Implementation Blueprint
-The router executes as an Appwrite Cloud Function listening to HTTP trigger events:
-```typescript
-// Path / Action dispatch pattern in campusvoice-api:
-export default async ({ req, res, log, error }: AppwriteFunctionContext) => {
-  const router = createRouter();
-  router.get('/api/profile', requireAuth(getProfileHandler));
-  router.post('/api/onboarding', requireAuth(completeOnboardingHandler));
-  router.get('/api/departments', listDepartmentsHandler);
-  router.get('/api/complaints', requireAuth(listComplaintsHandler));
-  router.post('/api/complaints', requireAuth(createComplaintHandler));
-  router.get('/api/complaints/:id', requireAuth(getComplaintHandler));
-  router.post('/api/complaints/:id/support', requireAuth(supportComplaintHandler));
-  router.get('/api/complaints/:id/support', requireAuth(getSupportStateHandler));
-  router.get('/api/admin/dashboard', requireAdmin(getAdminDashboardHandler));
-  router.get('/api/admin/complaints', requireAdmin(listAdminComplaintsHandler));
-  router.patch('/api/admin/complaints/:id', requireAdmin(updateAdminComplaintHandler));
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
 
-  return router.handle(req, res);
-};
-```
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
 
----
 
-## ADR-004: Zero Guessing of Unconfirmed Institutional Details
+## ADR-001: Six-department model with separate academic and maintenance jurisdiction
+**Decision:** Maintain six departments and separate `student_department_id` from `maintenance_department_id`. Computer/Civil/Electrical/Mechanical serve both purposes; Water/Sanitation are maintenance-only.
 
-### Context
-During initial project surveys, several potential operational details were discussed in informal notes or draft proposals (e.g., student batch numbering conventions, lateral entry diploma prefixes, faculty-level escalation tiers, automated WhatsApp notifications).
+**Mapping guard:** Code extraction is fixed at `enrollment_no[7:9]`. `06` and `07` are known code mappings to Department 1 and Department 2, but official names and remaining mappings must be confirmed. Earlier documents assigning specific names to these codes must be reconciled against institutional approval before deployment. Do not guess.
 
-### Decision
-Strict adherence to the **Zero Guessing Mandate**:
-1. **No Speculative Department Codes:**
-   Only `07` (Computer) and `06` (Civil) are recognized. All other codes are classified as `unmapped` and routed to `pending_verification`.
-2. **Fixed Enrollment Format:**
-   Enrollment extraction strictly requires a 12-digit numeric string with characters 8–9 representing the department code. Any non-conforming formats are rejected or flagged for verification rather than silently trimmed or heuristically guessed.
-3. **No Speculative Admin Roles:**
-   Only the two department admins mapped via `ADMIN_ALLOWLIST_07` and `ADMIN_ALLOWLIST_06` are supported. Superadmin, principal, or warden roles are deferred until formal administrative specifications are ratified.
-4. **Deferred Features:**
-   File attachment binary processing, email notifications, and automated escalation cron jobs remain out of Phase 0 scope and are deferred to later phases.
+## ADR-002: Three main roles and explicit scoped grants
+**Decision:** Student, Department Admin, Principal. No Super Admin. System-management powers may be granted to selected existing accounts as explicit server-side permission grants with audit and revocation.
+
+## ADR-003: Appwrite-only backend
+**Decision:** Next.js App Router + TypeScript, Appwrite Cloud Auth, Appwrite Cloud Database, Appwrite Cloud Functions, Vercel. Do not add FastAPI or another backend service.
+
+## ADR-004: Complaint visibility differs from maintenance assignment
+**Decision:** Student peer feed uses creator's academic department. Maintenance assignment routes work to the selected maintenance department. Public complaint mode is removed.
+
+## ADR-005: Complaint immutability and event timeline
+**Decision:** Original complaint content is immutable after creation. Status transitions, progress, clarifications, replies, and admin responses are separate timeline events. If a current-status projection is used, it is derived and reconciled against the event log.
+
+## ADR-006: Support baseline and revocation
+**Decision:** Initial count is one for the creator. Other eligible students may add/remove their active support and support again later. Displayed count is baseline one plus active support records. Backend concurrency strategy must be proven.
+
+## ADR-007: Phone-change approval
+**Decision:** Student phone changes are requested through the student's own academic Department Admin. Approval grants one-time permission. Permission is consumed only after successful persistence. Water/Sanitation maintenance admins cannot approve.
+
+## ADR-008: Principal warning governance
+**Decision:** Principal may issue manual warnings only for unresolved complaints eligible after the five-day meaningful-update rule. Multiple warnings are allowed while unresolved. Principal cannot change status.
+
+## ADR-009: Append-only audit history
+**Decision:** Record all specified lifecycle and privileged operations. Application operations expose no normal update/delete path for audit events. Operational controls and least-privilege credentials must support the policy.
+
+## ADR-010: Seven-day delivery target
+**Decision:** Plan for approximately 78 focused engineering hours across 7 calendar days (about 11 hours/day for six days and 12 hours on final verification day). This is an aggressive target, not a guarantee. Security acceptance criteria cannot be waived to meet the date.

@@ -4,8 +4,6 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
-  Buildings,
-  TerminalWindow,
   Plus,
   SignOut,
   Lock,
@@ -17,15 +15,34 @@ import {
   apiSupportComplaint,
   type ListComplaintsParams,
 } from '@/lib/api';
+import { resolveDepartment } from '@/lib/utils';
 import type { Complaint, ComplaintStatus } from '@/types';
 import {
   ComplaintCard,
+  DepartmentBadge,
   SearchAndFilterBar,
   type FeedType,
   LoadingSkeleton,
   EmptyState,
   ErrorState,
 } from '@/components';
+
+function statusMatchesFilter(
+  complaintStatus: ComplaintStatus,
+  filter: ComplaintStatus | 'all'
+): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'Pending' || filter === 'open') {
+    return complaintStatus === 'Pending' || complaintStatus === 'open';
+  }
+  if (filter === 'In Progress' || filter === 'in_progress') {
+    return complaintStatus === 'In Progress' || complaintStatus === 'in_progress';
+  }
+  if (filter === 'Resolved' || filter === 'resolved') {
+    return complaintStatus === 'Resolved' || complaintStatus === 'resolved';
+  }
+  return complaintStatus === filter;
+}
 
 export default function StudentDashboardPage(): React.ReactElement {
   const router = useRouter();
@@ -53,7 +70,7 @@ export default function StudentDashboardPage(): React.ReactElement {
     }
   }, [loading, user, isOnboarded, isAdmin, router]);
 
-  // Fetch complaints from backend API
+  // Fetch academic-department-scoped complaints from backend API
   const fetchComplaints = useCallback(async (): Promise<void> => {
     if (!profile) return;
     setIsLoadingFeed(true);
@@ -61,12 +78,6 @@ export default function StudentDashboardPage(): React.ReactElement {
 
     try {
       const params: ListComplaintsParams = {};
-      if (feedType === 'department') {
-        params.feed_type = 'department';
-      } else if (feedType === 'public') {
-        params.feed_type = 'public';
-      }
-
       if (statusFilter !== 'all') {
         params.status = statusFilter;
       }
@@ -78,7 +89,6 @@ export default function StudentDashboardPage(): React.ReactElement {
       if (response.success && response.data) {
         setComplaints(response.data.complaints || []);
       } else {
-        // If empty or error during development, fallback gracefully
         setComplaints([]);
         if (response.error && response.code !== 'EMPTY_QUEUE') {
           setFeedError(response.error);
@@ -91,7 +101,7 @@ export default function StudentDashboardPage(): React.ReactElement {
     } finally {
       setIsLoadingFeed(false);
     }
-  }, [profile, feedType, statusFilter, searchQuery]);
+  }, [profile, statusFilter, searchQuery]);
 
   useEffect(() => {
     if (profile && isOnboarded) {
@@ -99,14 +109,13 @@ export default function StudentDashboardPage(): React.ReactElement {
     }
   }, [profile, isOnboarded, fetchComplaints]);
 
-  // Support complaint handler (Phase 4 integration)
+  // Support complaint handler
   const handleSupportComplaint = async (complaintId: string): Promise<void> => {
     if (userSupportedIds.has(complaintId)) return;
 
-    // Optimistic local state update
     const prevSupported = userSupportedIds.has(complaintId);
     const target = complaints.find((c) => c.$id === complaintId);
-    const prevCount = target ? (target.support_count || 0) : 0;
+    const prevCount = target ? (target.support_count ?? 1) : 1;
 
     setUserSupportedIds((prev) => new Set(prev).add(complaintId));
     setComplaints((prev) =>
@@ -127,14 +136,12 @@ export default function StudentDashboardPage(): React.ReactElement {
         );
       } else {
         if (res.code === 'ALREADY_SUPPORTED') {
-          // Keep supported state, restore previous count
           setComplaints((prev) =>
             prev.map((c) =>
               c.$id === complaintId ? { ...c, support_count: prevCount } : c
             )
           );
         } else {
-          // Revert both supported state and count
           setUserSupportedIds((prev) => {
             const next = new Set(prev);
             if (!prevSupported) next.delete(complaintId);
@@ -165,22 +172,17 @@ export default function StudentDashboardPage(): React.ReactElement {
     }
   };
 
-  // Filtered complaints client-side if needed for search
   const filteredComplaints = useMemo(() => {
     return complaints.filter((c) => {
-      // If feedType is department, must match user's department
-      if (feedType === 'department' && c.department_code !== profile?.department_code) {
+      const isMine = Boolean(
+        c.is_own_complaint || (profile?.user_id && c.student_user_id === profile.user_id)
+      );
+      if (feedType === 'mine' && !isMine) {
         return false;
       }
-      // If feedType is public, must be public issue
-      if (feedType === 'public' && c.issue_type !== 'public') {
+      if (!statusMatchesFilter(c.status, statusFilter)) {
         return false;
       }
-      // Status filter
-      if (statusFilter !== 'all' && c.status !== statusFilter) {
-        return false;
-      }
-      // Search query
       if (searchQuery.trim().length > 0) {
         const q = searchQuery.toLowerCase();
         const matchesTitle = c.title.toLowerCase().includes(q);
@@ -192,26 +194,17 @@ export default function StudentDashboardPage(): React.ReactElement {
       }
       return true;
     });
-  }, [complaints, feedType, profile?.department_code, statusFilter, searchQuery]);
+  }, [complaints, feedType, profile?.user_id, statusFilter, searchQuery]);
 
-  // Counts for tabs
   const counts = useMemo(() => {
-    let deptCount = 0;
-    let pubCount = 0;
-    complaints.forEach((c) => {
-      if (c.department_code === profile?.department_code && c.issue_type === 'department') {
-        deptCount++;
-      }
-      if (c.issue_type === 'public') {
-        pubCount++;
-      }
-    });
+    const mineCount = complaints.filter((c) =>
+      Boolean(c.is_own_complaint || (profile?.user_id && c.student_user_id === profile.user_id))
+    ).length;
     return {
       all: complaints.length,
-      department: deptCount,
-      public: pubCount,
+      mine: mineCount,
     };
-  }, [complaints, profile?.department_code]);
+  }, [complaints, profile?.user_id]);
 
   if (loading || !profile) {
     return (
@@ -221,17 +214,20 @@ export default function StudentDashboardPage(): React.ReactElement {
     );
   }
 
-  const isComputer = profile.department_code === '07';
+  const academicDept = resolveDepartment(
+    profile.student_department_id || profile.department_code
+  );
+  const academicDeptName = academicDept?.name || profile.department_name || 'Academic Department';
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
-      {/* Top Header Navigation (Screen 3) */}
+      {/* Top Header Navigation */}
       <header className="sticky top-0 z-40 w-full border-b border-slate-200 bg-white/95 shadow-xs backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/95">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4 sm:px-6">
-          {/* Left: Brand & Department Badge */}
+          {/* Left: Brand & Academic Department Badge */}
           <div className="flex items-center gap-3 sm:gap-4">
             <Link href="/dashboard" className="flex items-center gap-2">
-              <span className="text-[17px] font-bold tracking-tight text-slate-900 dark:text-white">
+              <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
                 CampusVoice
               </span>
               <span className="h-1.5 w-1.5 rounded-full bg-blue-700 dark:bg-blue-400" />
@@ -239,21 +235,19 @@ export default function StudentDashboardPage(): React.ReactElement {
 
             <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
 
-            <div className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-              {isComputer ? (
-                <TerminalWindow size={13} weight="bold" className="text-emerald-600 dark:text-emerald-400" />
-              ) : (
-                <Buildings size={13} weight="bold" className="text-emerald-600 dark:text-emerald-400" />
-              )}
-              <span>{profile.department_name}</span>
-            </div>
+            <DepartmentBadge
+              code={academicDept?.id || profile.student_department_id || 'dept_comp'}
+              name={academicDeptName}
+              showVerified
+              size="sm"
+            />
           </div>
 
           {/* Right: Actions & Profile */}
           <div className="flex items-center gap-3 sm:gap-4">
             <Link
               href="/complaints/new"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-700 px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-800 active:scale-[0.98] dark:bg-blue-600 dark:hover:bg-blue-700"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-700 px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-800 active:scale-95 dark:bg-blue-600 dark:hover:bg-blue-700"
             >
               <Plus size={14} weight="bold" />
               <span>New Complaint</span>
@@ -266,7 +260,7 @@ export default function StudentDashboardPage(): React.ReactElement {
                 <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">
                   {profile.name}
                 </p>
-                <p className="flex items-center justify-end gap-1 font-mono text-[10px] text-slate-400">
+                <p className="flex items-center justify-end gap-1 font-mono text-xs text-slate-400 dark:text-slate-500">
                   <Lock size={10} weight="bold" />
                   {profile.enrollment_no}
                 </p>
@@ -286,14 +280,14 @@ export default function StudentDashboardPage(): React.ReactElement {
       </header>
 
       {/* Main Content Workspace */}
-      <main className="mx-auto w-full max-w-[900px] flex-1 px-4 py-8 sm:px-6 sm:py-10">
+      <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
         {/* Header Section */}
         <div className="mb-7">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-[28px] dark:text-white">
-            Complaints
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl dark:text-white">
+            Department Complaints
           </h1>
           <p className="mt-1 text-xs text-slate-500 sm:text-sm dark:text-slate-400">
-            Department grievances and campus-wide public issues.
+            Complaints filed by students in {academicDeptName}, routed across campus maintenance teams.
           </p>
         </div>
 
@@ -323,12 +317,12 @@ export default function StudentDashboardPage(): React.ReactElement {
             description={
               searchQuery
                 ? `No grievances matched "${searchQuery}". Try adjusting your keywords or clearing the filter.`
-                : feedType === 'department'
-                ? `There are currently no active complaints reported for ${profile.department_name}.`
-                : 'No public grievances have been submitted yet.'
+                : feedType === 'mine'
+                ? 'You have not filed any complaints yet.'
+                : `There are currently no complaints reported for ${academicDeptName}.`
             }
             actionHref="/complaints/new"
-            actionText="Submit New Grievance"
+            actionText="Submit New Complaint"
           />
         ) : (
           <div className="space-y-4">
@@ -346,10 +340,10 @@ export default function StudentDashboardPage(): React.ReactElement {
 
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 bg-white py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
-        <div className="mx-auto max-w-5xl px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>CampusVoice Institutional Ombudsman Portal • FERPA Compliant</span>
-          <span className="font-mono text-[11px] text-slate-400">
-            Jurisdiction: {profile.department_name} (Code {profile.department_code})
+        <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-2 px-4 sm:flex-row">
+          <span>CampusVoice Institutional Portal • Academic Department Scope</span>
+          <span className="font-mono text-xs text-slate-400 dark:text-slate-500">
+            Academic Jurisdiction: {academicDeptName}
           </span>
         </div>
       </footer>

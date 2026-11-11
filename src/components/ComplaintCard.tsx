@@ -3,10 +3,12 @@
 import React from 'react';
 import Link from 'next/link';
 import { MapPin } from '@phosphor-icons/react';
+import { resolveDepartment } from '@/lib/utils';
 import type { Complaint } from '@/types';
 import { ComplaintStatusBadge } from './ComplaintStatusBadge';
 import { ComplaintPriorityBadge } from './ComplaintPriorityBadge';
 import { ComplaintSupportButton } from './ComplaintSupportButton';
+import { DepartmentBadge } from './DepartmentBadge';
 
 interface ComplaintCardProps {
   complaint: Complaint;
@@ -44,22 +46,20 @@ export function ComplaintCard({
   onAdminUpdate,
 }: ComplaintCardProps): React.ReactElement {
   const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
-  const isPublic = complaint.issue_type === 'public';
-
-  const handleSupportClick = async (): Promise<void> => {
-    if (onSupport) {
-      await onSupport(complaint.$id);
-    }
-  };
+  const maintDept = resolveDepartment(
+    complaint.maintenance_department_id || complaint.department_code
+  );
 
   return (
     <article className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300 sm:p-6 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700">
-      {/* Header: Badges & ID */}
+      {/* Header: Maintenance Department, Status, Priority & ID */}
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-            {isPublic ? 'Public' : 'Department'}
-          </span>
+          <DepartmentBadge
+            code={maintDept?.id || complaint.maintenance_department_id || complaint.department_code || 'dept_comp'}
+            name={maintDept?.name || complaint.department_name}
+            size="sm"
+          />
           <ComplaintStatusBadge status={complaint.status} />
           {complaint.priority !== 'low' && (
             <ComplaintPriorityBadge priority={complaint.priority} />
@@ -84,7 +84,7 @@ export function ComplaintCard({
       </div>
 
       {/* Description Snippet */}
-      <p className="mb-4 text-xs leading-relaxed text-slate-600 line-clamp-2 sm:text-sm dark:text-slate-300">
+      <p className="mb-4 line-clamp-2 text-xs leading-relaxed text-slate-600 sm:text-sm dark:text-slate-300">
         {complaint.description}
       </p>
 
@@ -113,7 +113,7 @@ export function ComplaintCard({
         ) : (
           <ComplaintSupportButton
             complaintId={complaint.$id}
-            supportCount={complaint.support_count || 0}
+            supportCount={complaint.support_count ?? 1}
             hasSupported={hasSupported}
             onToggleSupport={onSupport}
             variant="card"

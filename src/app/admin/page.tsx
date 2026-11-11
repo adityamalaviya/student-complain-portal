@@ -83,9 +83,9 @@ export default function AdminDashboardPage(): React.ReactElement {
       // Parallel fetch metrics and list
       const params: ListAdminComplaintsParams = { page, limit: 20 };
       if (activeTab === 'pending') {
-        params.status = 'open';
+        params.status = 'Pending';
       } else if (activeTab === 'resolved') {
-        params.status = 'resolved';
+        params.status = 'Resolved';
       }
 
       const [metricsRes, listRes] = await Promise.all([
@@ -142,7 +142,10 @@ export default function AdminDashboardPage(): React.ReactElement {
                   ...c,
                   status: newStatus,
                   official_response: officialResponse,
-                  resolved_at: newStatus === 'resolved' ? new Date().toISOString() : undefined,
+                  resolved_at:
+                    newStatus === 'Resolved' || newStatus === 'resolved'
+                      ? new Date().toISOString()
+                      : undefined,
                 }
               : c
           )
@@ -167,8 +170,8 @@ export default function AdminDashboardPage(): React.ReactElement {
     return complaints.filter((c) => {
       const shortId = c.$id.toLowerCase();
       const title = c.title.toLowerCase();
-      const student = c.student_name.toLowerCase();
-      const enrollment = c.student_enrollment_no.toLowerCase();
+      const student = (c.student_name ?? '').toLowerCase();
+      const enrollment = (c.student_enrollment_no ?? '').toLowerCase();
       return (
         shortId.includes(q) ||
         title.includes(q) ||
@@ -186,7 +189,7 @@ export default function AdminDashboardPage(): React.ReactElement {
     );
   }
 
-  const isComputer = profile.department_code === '07';
+  const adminDeptCode = profile.department_code || 'dept_comp';
   const openCount = metrics?.total_open ?? 0;
   const inProgressCount = metrics?.total_in_progress ?? 0;
   const resolvedCount = metrics?.total_resolved ?? 0;
@@ -208,12 +211,12 @@ export default function AdminDashboardPage(): React.ReactElement {
             <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
 
             <div className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-              {isComputer ? (
+              {adminDeptCode === '07' ? (
                 <TerminalWindow size={13} weight="bold" className="text-blue-700 dark:text-blue-400" />
               ) : (
                 <Buildings size={13} weight="bold" className="text-blue-700 dark:text-blue-400" />
               )}
-              <span>{profile.department_name} Admin (Code {profile.department_code})</span>
+              <span>{profile.department_name || 'Department'} Admin ({adminDeptCode})</span>
             </div>
           </div>
 
@@ -395,10 +398,10 @@ export default function AdminDashboardPage(): React.ReactElement {
 
                       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
                         <span className="font-medium text-slate-700 dark:text-slate-300">
-                          {complaint.student_name}
+                          {complaint.student_name ?? 'Student'}
                         </span>
                         <span>·</span>
-                        <span className="font-mono">{complaint.student_enrollment_no}</span>
+                        <span className="font-mono">{complaint.student_enrollment_no ?? '—'}</span>
                         <span>·</span>
                         <span>{formatTimestamp(complaint.$createdAt || complaint.created_at)}</span>
                         <span>·</span>

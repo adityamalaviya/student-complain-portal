@@ -1,110 +1,149 @@
-# CampusVoice — Implementation Plan
+# CampusVoice — Implementation Plan (7-Day Realignment)
 
-## Delivery Strategy
-Target: two-day MVP implementation, followed by deployment verification. A fully production-hardened system may require additional time. Do not fake unfinished functionality.
+**Updated:** 10 November 2026  
+**Target completion:** 16 November 2026  
+**Capacity target:** 78 focused engineering hours  
+**Mode:** Reuse existing source code; implement only against approved requirements.
 
-## Phase 0 — Confirm Blocking Decisions
-**Goal:** Resolve the decisions that cannot safely be guessed.
-- Confirm names of the two active departments and their mapping to codes `06` and `07`.
-- Obtain official enrollment-number examples and confirm full format/length; the department code position is confirmed as characters 8–9.
-- If unavailable, approve a pending/manual-verification onboarding fallback.
-- Identify the two administrator emails.
-- Create/configure Appwrite project, Google OAuth provider, database, and allowed origins.
-- Choose the Appwrite Function runtime and decide whether to deploy separate logical Functions or one API-style Function.
 
-**Exit criteria:** Confirmed extraction rule (characters 8–9, 1-based), tested official examples or approved verification fallback; Appwrite project is reachable; admin provisioning approach is known.
+## Authoritative product rules (effective 10 November 2026)
 
-## Phase 1 — Project Setup
-- Create the frontend and Appwrite Functions folders.
-- Configure Next.js + TypeScript.
-- Configure Appwrite Functions, runtime dependencies, environment variables, and a suitable health/status check.
-- Add `.env.example` files with placeholders.
-- Add CORS configuration for local development and the selected production frontend origin.
-- Set up Git repository and README.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-**Exit criteria:** Frontend starts locally; Function status/health check responds; no secrets committed.
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-## Phase 2 — Authentication and Profiles
-- Configure Appwrite Google OAuth.
-- Implement OAuth callback and sign-out.
-- Implement shared Function authentication/identity verification using the supported Appwrite mechanism.
-- Create profile lookup and onboarding APIs.
-- Implement onboarding state and server-side validation.
-- Implement department assignment using the confirmed characters 8–9 rule and approved validation fallback.
-- Build the Raise Complaint form to match the reference: read-only prefilled Student Name, Enrollment Number, and Department; required Title, Location, Description, and Priority; optional Attachment; Cancel and Submit Complaint actions.
-- Validate required fields and attachment type/size on the client and again in the Appwrite Function. Resolve identity and department from trusted profile data server-side.
-- Provision two admin profiles through a trusted setup process.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
 
-**Exit criteria:** Authenticated users are identified server-side; incomplete profiles cannot use complaint APIs; non-admin users cannot access admin APIs.
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
 
-## Phase 3 — Complaints and Visibility
-- Create department and complaint collections.
-- Implement complaint creation and paginated list/detail endpoints.
-- Implement department/private and Public Issue visibility.
-- Add search and status/category filters.
-- Build student dashboard and complaint submission form.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
 
-**Exit criteria:** Department A cannot see Department B's private complaint; both departments can see Public Issues.
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
 
-## Phase 4 — Support Workflow
-- Create support collection and enforce one support per user/complaint.
-- Implement support endpoint and accurate count retrieval.
-- Handle duplicate support gracefully.
-- Build Support button state for supported/unsupported.
-- Ensure support does not create a complaint.
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
 
-**Exit criteria:** Repeated support attempts do not increase the count; count matches persisted unique support records.
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
 
-## Phase 5 — Admin Dashboard
-- Implement scoped admin complaint list and basic metrics.
-- Add status update and administrative response APIs.
-- Build admin dashboard and complaint detail view.
-- Test cross-department admin isolation.
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
 
-**Exit criteria:** Admin A can manage own department and Public Issues, but cannot read or mutate Department B private complaints.
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
 
-## Phase 6 — Testing and Hardening (Completed & Verified)
-- [x] Test Google OAuth end-to-end (verified redirect to Google OAuth flow with configured client ID).
-- [x] Test onboarding validation and pending state (format check, code position slice [7:9], fallback rejection).
-- [x] Test invalid code and malformed enrollment number behavior (unmapped codes, non-numeric strings rejected).
-- [x] Test department/public visibility (cross-department generic 404 Oracle Elimination verified).
-- [x] Test duplicate and concurrent support requests (deterministic 32-char SHA-256 IDs, 409 collision handling, count invariance).
-- [x] Test unauthorized API requests and admin scope (non-admin 403, cross-department admin mutation 404).
-- [x] Check browser bundle and logs for leaked secrets (client bundle verified free of server keys; only public env vars exposed).
-- [x] Verify loading, empty, error, and success states (Next.js route protection, DevTools inspection verified).
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
 
-**Exit criteria:** Critical acceptance criteria in `prd.md` pass (Verified via automated test suite `tests/phase6.test.mjs`, all 23 tests green).
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
 
-## Phase 7 — Deployment
-- Deploy frontend to Vercel.
-- Deploy Appwrite Functions to Appwrite Cloud and configure their environment variables and execution permissions.
-- Configure environment variables, production CORS, Appwrite origins, OAuth redirects, and HTTPS.
-- Confirm deployed Functions can access Appwrite Database.
-- Run smoke tests against deployed URLs.
-- Record deployment URLs and known limitations in README.
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
 
-**Exit criteria:** Sign-in, onboarding, complaint creation, support, visibility, and admin status updates work in the deployed environment.
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
 
-## Two-Day Prioritization
-### Day 1
-1. Appwrite/OAuth setup and health checks.
-2. Authentication verification and profile onboarding.
-3. Department and complaint schema.
-4. Complaint creation and visibility APIs.
-5. Basic student UI.
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
 
-### Day 2
-1. Support uniqueness and count.
-2. Admin authorization and status updates.
-3. Admin/student UI completion.
-4. Critical authorization tests.
-5. Deploy and smoke-test.
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
 
-Use the confirmed characters 8–9 for department extraction. If the overall enrollment format remains unverified, reject malformed numbers or use the approved verification state. Do not sacrifice authorization tests to add cosmetic features.
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
 
-## Deferred
-- Notifications, uploads, comments, AI classification, analytics charts, escalation rules, and five-department rollout.
 
-- Add a first-time profile warning: “Please check your name and enrollment number carefully. Once you save them, they cannot be changed through your account.”
-- Make saved name and enrollment number read-only in normal student flows and enforce the restriction on the backend.
-- Use `Rahul` / `246510307054` only as reference sample data, never as hard-coded values for all students.
+## Planning assumptions
+- Seven calendar workdays are available counting 10–16 November inclusive.
+- Target is approximately 11 hours on Days 1–6 and 12 hours on Day 7.
+- This is an aggressive estimate, not a promise. Any unconfirmed mapping, Appwrite limitation, migration issue, or critical regression must be escalated rather than hidden.
+- No feature is complete until acceptance tests pass.
+
+## Day 1 — Domain and database foundation (11 hours)
+- Confirm institutional department names/code mappings; no guessing.
+- Model six departments with academic/maintenance flags.
+- Separate student academic and complaint maintenance identifiers.
+- Design scoped admin assignments and permission grants.
+- Design timeline, phone-change, warning, and audit collections.
+- Review migration/backfill/rollback plan before applying any schema changes.
+**Exit:** schema reviewed, mapping confirmed, migration plan approved, schema checks pass.
+
+## Day 2 — Onboarding and complaint creation (11 hours)
+- Add phone number to first-time profile setup.
+- Server-side format validation: exactly 10 digits, starts 6–9.
+- Lock name/enrollment and phone according to policy.
+- Add maintenance department selector.
+- Derive student department and creator identity server-side.
+- Remove public complaint form/API/schema behavior.
+**Exit:** onboarding and complaint creation integration tests pass.
+
+## Day 3 — Privacy and attachment security (11 hours)
+- Student feeds filtered by `student_department_id`.
+- Admin queues filtered by `maintenance_department_id`.
+- Server-side peer response projection removes creator PII and private attachment references.
+- Verify creator, concerned Maintenance Admin, and Principal full-detail access.
+- Validate attachment ownership, existence, actual MIME/type, 5 MB maximum, and private access.
+**Exit:** privacy, IDOR, attachment, and cross-department tests pass.
+
+## Day 4 — Timeline and support lifecycle (11 hours)
+- Make original complaint immutable after creation.
+- Add timeline events for status, progress, clarification, replies, and official responses.
+- Restrict status changes to concerned Maintenance Admin.
+- Implement support baseline 1, creator self-support prevention, same-academic-department eligibility, remove/re-support.
+- Prove concurrency-safe active support uniqueness and derived count.
+**Exit:** timeline integrity and support lifecycle tests pass.
+
+## Day 5 — Phone-change workflow and Principal foundation (11 hours)
+- Student request routed to own academic Department Admin.
+- Admin approve/reject.
+- One-time update permission.
+- Consume permission only after successful database save; preserve old phone and permission on failures.
+- Block Water/Sanitation Admin approval.
+- Principal cross-department dashboard foundation and role authorization.
+**Exit:** phone workflow failure-safety and Principal authorization tests pass.
+
+## Day 6 — Warnings, governance, audit history (11 hours)
+- Implement Pending/In Progress five-day eligibility.
+- Meaningful status/progress events reset timer; views/minor edits do not.
+- Manual Principal warnings, multiple warnings while unresolved, exclude Resolved.
+- Admin warning responses.
+- Department/admin assignment, permission grant/revocation, settings management.
+- Append-only audit events for all required actions.
+**Exit:** warning logic, governance, and audit coverage tests pass.
+
+## Day 7 — Stabilization and release verification (12 hours)
+- Run full typecheck, lint, unit, integration, and E2E suites.
+- Test role matrix and department isolation.
+- Test peer privacy and attachment access.
+- Test support concurrency and phone failure paths.
+- Test Principal restrictions and warning eligibility.
+- Review audit-log protection and secret exposure.
+- Verify Appwrite production configuration, OAuth, Function invocation, database permissions, and Vercel deployment.
+- Fix only release-blocking defects; document remaining issues honestly.
+**Exit:** no open critical/high findings, all acceptance criteria pass, deployment verified end-to-end.
+
+## Definition of done
+- Requirements implemented in actual backend and frontend.
+- Server-side authorization verified for every protected operation.
+- Critical/high security tests pass.
+- No unresolved department mapping assumptions.
+- No peer PII leakage.
+- No unauthorized status changes/warnings.
+- Migration and rollback strategy reviewed.
+- Handoff updated with exact test evidence and known limitations.
+
+## Risk and contingency
+If the schedule slips, defer cosmetic polish and nonessential analytics before security, privacy, data integrity, or authorization. Do not reduce testing or silently drop a requirement. Reforecast the deadline when actual blockers are found.

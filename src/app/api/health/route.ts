@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { INSTITUTIONAL_DEPARTMENTS } from '@/lib/utils';
 
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
@@ -6,9 +7,12 @@ export async function GET(): Promise<NextResponse> {
     service: 'campusvoice-frontend',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV,
-    active_departments: [
-      { code: '06', name: 'Civil Department' },
-      { code: '07', name: 'Computer Department' },
-    ],
+    active_departments: INSTITUTIONAL_DEPARTMENTS.map((dept) => ({
+      id: dept.id,
+      code: dept.code,
+      name: dept.name,
+      is_academic: dept.is_academic,
+      is_maintenance: dept.is_maintenance,
+    })),
   });
 }

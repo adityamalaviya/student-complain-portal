@@ -18,7 +18,7 @@ export function AdminResolutionModal({
   onClose,
   onSubmit,
 }: AdminResolutionModalProps): React.ReactElement | null {
-  const [status, setStatus] = useState<ComplaintStatus>('in_progress');
+  const [status, setStatus] = useState<ComplaintStatus>('In Progress');
   const [officialResponse, setOfficialResponse] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -109,7 +109,7 @@ export function AdminResolutionModal({
             {complaint.title}
           </p>
           <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
-            Filer: <span className="font-medium text-slate-600 dark:text-slate-300">{complaint.student_name}</span> ({complaint.student_enrollment_no})
+            Filer: <span className="font-medium text-slate-600 dark:text-slate-300">{complaint.student_name ?? 'Student'}</span> ({complaint.student_enrollment_no ?? '—'})
           </p>
         </div>
 
@@ -130,9 +130,9 @@ export function AdminResolutionModal({
             <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-200 bg-slate-100 p-1 text-xs font-semibold dark:border-slate-800 dark:bg-slate-800/80">
               <button
                 type="button"
-                onClick={() => setStatus('open')}
+                onClick={() => setStatus('Pending')}
                 className={`rounded-lg py-2 transition ${
-                  status === 'open'
+                  status === 'Pending' || status === 'open'
                     ? 'bg-white text-amber-800 shadow-2xs dark:bg-slate-900 dark:text-amber-300'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
                 }`}
@@ -141,9 +141,9 @@ export function AdminResolutionModal({
               </button>
               <button
                 type="button"
-                onClick={() => setStatus('in_progress')}
+                onClick={() => setStatus('In Progress')}
                 className={`rounded-lg py-2 transition ${
-                  status === 'in_progress'
+                  status === 'In Progress' || status === 'in_progress'
                     ? 'bg-white text-blue-700 shadow-2xs dark:bg-slate-900 dark:text-blue-300'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
                 }`}
@@ -152,9 +152,9 @@ export function AdminResolutionModal({
               </button>
               <button
                 type="button"
-                onClick={() => setStatus('resolved')}
+                onClick={() => setStatus('Resolved')}
                 className={`rounded-lg py-2 transition ${
-                  status === 'resolved'
+                  status === 'Resolved' || status === 'resolved'
                     ? 'bg-white text-emerald-700 shadow-2xs dark:bg-slate-900 dark:text-emerald-300'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
                 }`}

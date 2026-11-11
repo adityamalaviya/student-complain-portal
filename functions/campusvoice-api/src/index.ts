@@ -1,4 +1,5 @@
 import { verifyCaller } from './auth.js';
+import { INSTITUTIONAL_DEPARTMENTS, toDepartmentModel } from './departments.js';
 import {
   handleGetProfile,
   handleCompleteOnboarding,
@@ -8,6 +9,7 @@ import {
   handleCreateComplaint,
   handleListComplaints,
   handleGetComplaint,
+  handleGetComplaintAttachment,
   handleSupportComplaint,
   handleGetSupportState,
   handleGetAdminDashboard,
@@ -47,12 +49,9 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
       {
         success: true,
         service: 'campusvoice-api',
-        version: '1.0.0',
+        version: '2.0.0',
         timestamp: new Date().toISOString(),
-        active_departments: [
-          { code: '06', name: 'Civil Department' },
-          { code: '07', name: 'Computer Department' },
-        ],
+        active_departments: INSTITUTIONAL_DEPARTMENTS.map(toDepartmentModel),
       },
       200
     );
@@ -90,6 +89,9 @@ export default async function main(context: AppwriteContext): Promise<unknown> {
 
     case 'get-complaint':
       return handleGetComplaint(context, caller, data);
+
+    case 'get-complaint-attachment':
+      return handleGetComplaintAttachment(context, caller, data);
 
     case 'support-complaint':
       return handleSupportComplaint(context, caller, data);

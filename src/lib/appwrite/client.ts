@@ -28,4 +28,6 @@ const functionId =
 export const APPWRITE_CONFIG = {
   databaseId: process.env.NEXT_PUBLIC_APPWRITE_DATABASE_ID || 'campusvoice',
   functionId,
+  attachmentsBucketId:
+    process.env.NEXT_PUBLIC_APPWRITE_ATTACHMENTS_BUCKET_ID || 'complaint-attachments',
 } as const;

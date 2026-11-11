@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, createSession } from '@/lib/appwrite';
 import { apiGetProfile } from '@/lib/api';
 
 export default function AuthCallbackPage(): React.ReactElement {
   const router = useRouter();
+  const [profileCheckError, setProfileCheckError] = useState(false);
 
   useEffect(() => {
     let isCancelled = false;
@@ -51,16 +52,20 @@ export default function AuthCallbackPage(): React.ReactElement {
               return;
             }
 
-            if (is_onboarded && profile?.is_locked) {
+            if (is_onboarded) {
               console.log('[auth-callback] Student verified, routing to /dashboard');
               router.replace('/dashboard');
               return;
             }
           } else if (!profileResponse.success) {
-            console.warn('[auth-callback] Profile query returned failure:', profileResponse.error);
+            console.warn('[auth-callback] Profile query failed:', profileResponse.error);
+            setProfileCheckError(true);
+            return;
           }
         } catch (profileErr) {
-          console.warn('[auth-callback] Profile check exception, proceeding to onboarding:', profileErr);
+          console.warn('[auth-callback] Profile check failed:', profileErr);
+          setProfileCheckError(true);
+          return;
         }
 
         // First-time student or profile not yet locked: route to onboarding
@@ -83,14 +88,29 @@ export default function AuthCallbackPage(): React.ReactElement {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-center dark:bg-gray-950">
       <div className="flex flex-col items-center gap-4">
-        <div className="h-10 w-10 animate-spin rounded-full border-3 border-blue-700 border-t-transparent dark:border-blue-400"></div>
+        {!profileCheckError && (
+          <div className="h-10 w-10 animate-spin rounded-full border-3 border-blue-700 border-t-transparent dark:border-blue-400"></div>
+        )}
         <div className="space-y-1">
-          <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-            Verifying institutional credentials...
-          </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Connecting with Appwrite Cloud Authentication
-          </p>
+          {profileCheckError ? (
+            <>
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                We could not verify your profile.
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Your Google sign-in succeeded. Please refresh and try again; onboarding will open only after a confirmed profile check.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                Verifying institutional credentials...
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Connecting with Appwrite Cloud Authentication
+              </p>
+            </>
+          )}
         </div>
       </div>
     </div>

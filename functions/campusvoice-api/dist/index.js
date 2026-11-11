@@ -1,6 +1,7 @@
 import { verifyCaller } from './auth.js';
+import { INSTITUTIONAL_DEPARTMENTS, toDepartmentModel } from './departments.js';
 import { handleGetProfile, handleCompleteOnboarding, handleListDepartments, } from './handlers/profile.js';
-import { handleCreateComplaint, handleListComplaints, handleGetComplaint, handleSupportComplaint, handleGetSupportState, handleGetAdminDashboard, handleListAdminComplaints, handleUpdateAdminComplaint, } from './handlers/complaints.js';
+import { handleCreateComplaint, handleListComplaints, handleGetComplaint, handleGetComplaintAttachment, handleSupportComplaint, handleGetSupportState, handleGetAdminDashboard, handleListAdminComplaints, handleUpdateAdminComplaint, } from './handlers/complaints.js';
 export default async function main(context) {
     const { req, res, log } = context;
     log(`[campusvoice-api] Incoming execution: ${req.method} ${req.path}`);
@@ -28,12 +29,9 @@ export default async function main(context) {
         return res.json({
             success: true,
             service: 'campusvoice-api',
-            version: '1.0.0',
+            version: '2.0.0',
             timestamp: new Date().toISOString(),
-            active_departments: [
-                { code: '06', name: 'Civil Department' },
-                { code: '07', name: 'Computer Department' },
-            ],
+            active_departments: INSTITUTIONAL_DEPARTMENTS.map(toDepartmentModel),
         }, 200);
     }
     if (action === 'list-departments') {
@@ -59,6 +57,8 @@ export default async function main(context) {
             return handleListComplaints(context, caller, data);
         case 'get-complaint':
             return handleGetComplaint(context, caller, data);
+        case 'get-complaint-attachment':
+            return handleGetComplaintAttachment(context, caller, data);
         case 'support-complaint':
             return handleSupportComplaint(context, caller, data);
         case 'get-support-state':

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Buildings,
@@ -12,64 +12,89 @@ import {
   ArrowRight,
   TerminalWindow,
   CircleNotch,
+  Phone,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
 import { apiCompleteOnboarding } from '@/lib/api';
+import { StrictOnboardingSchema, PhoneNumberSchema } from '@/lib/schemas';
+import { extractAndMapEnrollment } from '@/lib/utils';
 
 export default function OnboardingPage(): React.ReactElement {
   const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin, setProfileState } = useAuth();
+  const { user, loading, isOnboarded, isAdmin, isPrincipal, setProfileState } = useAuth();
 
   const [name, setName] = useState<string>('');
   const [enrollmentNo, setEnrollmentNo] = useState<string>('');
+  const [phoneNumber, setPhoneNumber] = useState<string>('');
+  const nameInitialized = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Pre-fill name from Google account on initial load
   useEffect(() => {
-    if (user?.name && !name) {
+    if (user?.name && !nameInitialized.current) {
       setName(user.name);
+      nameInitialized.current = true;
     }
-  }, [user, name]);
+  }, [user]);
 
-  // Route protection
   useEffect(() => {
     if (!loading) {
       if (!user) {
         router.push('/sign-in');
       } else if (isAdmin) {
         router.push('/admin');
+      } else if (isPrincipal) {
+        router.push('/dashboard');
       } else if (isOnboarded) {
         router.push('/dashboard');
       }
     }
-  }, [loading, user, isOnboarded, isAdmin, router]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
 
-  // Real-time department extraction
   const cleanEnrollment = enrollmentNo.trim();
   const hasMinDigits = cleanEnrollment.length >= 9;
   const deptCode = hasMinDigits ? cleanEnrollment.slice(7, 9) : null;
-  const isCivil = deptCode === '06';
-  const isComputer = deptCode === '07';
-  const isMappedDept = isCivil || isComputer;
+  const enrollmentCheck = extractAndMapEnrollment(cleanEnrollment);
+
+  // Live preview of confirmed academic mapping once 9+ digits are entered
+  const previewMapping =
+    deptCode === '06'
+      ? { id: 'dept_civil', code: '06', name: 'Civil Department' }
+      : deptCode === '07'
+      ? { id: 'dept_comp', code: '07', name: 'Computer Department' }
+      : null;
+
+  const cleanPhone = phoneNumber.trim();
+  const phoneValidation = PhoneNumberSchema.safeParse(cleanPhone);
+  const hasPhoneInput = cleanPhone.length > 0;
+  const phoneStartsInvalid = hasPhoneInput && !/^[6-9]/.test(cleanPhone);
+
   const isFormValid =
     name.trim().length >= 2 &&
     cleanEnrollment.length === 12 &&
-    /^\d{12}$/.test(cleanEnrollment) &&
-    isMappedDept;
+    enrollmentCheck.isValid &&
+    phoneValidation.success;
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (!isFormValid || isSubmitting) return;
+    if (isSubmitting) return;
+
+    const validation = StrictOnboardingSchema.safeParse({
+      name: name.trim(),
+      enrollment_no: cleanEnrollment,
+      phone_number: cleanPhone,
+    });
+
+    if (!validation.success) {
+      setSubmitError(validation.error.issues[0]?.message || 'Please review your profile details.');
+      return;
+    }
 
     setIsSubmitting(true);
     setSubmitError(null);
 
     try {
-      const response = await apiCompleteOnboarding({
-        name: name.trim(),
-        enrollment_no: cleanEnrollment,
-      });
+      const response = await apiCompleteOnboarding(validation.data);
 
       if (response.success && response.data) {
         setProfileState(response.data.profile);
@@ -107,12 +132,12 @@ export default function OnboardingPage(): React.ReactElement {
                 <span className="text-base font-bold tracking-tight text-blue-700 dark:text-blue-400">
                   CampusVoice
                 </span>
-                <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-blue-700 uppercase dark:border-slate-700 dark:bg-slate-800 dark:text-blue-400">
+                <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-bold text-blue-700 uppercase dark:border-slate-700 dark:bg-slate-800 dark:text-blue-400">
                   PORTAL
                 </span>
               </div>
               <p className="hidden text-xs text-slate-500 sm:block dark:text-slate-400">
-                Collegiate Governance &amp; Student Ombudsman
+                Collegiate Governance &amp; Facilities Portal
               </p>
             </div>
           </div>
@@ -123,7 +148,7 @@ export default function OnboardingPage(): React.ReactElement {
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-600"></span>
             </span>
             <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-              Academic Year 2024-2025 • Operational
+              Institutional Auth • Active
             </span>
           </div>
         </div>
@@ -135,23 +160,17 @@ export default function OnboardingPage(): React.ReactElement {
         <div className="mb-6 w-full max-w-xl">
           <div className="mb-3 flex items-center justify-between rounded-xl border border-slate-200 bg-white/80 px-4 py-2.5 text-xs shadow-xs backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/80">
             <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-400">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-[11px] font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
                 ✓
               </span>
               <span>Step 1: Institutional Auth</span>
-              <span className="hidden rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] sm:inline dark:border-emerald-800 dark:bg-emerald-950/60">
-                Completed
-              </span>
             </div>
             <ArrowRight size={14} className="text-slate-400" />
             <div className="flex items-center gap-2 font-bold text-blue-700 dark:text-blue-400">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-700 text-[11px] text-white">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-700 text-xs text-white">
                 2
               </span>
-              <span>Step 2: Profile &amp; Identity</span>
-              <span className="hidden rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] sm:inline dark:border-blue-900 dark:bg-blue-950/60">
-                Active
-              </span>
+              <span>Step 2: Profile, Phone &amp; Identity</span>
             </div>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
@@ -170,7 +189,7 @@ export default function OnboardingPage(): React.ReactElement {
               Complete Your Student Profile
             </h1>
             <p className="mx-auto mt-2 max-w-md text-sm text-slate-600 dark:text-slate-400">
-              First-time registration required to access your department grievance feed and community support.
+              First-time registration requires your full name, 12-digit enrollment number, and 10-digit mobile number.
             </p>
           </div>
 
@@ -191,7 +210,7 @@ export default function OnboardingPage(): React.ReactElement {
                   Full Name (as per college records)
                   <span className="ml-1 text-red-600">*</span>
                 </label>
-                <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
                   <CheckCircle size={13} weight="fill" />
                   SSO Confirmed
                 </span>
@@ -207,7 +226,7 @@ export default function OnboardingPage(): React.ReactElement {
                 className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
               />
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Synced from your Google Account, verify spelling matches college records.
+                Synced from your Google Account; verify spelling matches college records.
               </p>
             </div>
 
@@ -224,6 +243,7 @@ export default function OnboardingPage(): React.ReactElement {
                 id="enrollmentNumber"
                 name="enrollmentNumber"
                 type="text"
+                inputMode="numeric"
                 maxLength={12}
                 required
                 value={enrollmentNo}
@@ -232,13 +252,13 @@ export default function OnboardingPage(): React.ReactElement {
                   setEnrollmentNo(val);
                 }}
                 placeholder="e.g. 246510307054"
-                className="w-full font-mono text-base tracking-widest text-slate-900 rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-base tracking-widest text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
               />
 
               {/* Character Breakdown Visual Guide */}
-              <div className="space-y-1.5 rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-850 dark:text-slate-400">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-1 font-mono text-[11px] dark:border-slate-800">
-                  <span className="text-slate-500">Position Guide:</span>
+              <div className="space-y-1.5 rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-1 font-mono text-xs dark:border-slate-800">
+                  <span className="text-slate-500 dark:text-slate-400">Position Guide:</span>
                   <span className="tracking-widest">
                     <span className="text-slate-400">2465103</span>
                     <span className="rounded bg-blue-100 px-1 font-bold text-blue-700 dark:bg-blue-900/60 dark:text-blue-300">
@@ -247,8 +267,8 @@ export default function OnboardingPage(): React.ReactElement {
                     <span className="text-slate-400">054</span>
                   </span>
                 </div>
-                <p className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
-                  Your department is derived from characters 8–9 of your enrollment number (highlighted in blue).
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Your academic department is derived server-side from characters 8–9 of your enrollment number.
                 </p>
               </div>
             </div>
@@ -256,14 +276,14 @@ export default function OnboardingPage(): React.ReactElement {
             {/* Field 3: Live Department Detection Card */}
             <div className="space-y-1.5">
               <label className="block text-sm font-semibold text-slate-900 dark:text-slate-200">
-                Institutional Department Jurisdiction
+                Academic Department Jurisdiction
               </label>
 
-              {isMappedDept ? (
+              {previewMapping ? (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 transition-all dark:border-emerald-900/50 dark:bg-emerald-950/30">
                   <div className="flex items-start gap-3">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">
-                      {isComputer ? (
+                      {previewMapping.id === 'dept_comp' ? (
                         <TerminalWindow size={22} weight="fill" />
                       ) : (
                         <Buildings size={22} weight="fill" />
@@ -272,9 +292,9 @@ export default function OnboardingPage(): React.ReactElement {
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                          {isComputer ? 'Computer Department' : 'Civil Department'}
+                          {previewMapping.name}
                         </h2>
-                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
                           <CheckCircle size={12} weight="fill" />
                           VERIFIED JURISDICTION
                         </span>
@@ -282,15 +302,15 @@ export default function OnboardingPage(): React.ReactElement {
                       <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
                         Code{' '}
                         <span className="rounded border border-slate-200 bg-white px-1 py-0.5 font-mono font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
-                          {deptCode}
+                          {previewMapping.code}
                         </span>{' '}
-                        detected at characters 8–9 • Active Institutional Department
+                        detected at characters 8–9 • Academic Peer Feed Scope
                       </p>
                     </div>
                   </div>
-                  <div className="mt-3 flex items-center gap-1.5 border-t border-emerald-200/60 pt-2.5 text-[11px] text-emerald-800 dark:border-emerald-900/50 dark:text-emerald-300">
+                  <div className="mt-3 flex items-center gap-1.5 border-t border-emerald-200/60 pt-2.5 text-xs text-emerald-800 dark:border-emerald-900/50 dark:text-emerald-300">
                     <Lock size={13} weight="bold" />
-                    <span>Grievance routing, class voting, and department council will be locked to this jurisdiction.</span>
+                    <span>Peer feed visibility is scoped to this academic department; complaints can be routed to any of the 6 maintenance departments.</span>
                   </div>
                 </div>
               ) : hasMinDigits ? (
@@ -302,30 +322,78 @@ export default function OnboardingPage(): React.ReactElement {
                         Unmapped Department Code: {deptCode}
                       </h2>
                       <p className="mt-1 text-xs text-amber-900 dark:text-amber-300">
-                        Only codes <span className="font-mono font-bold">06</span> (Civil Department) and{' '}
-                        <span className="font-mono font-bold">07</span> (Computer Department) are active for the Phase 2 release.
-                        Enrollment numbers with unmapped codes cannot be registered.
+                        Department code <span className="font-mono font-bold">{deptCode}</span> is not yet confirmed in institutional enrollment records. Only confirmed academic department codes (<span className="font-mono font-bold">06</span> Civil Department, <span className="font-mono font-bold">07</span> Computer Department) can be auto-assigned.
                       </p>
                     </div>
                   </div>
                 </div>
               ) : (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-850 dark:text-slate-400">
-                  Enter at least 9 digits of your 12-digit enrollment number to detect your institutional department.
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
+                  Enter at least 9 digits of your 12-digit enrollment number to detect your academic department.
                 </div>
               )}
             </div>
 
-            {/* Verbatim Warning Notice */}
+            {/* Field 4: Phone Number */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="phoneNumber" className="text-sm font-semibold text-slate-900 dark:text-slate-200">
+                  Mobile Phone Number (10 digits)
+                  <span className="ml-1 text-red-600">*</span>
+                </label>
+                {phoneValidation.success ? (
+                  <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                    <CheckCircle size={13} weight="fill" />
+                    Valid 10-Digit Format
+                  </span>
+                ) : (
+                  <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                    {cleanPhone.length}/10 digits
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <Phone
+                  size={18}
+                  className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-slate-400 dark:text-slate-500"
+                />
+                <input
+                  id="phoneNumber"
+                  name="phoneNumber"
+                  type="tel"
+                  inputMode="numeric"
+                  maxLength={10}
+                  required
+                  value={phoneNumber}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                    setPhoneNumber(val);
+                  }}
+                  placeholder="e.g. 9876543210"
+                  className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pr-3.5 pl-10 font-mono text-base tracking-widest text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
+                />
+              </div>
+              {phoneStartsInvalid ? (
+                <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                  Mobile number must begin with 6, 7, 8, or 9 and contain exactly 10 digits.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Enter a 10-digit Indian mobile number (starts with 6, 7, 8, or 9). Locked after saving; future updates require academic Department Admin approval.
+                </p>
+              )}
+            </div>
+
+            {/* Lock Warning Notice */}
             <div className="space-y-1.5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 shadow-xs dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
               <div className="flex items-start gap-2.5">
                 <Warning size={20} weight="fill" className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" />
                 <div>
                   <p className="text-xs font-bold leading-relaxed text-amber-950 dark:text-amber-100">
-                    Important Notice: Please check your name and enrollment number carefully. Once you save them, they cannot be changed through your account.
+                    Important Notice: Please check your name, enrollment number, and phone number carefully. Once you save them, they cannot be changed directly through your account.
                   </p>
-                  <p className="mt-1 text-[11px] text-amber-900/90 dark:text-amber-300">
-                    Any subsequent corrections will require in-person verification with the College Registrar &amp; Ombudsman Office.
+                  <p className="mt-1 text-xs text-amber-900/90 dark:text-amber-300">
+                    Name and enrollment number remain permanently locked; phone number updates require an approved request through your academic Department Admin.
                   </p>
                 </div>
               </div>
@@ -335,7 +403,7 @@ export default function OnboardingPage(): React.ReactElement {
             <button
               type="submit"
               disabled={!isFormValid || isSubmitting}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 text-sm font-bold text-white shadow-xs transition hover:bg-blue-800 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 text-sm font-bold text-white shadow-xs transition hover:bg-blue-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
             >
               {isSubmitting ? (
                 <>

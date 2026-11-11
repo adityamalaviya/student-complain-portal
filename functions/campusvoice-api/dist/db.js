@@ -1,4 +1,4 @@
-import { Client, Databases, Users } from 'node-appwrite';
+import { Client, Databases, Storage, Users } from 'node-appwrite';
 export function getAppwriteConfig() {
     const endpoint = process.env.APPWRITE_FUNCTION_ENDPOINT ||
         process.env.APPWRITE_ENDPOINT ||
@@ -12,6 +12,10 @@ export function getAppwriteConfig() {
     const departmentsCollectionId = process.env.COLLECTION_DEPARTMENTS || 'departments';
     const complaintsCollectionId = process.env.COLLECTION_COMPLAINTS || 'complaints';
     const supportsCollectionId = process.env.COLLECTION_SUPPORTS || 'complaint_supports';
+    const departmentAdminsCollectionId = process.env.COLLECTION_DEPARTMENT_ADMINS || 'department_admins';
+    const storageBucketId = process.env.APPWRITE_STORAGE_BUCKET_ID ||
+        process.env.NEXT_PUBLIC_APPWRITE_ATTACHMENTS_BUCKET_ID ||
+        'complaint-attachments';
     const adminCivilEmail = (process.env.ADMIN_ALLOWLIST_06 || '').trim().toLowerCase();
     const adminComputerEmail = (process.env.ADMIN_ALLOWLIST_07 || '').trim().toLowerCase();
     return {
@@ -23,6 +27,8 @@ export function getAppwriteConfig() {
         departmentsCollectionId,
         complaintsCollectionId,
         supportsCollectionId,
+        departmentAdminsCollectionId,
+        storageBucketId,
         adminCivilEmail,
         adminComputerEmail,
     };
@@ -38,6 +44,7 @@ export function getServerClient() {
         client.setKey(config.apiKey);
     }
     const databases = new Databases(client);
+    const storage = new Storage(client);
     const users = new Users(client);
-    return { client, databases, users };
+    return { client, databases, storage, users };
 }
