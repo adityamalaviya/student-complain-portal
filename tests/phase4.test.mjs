@@ -68,31 +68,48 @@ function processSupportComplaint({
     };
   }
 
-  // 5. Oracle Elimination: Check department visibility
-  if (complaint.issue_type === 'department') {
-    if (profile.department_code !== complaint.department_code) {
-      return {
-        status: 404,
-        body: {
-          success: false,
-          error: 'Complaint not found.',
-          code: 'NOT_FOUND',
-        },
-      };
-    }
+  // 5. Oracle Elimination: Check department visibility (public complaints removed; cross-department always 404)
+  if (profile.department_code !== complaint.department_code) {
+    return {
+      status: 404,
+      body: {
+        success: false,
+        error: 'Complaint not found.',
+        code: 'NOT_FOUND',
+      },
+    };
   }
 
   // 6. Deterministic SHA-256 Key Uniqueness
   const docId = computeSupportDocId(complaint.$id, caller.id);
 
   if (existingSupports.has(docId)) {
-    // 409 Conflict: Duplicate support attempt
+    const existing = existingSupports.get(docId);
+    if (!existing.status || existing.status === 'active') {
+      // 409 Conflict: Duplicate support attempt
+      return {
+        status: 409,
+        body: {
+          success: false,
+          error: 'You have already supported this complaint.',
+          code: 'ALREADY_SUPPORTED',
+        },
+      };
+    }
+    // Re-support from revoked state
+    existing.status = 'active';
+    existing.updated_at = new Date().toISOString();
+    const updatedSupportCount = complaint.support_count + 1;
+    complaint.support_count = updatedSupportCount;
+
     return {
-      status: 409,
+      status: 200,
       body: {
-        success: false,
-        error: 'You have already supported this complaint.',
-        code: 'ALREADY_SUPPORTED',
+        success: true,
+        data: {
+          support_count: updatedSupportCount,
+          has_supported: true,
+        },
       },
     };
   }
@@ -101,6 +118,7 @@ function processSupportComplaint({
   existingSupports.set(docId, {
     complaint_id: complaint.$id,
     user_id: caller.id,
+    status: 'active',
     supported_at: new Date().toISOString(),
   });
 
@@ -114,6 +132,96 @@ function processSupportComplaint({
       data: {
         support_count: updatedSupportCount,
         has_supported: true,
+      },
+    },
+  };
+}
+
+function processRemoveSupport({
+  caller,
+  profile,
+  complaint,
+  existingSupports,
+}) {
+  if (!profile || !profile.is_locked || !profile.enrollment_no) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'Student profile must be complete and verified before managing support.',
+        code: 'PROFILE_INCOMPLETE',
+      },
+    };
+  }
+
+  if (profile.role !== 'student') {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: 'Only students are eligible to remove support from complaints.',
+        code: 'FORBIDDEN',
+      },
+    };
+  }
+
+  if (!complaint) {
+    return {
+      status: 404,
+      body: {
+        success: false,
+        error: 'Complaint not found.',
+        code: 'NOT_FOUND',
+      },
+    };
+  }
+
+  if (complaint.student_user_id === caller.id) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'Students cannot remove baseline support from their own complaints.',
+        code: 'CANNOT_REMOVE_CREATOR_SUPPORT',
+      },
+    };
+  }
+
+  if (profile.department_code !== complaint.department_code) {
+    return {
+      status: 404,
+      body: {
+        success: false,
+        error: 'Complaint not found.',
+        code: 'NOT_FOUND',
+      },
+    };
+  }
+
+  const docId = computeSupportDocId(complaint.$id, caller.id);
+  const support = existingSupports.get(docId);
+  if (!support || support.status !== 'active') {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'You have not supported this complaint.',
+        code: 'NOT_SUPPORTED',
+      },
+    };
+  }
+
+  support.status = 'revoked';
+  support.revoked_at = new Date().toISOString();
+  complaint.support_count = Math.max(1, complaint.support_count - 1);
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        support_count: complaint.support_count,
+        has_supported: false,
       },
     },
   };
@@ -346,7 +454,7 @@ test('Phase 4 Criterion 6: Cross-department support attempt on private complaint
   assert.equal(computerPrivateComplaint.support_count, 2);
   assert.equal(supports.size, 0);
 
-  // Civil student supports a PUBLIC issue from Computer department: allowed!
+  // Cross-department support attempt on legacy/forged public issue must be rejected with 404 Oracle Elimination
   const publicComplaint = {
     $id: 'complaint_public_shared',
     student_user_id: 'usr_comp_author',
@@ -361,7 +469,66 @@ test('Phase 4 Criterion 6: Cross-department support attempt on private complaint
     complaint: publicComplaint,
     existingSupports: supports,
   });
-  assert.equal(pubRes.status, 200);
-  assert.equal(pubRes.body.data.support_count, 11);
-  assert.equal(supports.size, 1);
+  assert.equal(pubRes.status, 404, 'Must return 404 Oracle Elimination for cross-department support attempt');
+  assert.equal(pubRes.body.code, 'NOT_FOUND');
+  assert.equal(publicComplaint.support_count, 10, 'Support count must not increase');
+  assert.equal(supports.size, 0);
+});
+
+test('Day 1 Criterion 7: Remove-support and re-support lifecycle with deterministic docId and derived count', () => {
+  const caller = { id: 'usr_peer_student' };
+  const profile = {
+    user_id: 'usr_peer_student',
+    role: 'student',
+    is_locked: true,
+    enrollment_no: '246510307002',
+    department_code: '07',
+  };
+  const complaint = {
+    $id: 'complaint_day1_lifecycle',
+    student_user_id: 'usr_creator_student',
+    department_code: '07',
+    issue_type: 'department',
+    support_count: 1, // baseline
+  };
+  const supports = new Map();
+
+  // 1. Peer student supports (1 -> 2)
+  const res1 = processSupportComplaint({ caller, profile, complaint, existingSupports: supports });
+  assert.equal(res1.status, 200);
+  assert.equal(res1.body.data.support_count, 2);
+  assert.equal(res1.body.data.has_supported, true);
+  assert.equal(complaint.support_count, 2);
+
+  // 2. Remove support (2 -> 1)
+  const removeRes = processRemoveSupport({ caller, profile, complaint, existingSupports: supports });
+  assert.equal(removeRes.status, 200);
+  assert.equal(removeRes.body.data.support_count, 1);
+  assert.equal(removeRes.body.data.has_supported, false);
+  assert.equal(complaint.support_count, 1);
+
+  // 3. Repeated remove fails
+  const repeatRemove = processRemoveSupport({ caller, profile, complaint, existingSupports: supports });
+  assert.equal(repeatRemove.status, 400);
+  assert.equal(repeatRemove.body.code, 'NOT_SUPPORTED');
+
+  // 4. Re-support reactivates record (1 -> 2)
+  const resupportRes = processSupportComplaint({ caller, profile, complaint, existingSupports: supports });
+  assert.equal(resupportRes.status, 200);
+  assert.equal(resupportRes.body.data.support_count, 2);
+  assert.equal(resupportRes.body.data.has_supported, true);
+  assert.equal(complaint.support_count, 2);
+
+  // 5. Creator cannot remove baseline support
+  const creatorCaller = { id: 'usr_creator_student' };
+  const creatorProfile = {
+    user_id: 'usr_creator_student',
+    role: 'student',
+    is_locked: true,
+    enrollment_no: '246510307001',
+    department_code: '07',
+  };
+  const creatorRemoveRes = processRemoveSupport({ caller: creatorCaller, profile: creatorProfile, complaint, existingSupports: supports });
+  assert.equal(creatorRemoveRes.status, 400);
+  assert.equal(creatorRemoveRes.body.code, 'CANNOT_REMOVE_CREATOR_SUPPORT');
 });
