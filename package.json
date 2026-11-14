@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/**/*.test.mjs",
+    "test": "node scripts/run-tests.mjs",
     "setup:appwrite": "node scripts/setup-appwrite.mjs"
   },
   "dependencies": {

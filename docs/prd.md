@@ -1,137 +1,136 @@
-# CampusVoice — Product Requirements Document (PRD)
+# CampusVoice — Product Requirements Document (Updated)
 
-## 1. Overview
-**Product:** CampusVoice  
-**Type:** Department-based student complaint and community-support portal  
-**Initial scope:** Two departments, two department administrators  
-**Target delivery:** Two-day MVP implementation, followed by deployment and verification  
-**Primary stack:** Next.js + TypeScript, Appwrite Cloud Auth, Appwrite Database, Appwrite Cloud Functions, and Vercel
+**Version:** 2.0.0  
+**Date:** 10 November 2026  
+**Status:** Latest approved product baseline
 
-CampusVoice lets students report campus problems, support an existing complaint when they are affected by the same issue, and see complaint status updates. Department issues are visible only within the relevant department. Public Issues are shared across all active departments.
 
-## 2. Problem Statement
-Traditional complaint portals can collect multiple reports about the same problem. This creates duplicate complaint records, makes it harder for administrators to understand how widespread an issue is, and adds unnecessary review work. Students may also lack visibility into whether a problem has already been reported or is being addressed.
+## Authoritative product rules (effective 10 November 2026)
 
-CampusVoice provides a shared community complaint feed. Students can support an existing complaint rather than submit a duplicate, while administrators see one complaint and its count of unique supporters.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-## 3. Product Goals
-- Reduce duplicate complaint submissions by making existing complaints easy to find and support.
-- Show the number of unique students supporting each complaint.
-- Keep department-specific issues separated by department.
-- Make Public Issues visible to all active departments and their administrators.
-- Let authorized administrators update complaint status and publish an administrative response.
-- Securely assign a student's department from a validated enrollment number once the official format is confirmed.
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-## 4. Target Users
-### Students
-- Authenticate using Google OAuth.
-- Complete first-login onboarding with their name and enrollment number.
-- Browse issues available to their department and Public Issues.
-- Submit complaints, support existing complaints once, and track their activity.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
 
-### Department Administrators
-- Two administrator accounts in the initial release, one for each active department.
-- View complaints for their assigned department and all Public Issues.
-- Update complaint status and add an administrative response.
-- Cannot manage another department's private complaints.
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
 
-### Future scope
-The architecture should permit five departments and five department administrators without redesigning the core data model. Five administrator accounts are a future target, not the initial deployment scope.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
 
-## 5. Core Features
-### 5.1 Google OAuth and onboarding
-- Sign in through Appwrite's Google OAuth integration.
-- On first authenticated visit, request student name and enrollment number.
-- An Appwrite Function validates enrollment format and derives the department only after the official code position and format have been confirmed.
-- Save the department assignment in the trusted profile record.
-- Returning users go directly to the appropriate dashboard.
-- Users with incomplete or invalid profiles cannot create or support complaints.
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
 
-### 5.2 Department assignment
-- Initial department codes: `06` and `07` (provisional mapping to the two active departments).
-- Extract using the zero-based slice `[7:9]` (equivalent to characters 8 and 9 when counted from 1).
-- The department code position is confirmed: characters 8–9 (1-based indexing). The full enrollment-number length and any additional format constraints remain to be confirmed.
-- Do not search for `06` or `07` anywhere in the number.
-- Do not infer or hardcode an extraction position.
-- The department code can be extracted from characters 8–9. Validate the full enrollment-number format against official examples before production; reject codes other than `06` and `07`.
-- Never let a client-provided department ID override the server's assignment.
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
 
-### 5.3 Complaints
-- Create a complaint with a title, location, description, priority (`Low`, `Medium`, `High`), optional attachment, and issue type (`department` or `public`). The complaint form also displays the student's saved name, enrollment number, and department as prefilled read-only fields.
-- Department complaints are associated with one department.
-- Public Issues are visible to all active departments.
-- Complaint statuses: `Pending`, `In Progress`, `Resolved`.
-- Display creation time, status, category, and unique supporter count.
-- Search and filter complaints by text, status, and category.
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
 
-### 5.4 Community support
-- A student can support a complaint once.
-- Enforce uniqueness in the database, not only in the UI.
-- Support count is the number of unique support records for a complaint.
-- A support action must not create another complaint.
-- Whether students may withdraw support is deferred; initial MVP does not require withdrawal unless implemented consistently in API, schema, and UI.
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
 
-### 5.5 Administrator panel
-- Admin role and assigned department must be enforced inside every protected Appwrite Function.
-- Admin sees private complaints only for their assigned department.
-- Admin sees all Public Issues.
-- Admin can update status and add an administrative response.
-- Admin cannot change their own role or department through ordinary profile APIs.
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
 
-## 6. Visibility and Authorization Matrix
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
 
-| Action / data | Student | Department admin |
-|---|---|---|
-| View department complaints | Own department only | Assigned department only |
-| View Public Issues | Yes, across active departments | Yes, across active departments |
-| Create complaint | Yes, with completed profile | Not required in MVP |
-| Support complaint | Eligible department/public complaint | Not required in MVP |
-| Update complaint status | No | Assigned department and Public Issues |
-| Add admin response | No | Assigned department and Public Issues |
-| Change roles or department assignment | No | No, unless a separate trusted provisioning process is added |
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
 
-## 7. Success Criteria
-The MVP is accepted when:
-1. A student can sign in with Google OAuth.
-2. First-login onboarding collects required profile data.
-3. The app never guesses the enrollment code position.
-4. Department assignment uses a documented, tested official format or an approved verification fallback.
-5. A student can submit a complaint and see it in the correct feed.
-6. A second eligible student can support the complaint without creating a duplicate complaint.
-7. Duplicate support attempts are rejected and do not increase the count.
-8. Department A's private complaint is not visible to Department B's student or administrator.
-9. Public Issues appear to students and administrators in both active departments.
-10. Authorized admins can update status and administrative response.
-11. Unauthorized API requests are rejected server-side.
-12. Deployment environment variables and OAuth redirect URLs are configured without committing secrets.
-13. Core flows are tested against the deployed environment.
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
 
-## 8. Out of Scope for Initial Release
-- AI-based complaint classification or duplicate detection.
-- Email/SMS/push notifications.
-- Real-time chat.
-- Attachments and image uploads.
-- Anonymous complaints.
-- Multi-level escalation workflows.
-- Analytics beyond basic counts.
-- Five-department production rollout before the two-department MVP is verified.
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
 
-## 9. Risks and Dependencies
-- Official enrollment-number examples and department-code position are not yet provided.
-- Exact department names are not yet provided.
-- The two administrator email addresses are not yet provided.
-- Appwrite project, Google OAuth credentials, allowed origins, and redirect URLs must be configured.
-- The Appwrite Function runtime and function packaging approach must be selected.
-- A two-day deadline conflicts with a fully hardened production launch; prioritize a tested MVP and describe remaining production hardening honestly.
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
 
-## 10. Open Questions
-- What are the official names of the two initial departments?
-- What are valid enrollment-number examples for codes `06` and `07`, including examples with leading digits or repeated digits?
-- What is the complete valid enrollment-number length/format, beyond the confirmed department code at characters 8–9?
-- Should an administrator verify enrollment manually until the format is confirmed?
-- Which two administrator emails should be provisioned?
-- Which Appwrite Function runtime should be used, and should logical operations be deployed as separate Functions or one API-style Function?
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
 
-## First-time profile identity confirmation
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
 
-On first login, students enter their name and enrollment number. Before saving, show: “Please check your name and enrollment number carefully. Once you save them, they cannot be changed through your account.” After saving, both values are locked in normal student flows. Corrections require an approved admin/support process. The screenshot values `Rahul` and `246510307054` are illustrative examples only.
+
+## 1. Product objective
+Provide students with a department-scoped complaint portal that routes facilities/maintenance problems to the responsible maintenance team while protecting student identity and giving institutional leadership oversight.
+
+## 2. User groups
+### Student
+- Completes first-login profile.
+- Creates complaints for any maintenance department.
+- Views complaints created by students in their own academic department.
+- Supports and withdraws support from eligible peer complaints.
+- Tracks timeline, clarification requests, official responses, and status.
+- Requests phone-number changes through their own academic Department Admin.
+
+### Department Admin
+- Has explicitly assigned academic and/or maintenance scopes.
+- Maintenance scope: manages complaints routed to that maintenance department.
+- Academic scope: reviews phone-change requests from students in that academic department.
+- Adds progress updates, clarification requests, responses, and status transitions where authorized.
+- Cannot access unrelated department queues.
+
+### Principal
+- Monitors all six departments.
+- Reviews metrics, complaint history, delayed cases, warnings, and admin responses.
+- Manages department/admin assignments, permission grants, and system settings.
+- Cannot change complaint status.
+
+## 3. Core functional requirements
+1. Six-department directory with academic/maintenance classification.
+2. Server-derived student academic department using confirmed enrollment mappings.
+3. First-login collection of name, enrollment number, and phone.
+4. Locked identity fields with authorized phone-change workflow.
+5. Complaint creation with maintenance-department selection.
+6. Private attachment validation and access.
+7. Student feed based on creator's academic department.
+8. Peer PII and private attachment redaction at the backend.
+9. Creator, concerned Maintenance Admin, and Principal authorized full-detail access.
+10. Support baseline of one, self-support prevention, same-academic-department eligibility, withdrawal, re-support, and concurrency safety.
+11. Complaint immutable source record plus separate timeline.
+12. Maintenance Admin-only status changes.
+13. Principal dashboard, manual warnings, warning responses, and system management.
+14. Five-day meaningful-update delay rules.
+15. Append-only audit history for security-sensitive and lifecycle operations.
+
+## 4. Non-functional requirements
+- Strict server-side authorization.
+- Department isolation and generic denial behavior.
+- No secrets in frontend bundles.
+- Private attachments with server-side actual type/size checks.
+- Consistent error contracts and pagination.
+- Auditable administrative operations.
+- Accessible responsive UI with loading, empty, validation, and access-denied states.
+- Regression tests for privacy, authorization, and concurrent support.
+
+## 5. Acceptance criteria
+- Computer student can create an Electrical maintenance complaint; other Computer students can see/support it; Electrical Admin manages it; other academic-department students cannot see it.
+- Peer API payload contains no creator name, enrollment, phone, or private attachment reference.
+- Creator and authorized staff can see full details.
+- Student cannot support own complaint or support from another academic department.
+- Support can be withdrawn and later restored; count remains baseline 1 plus active supports.
+- Original complaint content is unchanged after creation; updates appear as timeline events.
+- Only assigned Maintenance Admin can change status.
+- Principal can issue warnings only on eligible unresolved complaints and cannot change status.
+- Phone change is approved by the student's academic Department Admin; failed save leaves old phone and permission intact.
+- All required lifecycle and permission events appear in protected audit history.
+
+## 6. Explicit exclusions
+- Public complaint feed or public complaint visibility mode.
+- Super Admin role.
+- Separate FastAPI/backend service.
+- Client-side-only security enforcement.

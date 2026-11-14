@@ -1,28 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { extractAndMapEnrollment } from '../src/lib/utils/department.ts';
 
 // =====================================================================
 // Phase 6: Testing & Hardening Comprehensive Verification Suite
 // =====================================================================
 
-// 1. Enrollment & Department Detection Engine
+// 1. Enrollment & Department Detection Engine (delegates to canonical registry)
 function extractDepartmentCode(enrollmentNo) {
   if (typeof enrollmentNo !== 'string') {
-    return { isValid: false, code: null, department: null, error: 'MALFORMED_FORMAT' };
+    return { isValid: false, code: null, departmentId: null, department: null, error: 'MALFORMED_FORMAT' };
   }
   const trimmed = enrollmentNo.trim();
   if (!/^\d{12}$/.test(trimmed)) {
-    return { isValid: false, code: null, department: null, error: 'INVALID_LENGTH_OR_CHARACTERS' };
+    return { isValid: false, code: null, departmentId: null, department: null, error: 'INVALID_LENGTH_OR_CHARACTERS' };
   }
-  const code = trimmed.slice(7, 9);
-  if (code === '06') {
-    return { isValid: true, code: '06', department: 'Civil Department', error: null };
+  const result = extractAndMapEnrollment(trimmed);
+  if (!result.isValid) {
+    return {
+      isValid: false,
+      code: result.code,
+      departmentId: null,
+      department: null,
+      error: 'UNMAPPED_DEPARTMENT_CODE',
+    };
   }
-  if (code === '07') {
-    return { isValid: true, code: '07', department: 'Computer Department', error: null };
-  }
-  return { isValid: false, code, department: null, error: 'UNMAPPED_DEPARTMENT_CODE' };
+  return {
+    isValid: true,
+    code: result.code,
+    departmentId: result.departmentId,
+    department: result.departmentName,
+    error: null,
+  };
 }
 
 // 2. Profile Onboarding & Immutability Rules
@@ -87,17 +97,12 @@ function evaluateComplaintVisibility(caller, complaint) {
     return { allowed: false, status: 404, error: 'Complaint not found.' };
   }
 
-  // Public complaints are visible across all active departments
-  if (complaint.issue_type === 'public') {
-    return { allowed: true, status: 200 };
-  }
-
-  // Department-scoped complaint: must match caller's department
+  // Public complaints are removed; visibility is strictly department-scoped
   if (caller.department_code === complaint.department_code) {
     return { allowed: true, status: 200 };
   }
 
-  // Cross-department probe: return generic 404 (Oracle Elimination)
+  // Cross-department probe (even if tagged public): return generic 404 (Oracle Elimination)
   return { allowed: false, status: 404, error: 'Complaint not found.' };
 }
 
@@ -199,10 +204,9 @@ function processAdminResolution({ adminCaller, complaint, newStatus, officialRes
     return { status: 404, body: { success: false, error: 'Complaint not found.', code: 'NOT_FOUND' } };
   }
 
-  // Jurisdiction check: Admin can only manage own department or Public Issues
+  // Jurisdiction check: Admin can only manage own department (public issues removed)
   const isOwnDept = complaint.department_code === adminCaller.department_code;
-  const isPublic = complaint.issue_type === 'public';
-  if (!isOwnDept && !isPublic) {
+  if (!isOwnDept) {
     // Cross-department probe: Oracle Elimination generic 404
     return { status: 404, body: { success: false, error: 'Complaint not found.', code: 'NOT_FOUND' } };
   }
@@ -249,7 +253,7 @@ test('Phase 6 Test 1: Onboarding format validation, department extraction, and p
   });
   assert.equal(civil.status, 200);
   assert.equal(civil.body.profile.department_code, '06');
-  assert.equal(civil.body.profile.department_name, 'Civil Department');
+  assert.equal(civil.body.profile.department_name, 'Civil');
   assert.equal(civil.body.profile.is_locked, true);
 
   // Test valid Computer enrollment (07 at characters 8-9)
@@ -260,16 +264,35 @@ test('Phase 6 Test 1: Onboarding format validation, department extraction, and p
   });
   assert.equal(comp.status, 200);
   assert.equal(comp.body.profile.department_code, '07');
-  assert.equal(comp.body.profile.department_name, 'Computer Department');
+  assert.equal(comp.body.profile.department_name, 'Computer');
 
-  // Test invalid department code (e.g. 05 or 99)
-  const unmapped = completeOnboarding({
+  // Test valid Electrical (09) and Mechanical (19) enrollments
+  const elec = completeOnboarding({
     existingProfile: null,
-    inputName: 'Test Student',
-    inputEnrollment: '246510399001',
+    inputName: 'Neha Joshi',
+    inputEnrollment: '246510309012',
   });
-  assert.equal(unmapped.status, 400);
-  assert.equal(unmapped.body.code, 'UNMAPPED_DEPARTMENT_CODE');
+  assert.equal(elec.status, 200);
+  assert.equal(elec.body.profile.department_name, 'Electrical');
+
+  const mech = completeOnboarding({
+    existingProfile: null,
+    inputName: 'Karan Desai',
+    inputEnrollment: '246510319034',
+  });
+  assert.equal(mech.status, 200);
+  assert.equal(mech.body.profile.department_name, 'Mechanical');
+
+  // Test rejected/disallowed department codes (03, 04, 05, 08, 99)
+  for (const rejectedCode of ['03', '04', '05', '08', '99']) {
+    const unmapped = completeOnboarding({
+      existingProfile: null,
+      inputName: 'Test Student',
+      inputEnrollment: `2465103${rejectedCode}001`,
+    });
+    assert.equal(unmapped.status, 400);
+    assert.equal(unmapped.body.code, 'UNMAPPED_DEPARTMENT_CODE');
+  }
 
   // Test malformed length (less than 12 digits)
   const tooShort = completeOnboarding({
@@ -350,9 +373,13 @@ test('Phase 6 Test 3: Department isolation & cross-department Oracle Elimination
   assert.equal(civilProbingComp.status, 404);
   assert.equal(civilProbingComp.error, 'Complaint not found.');
 
-  // Both students accessing Public Issue -> 200
+  // Civil student accessing same-department grievance (even if legacy public tag) -> 200
   assert.equal(evaluateComplaintVisibility(civilStudent, campusPublicGrievance).status, 200);
-  assert.equal(evaluateComplaintVisibility(compStudent, campusPublicGrievance).status, 200);
+
+  // Cross-department student probing grievance -> 404 (Oracle Elimination: public issues removed)
+  const compProbingPublic = evaluateComplaintVisibility(compStudent, campusPublicGrievance);
+  assert.equal(compProbingPublic.status, 404);
+  assert.equal(compProbingPublic.error, 'Complaint not found.');
 });
 
 test('Phase 6 Test 4: Community support uniqueness, deterministic SHA-256 IDs, and duplicate/concurrency invariance', () => {
@@ -519,15 +546,16 @@ test('Phase 6 Test 5: Admin authorization, scoped resolution, and Oracle Elimina
   assert.equal(civilProbingComp.body.code, 'NOT_FOUND');
   assert.equal(compGrievance.status, 'pending', 'Computer complaint must remain unmutated');
 
-  // Admin Comp resolving Public Issue -> Success
+  // Admin Comp attempting to resolve cross-department issue (even if legacy public tag) -> 404 (Oracle Elimination)
   const compResolvePublic = processAdminResolution({
     adminCaller: adminComp,
     complaint: publicGrievance,
     newStatus: 'in_progress',
     officialResponse: 'Facilities team has ordered replacement filters for the cafeteria cooler.',
   });
-  assert.equal(compResolvePublic.status, 200);
-  assert.equal(publicGrievance.status, 'in_progress');
+  assert.equal(compResolvePublic.status, 404);
+  assert.equal(compResolvePublic.body.code, 'NOT_FOUND');
+  assert.equal(publicGrievance.status, 'pending', 'Cross-department complaint must remain unmutated');
 });
 
 test('Phase 6 Test 6: Full Multi-Role End-to-End Lifecycle Verification', () => {

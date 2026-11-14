@@ -5,6 +5,12 @@
 
 # testing
 /coverage
+/coverage/
+/test-results/
+/playwright-report/
+/.nyc_output/
+*.lcov
+/tests/day1-database-foundation.test.mjs
 
 # next.js
 /.next/

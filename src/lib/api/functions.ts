@@ -6,6 +6,7 @@ import type {
   Department,
   UserProfile,
   Complaint,
+  ComplaintAttachmentData,
   ComplaintStatus,
   AdminMetrics,
 } from '../../types';
@@ -89,6 +90,7 @@ export async function apiCompleteOnboarding(
   return executeFunction<{ profile: UserProfile }>('complete-onboarding', {
     name: input.name,
     enrollment_no: input.enrollment_no,
+    phone_number: input.phone_number,
   });
 }
 
@@ -97,11 +99,10 @@ export async function apiListDepartments(): Promise<ApiResponse<{ departments: D
 }
 
 // ----------------------------------------------------
-// Complaints & Visibility Operations (Phase 3)
+// Complaints & Visibility Operations (Day 2+)
 // ----------------------------------------------------
 
 export interface ListComplaintsParams {
-  feed_type?: 'department' | 'public';
   search?: string;
   status?: ComplaintStatus;
   page?: number;
@@ -120,10 +121,14 @@ export async function apiListComplaints(
 export async function apiCreateComplaint(
   input: ComplaintCreateInput
 ): Promise<ApiResponse<{ complaint: Complaint }>> {
-  return executeFunction<{ complaint: Complaint }>(
-    'create-complaint',
-    input as Record<string, unknown>
-  );
+  return executeFunction<{ complaint: Complaint }>('create-complaint', {
+    title: input.title,
+    maintenance_department_id: input.maintenance_department_id,
+    location: input.location,
+    description: input.description,
+    priority: input.priority,
+    ...(input.attachment_file_id ? { attachment_file_id: input.attachment_file_id } : {}),
+  });
 }
 
 export async function apiGetComplaint(
@@ -131,6 +136,16 @@ export async function apiGetComplaint(
 ): Promise<ApiResponse<{ complaint: Complaint; has_supported: boolean }>> {
   return executeFunction<{ complaint: Complaint; has_supported: boolean }>('get-complaint', {
     complaint_id: complaintId,
+  });
+}
+
+export async function apiGetComplaintAttachment(
+  complaintId: string,
+  fileId?: string
+): Promise<ApiResponse<{ attachment: ComplaintAttachmentData }>> {
+  return executeFunction<{ attachment: ComplaintAttachmentData }>('get-complaint-attachment', {
+    complaint_id: complaintId,
+    ...(fileId ? { file_id: fileId } : {}),
   });
 }
 

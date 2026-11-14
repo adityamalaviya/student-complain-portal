@@ -1,4 +1,4 @@
-import { Client, Databases, Users } from 'node-appwrite';
+import { Client, Databases, Storage, Users } from 'node-appwrite';
 
 export function getAppwriteConfig(): {
   endpoint: string;
@@ -9,6 +9,8 @@ export function getAppwriteConfig(): {
   departmentsCollectionId: string;
   complaintsCollectionId: string;
   supportsCollectionId: string;
+  departmentAdminsCollectionId: string;
+  storageBucketId: string;
   adminCivilEmail: string;
   adminComputerEmail: string;
 } {
@@ -29,6 +31,12 @@ export function getAppwriteConfig(): {
   const departmentsCollectionId = process.env.COLLECTION_DEPARTMENTS || 'departments';
   const complaintsCollectionId = process.env.COLLECTION_COMPLAINTS || 'complaints';
   const supportsCollectionId = process.env.COLLECTION_SUPPORTS || 'complaint_supports';
+  const departmentAdminsCollectionId =
+    process.env.COLLECTION_DEPARTMENT_ADMINS || 'department_admins';
+  const storageBucketId =
+    process.env.APPWRITE_STORAGE_BUCKET_ID ||
+    process.env.NEXT_PUBLIC_APPWRITE_ATTACHMENTS_BUCKET_ID ||
+    'complaint-attachments';
 
   const adminCivilEmail = (process.env.ADMIN_ALLOWLIST_06 || '').trim().toLowerCase();
   const adminComputerEmail = (process.env.ADMIN_ALLOWLIST_07 || '').trim().toLowerCase();
@@ -42,6 +50,8 @@ export function getAppwriteConfig(): {
     departmentsCollectionId,
     complaintsCollectionId,
     supportsCollectionId,
+    departmentAdminsCollectionId,
+    storageBucketId,
     adminCivilEmail,
     adminComputerEmail,
   };
@@ -50,6 +60,7 @@ export function getAppwriteConfig(): {
 export function getServerClient(): {
   client: Client;
   databases: Databases;
+  storage: Storage;
   users: Users;
 } {
   const config = getAppwriteConfig();
@@ -64,7 +75,8 @@ export function getServerClient(): {
   }
 
   const databases = new Databases(client);
+  const storage = new Storage(client);
   const users = new Users(client);
 
-  return { client, databases, users };
+  return { client, databases, storage, users };
 }

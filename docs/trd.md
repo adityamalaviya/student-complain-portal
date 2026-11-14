@@ -1,143 +1,119 @@
-# CampusVoice — Technical Requirements Document (TRD)
+# CampusVoice — Technical Requirements Document (Updated)
 
-## 1. Selected Stack
-- **Frontend:** Next.js App Router + TypeScript.
-- **Backend logic:** Appwrite Cloud Functions (serverless); no separate FastAPI server.
-- **Authentication:** Appwrite Cloud Auth with Google OAuth.
-- **Database:** Appwrite Cloud Database.
-- **Frontend hosting:** Vercel.
-- **Backend hosting:** Appwrite Cloud Functions.
-- **Business operations:** Appwrite Function executions using the supported Appwrite SDK/API.
-- **Validation:** Validate in the frontend for usability and repeat all authoritative checks in Functions.
-- **Testing:** Unit/integration tests for Functions and end-to-end checks for critical user flows.
+**Version:** 2.0.0 | **Date:** 10 November 2026
 
-## 2. Authentication and Session Handling
-1. Configure Google as an Appwrite OAuth provider.
-2. Register development and production frontend URLs in Appwrite's allowed origins and OAuth redirect configuration.
-3. Frontend initiates OAuth and handles the return route.
-4. The frontend invokes protected Functions using the supported Appwrite execution/authentication mechanism.
-5. Each Function validates the caller's identity using a documented Appwrite mechanism before trusting the caller.
-6. The Function loads the application profile and role from trusted data.
-7. Reject missing, expired, invalid, or revoked credentials.
-8. Do not trust email, user ID, role, department, or admin status supplied in the request body.
-9. Never place Appwrite server API keys or secrets in frontend environment variables.
 
-**Implementation gate:** Confirm the exact Appwrite Functions SDK/runtime behavior and the supported way to pass/verify caller identity before implementing protected operations. Do not assume a Function automatically inherits the browser's session context.
+## Authoritative product rules (effective 10 November 2026)
 
-## 3. Authorization
-- Student profile must be complete before complaint creation or support.
-- Student's department is resolved from a server-managed profile.
-- The Raise Complaint form shows student name, enrollment number, and department prefilled and read-only. The server independently resolves these values from the authenticated user's trusted profile.
-- Department issue reads are restricted to the associated department.
-- Public Issues are readable by all active departments.
-- Admin authorization is based on server-managed admin profile records or a protected allowlist, not a frontend route or typed email alone.
-- Initial release provisions two department administrators. Future five-admin support is a configuration/data change.
-- Admin A cannot read or modify Department B private complaints.
-- Status changes and admin responses require authorization inside every Function.
-- CORS is not authorization.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-## 4. Department Detection
-- Active department codes: `06`, `07`.
-- Official department names and code-to-name mapping must be confirmed.
-- The code position is confirmed as characters 8–9 using 1-based indexing. The complete enrollment-number length and other format constraints still need confirmation.
-- Do not use `find`, `includes`, or substring searching over the entire number to infer the code.
-- Use the confirmed zero-based slice `[7:9]`, equivalent to characters 8–9 in 1-based indexing.
-- Treat enrollment numbers as strings, preserving leading zeros.
-- Validate allowed characters and overall length only after the official format is supplied.
-- Reject unsupported department codes and validate the full enrollment-number format against official examples before production.
-- Derive department assignment inside a trusted Function and prevent clients from updating it directly.
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-## 5. Function Contract (proposed)
-These are logical operations, not promises that each must be a separate deployed Function. They may be separate Functions or routed through one API-style Function, depending on the chosen Appwrite runtime and deployment design.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
 
-| Logical operation | Purpose | Access |
-|---|---|---|
-| `get-profile` | Retrieve current authenticated profile | Authenticated |
-| `complete-onboarding` | Submit name and enrollment number | Authenticated, incomplete profile |
-| `list-departments` | List active departments if needed by UI | Policy-dependent |
-| `list-complaints` | Paginated visible complaints; filters for status/category/search | Authenticated |
-| `create-complaint` | Create a complaint | Student with complete profile |
-| `get-complaint` | Retrieve detail if visible to caller | Authenticated |
-| `support-complaint` | Support once | Eligible student |
-| `get-support-state` | Return support count and caller's support state | Authenticated and authorized |
-| `get-admin-dashboard` | Admin metrics and scoped complaint counts | Authorized admin |
-| `list-admin-complaints` | Admin's department complaints plus Public Issues | Authorized admin |
-| `update-admin-complaint` | Update status and/or admin response | Authorized admin within scope |
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
 
-### Response behavior
-- Use consistent JSON payloads and error shapes for every Function.
-- Return a success result only after the database operation succeeds.
-- Map errors to clear UI states, including unauthorized, invalid input, already supported, and unavailable resource.
-- Paginate complaint lists with bounded page size.
-- Never accept a supporter count from the client.
-- Repeated support calls must not increase the count.
-- Confirm Appwrite's supported Function execution response and payload limits during implementation.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
 
-## 6. Data Model / Appwrite Collections
-See `schema.md`. Expected collections:
-- Complaint creation fields: `title` (required), `location` (required), `description` (required), `priority` (`low`, `medium`, `high`, required), optional attachment metadata, and `issue_type` (`department`, `public`).
-- `departments`
-- `profiles`
-- `complaints`
-- `complaint_supports`
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
 
-Use stable document IDs or explicit unique fields where practical. If the selected Appwrite Database version cannot enforce a required uniqueness rule directly, implement an atomic strategy supported by that version and test concurrent duplicate support attempts. A naive “query then insert” alone is race-prone.
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
 
-## 7. Environment Variables
-Example names only; populate deployment secrets privately.
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
 
-### Frontend `.env.local`
-- `NEXT_PUBLIC_APPWRITE_ENDPOINT`
-- `NEXT_PUBLIC_APPWRITE_PROJECT_ID`
-- `NEXT_PUBLIC_APPWRITE_DATABASE_ID` only if required for approved client-side reads; prefer business data through Functions
-- `NEXT_PUBLIC_APPWRITE_FUNCTION_ID` only if using a single public API-style Function
-- `NEXT_PUBLIC_APPWRITE_FUNCTION_*_ID` only for Function IDs intended to be invoked by the client
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
 
-Only public Appwrite project configuration and IDs belong in `NEXT_PUBLIC_*`. Never put a server API key here.
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
 
-### Appwrite Function environment
-- `APPWRITE_ENDPOINT`
-- `APPWRITE_PROJECT_ID`
-- `APPWRITE_API_KEY` (Function-only, least-privilege scopes, if required)
-- `APPWRITE_DATABASE_ID`
-- `APPWRITE_PROFILES_COLLECTION_ID`
-- `APPWRITE_DEPARTMENTS_COLLECTION_ID`
-- `APPWRITE_COMPLAINTS_COLLECTION_ID`
-- `APPWRITE_SUPPORTS_COLLECTION_ID`
-- Admin configuration or server-managed admin profile setup
-- `ENVIRONMENT`
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
 
-Use Function environment settings and `.env.example` placeholders only. Never commit real secrets.
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
 
-## 8. Deployment Requirements
-- Deploy frontend to Vercel.
-- Deploy backend logic as Appwrite Cloud Functions.
-- Configure Appwrite OAuth origins and redirect URLs for local and production frontend URLs.
-- Configure each Function's runtime, execution permissions, environment variables, and least-privilege API key scopes.
-- Use HTTPS in production.
-- Confirm Functions can access Appwrite Database.
-- Keep separate development and production configuration where possible.
-- Do not claim deployment is complete until deployed OAuth, database, Function invocation, and authorization flows are tested.
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
 
-## 9. Testing Requirements
-- Unit-test department parsing once official examples and positions are supplied.
-- Test unsupported/invalid department codes.
-- Test incomplete profile restrictions.
-- Test complaint visibility for both departments and Public Issues.
-- Test duplicate support, including concurrent requests if supported by the test setup.
-- Test admin scope isolation.
-- Test invalid/expired credentials.
-- Test deployed frontend-to-Function authentication and permissions.
-- Check browser bundle and logs for leaked secrets.
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
 
-## 10. Unresolved Technical Decisions
-- Exact Appwrite Function runtime/language and SDK versions.
-- Exact identity propagation/verification mechanism for Function executions.
-- Full enrollment-number length/format and allowed characters; department-code position is confirmed as characters 8–9.
-- Actual names for department codes `06` and `07`.
-- Actual two admin email addresses and how they are provisioned.
-- Whether to deploy one API-style Function or multiple smaller Functions.
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
 
-## Profile identity immutability
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
 
-First-time profile setup collects name and enrollment number and displays a warning before saving that they cannot be changed through the student's account afterward. Enforce immutability in Appwrite Functions/server-side business logic. Corrections require an authorized workflow. `Rahul` and `246510307054` are illustrative values only.
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
+
+
+## 1. Selected stack
+- Next.js App Router + TypeScript.
+- Appwrite Cloud Auth with Google OAuth.
+- Appwrite Cloud Database.
+- Appwrite Cloud Functions.
+- Vercel frontend hosting.
+- Appwrite Storage for private attachments.
+- Frontend validation for usability; authoritative validation repeated in Functions.
+
+## 2. Authentication
+- Configure Google OAuth in Appwrite.
+- Verify callback/session/JWT behavior against the deployed Appwrite SDK/runtime version.
+- Every protected Function verifies caller identity.
+- Load trusted profile and scoped grants server-side.
+- Reject missing, expired, invalid, or revoked credentials.
+- No secrets in `NEXT_PUBLIC_*`.
+
+## 3. Authorization rules
+- Student must have complete profile for complaint creation/support.
+- Student feed scope: `student_department_id`.
+- Admin queue scope: `maintenance_department_id`.
+- Academic Admin scope governs phone-change approvals.
+- Principal has cross-department monitoring/management rights but no complaint status mutation.
+- Every endpoint repeats authorization; route hiding is not security.
+
+## 4. Enrollment mapping
+- Extract `enrollment_no.slice(7, 9)`.
+- Preserve enrollment number as string.
+- Known codes: `06` and `07` map to Department 1 and Department 2; confirm official names and all other mappings.
+- Unknown code must not be assigned.
+- Validate full format only from authoritative institutional examples.
+
+## 5. Backend operations
+Use one or more Appwrite Cloud Functions according to approved deployment design. Logical operations include profile, department listing, complaints, support add/remove/state, admin dashboard/queue, timeline events, phone-change request/review/complete, Principal dashboard, warning issue/response, department/admin/permission management, settings, and audit history.
+
+## 6. Data and storage
+See `schema.md`. All sensitive database operations go through trusted Functions. Attachments must be private and checked server-side for ownership, existence, actual content type, and size <= 5 MB. Allowed types: PDF/JPG/JPEG/PNG.
+
+## 7. Reliability and concurrency
+- Use idempotency where appropriate.
+- Prevent duplicate active support records under concurrency.
+- Keep support count derived from active support records plus creator baseline.
+- Couple timeline events, projections, and audit events transactionally where Appwrite supports it; otherwise document recoverable state and reconciliation.
+- Phone-change permission consumption must not occur before successful phone persistence.
+
+## 8. Testing
+Test enrollment mapping, unmapped codes, onboarding locks, phone validation, department visibility, peer PII redaction, attachment access, support self/duplicate/remove/re-support/concurrency, complaint immutability, timeline authorization, admin scope, Principal restrictions, five-day timer, warnings, phone-change failure-safety, audit protection, and deployed auth/permissions.
+
+## 9. Deployment
+- Frontend to Vercel.
+- Backend to Appwrite Cloud Functions.
+- Configure OAuth origins and redirects.
+- Use least-privilege Function API key scopes.
+- Verify deployed flows end-to-end before claiming release complete.

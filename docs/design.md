@@ -1,139 +1,109 @@
-# CampusVoice — Design System
+# CampusVoice — UI/UX Design Specification (Updated)
 
-## 1. Design Direction
-A modern, clean, professional college portal. The interface should feel trustworthy and easy to scan, with emphasis on complaint status, department scope, and supporter counts. Avoid decorative complexity that slows the two-day build.
-
-## 2. Color Palette
-Use a light theme by default.
-
-| Token | Suggested value | Usage |
-|---|---|---|
-| Primary | `#1D4ED8` | Primary actions, active navigation |
-| Primary hover | `#1E40AF` | Hover/pressed state |
-| Page background | `#F8FAFC` | Main app background |
-| Surface | `#FFFFFF` | Cards, dialogs, panels |
-| Main text | `#0F172A` | Headings and body text |
-| Muted text | `#64748B` | Metadata and helper text |
-| Border | `#E2E8F0` | Dividers and card outlines |
-| Success | `#15803D` | Resolved status |
-| Warning | `#B45309` | Pending status |
-| In progress | `#1D4ED8` | In Progress status |
-| Danger | `#B91C1C` | Validation and destructive errors |
-
-Maintain accessible contrast. Do not communicate status using color alone; include text labels.
-
-## 3. Typography
-- Suggested font: Inter or a system sans-serif stack.
-- Page title: 28–32px desktop, 24px mobile, semibold.
-- Section heading: 18–22px, semibold.
-- Body: 14–16px.
-- Metadata/helper text: 12–14px.
-- Use consistent line height and avoid overly dense complaint cards.
-
-## 4. Layout
-### Desktop
-- Left sidebar or compact top navigation.
-- Main content width approximately 1100–1200px.
-- Student feed uses a single readable column or two-column layout only when it remains easy to scan.
-- Admin dashboard has summary metrics above a complaint table/list.
-
-### Mobile
-- Single-column feed.
-- Stack form fields.
-- Use full-width primary actions.
-- Avoid horizontal overflow in tables; convert rows to cards where appropriate.
-
-## 5. Core Components
-- `AppShell`: shared navigation and page frame.
-- `DepartmentBadge`: shows department scope when relevant.
-- `IssueTypeBadge`: Department Issue or Public Issue.
-- `StatusBadge`: Pending, In Progress, Resolved with text and icon/shape support.
-- `ComplaintCard`: title, description preview, category, created date, status, support count, Support button.
-- `SupportButton`: disabled/selected state after successful support; show clear duplicate/error feedback.
-- `ComplaintForm`: prefilled read-only Student Name, Enrollment Number, and Department; required Complaint Title, Location, Description, and Priority; optional Attachment; validation messages; Cancel and Submit Complaint actions.
-- `AdminComplaintTable` or responsive card list: title, scope, supporters, status, update action.
-- `EmptyState`: helpful explanation and next action.
-- `ErrorState`: actionable failure message and retry when safe.
-- `LoadingState`: skeleton or spinner without implying success.
-
-## 6. Navigation
-### Student
-- Dashboard / Community
-- Submit Complaint
-- My Activity
-- Profile / Sign out
-
-### Admin
-- Overview
-- Department Complaints
-- Public Issues
-- Profile / Sign out
-
-Only show routes relevant to the current role, but enforce access on the backend regardless of navigation visibility.
-
-## 7. Complaint Card Content
-Show:
-- Complaint title
-- Short description
-- Category
-- Department or Public Issue label
-- Status
-- Created date
-- Number of unique students supporting
-- Support button with supported state
-
-Do not display sensitive reporter information unless there is an explicit product requirement and access policy.
-
-## 8. Forms and Feedback
-- Use visible labels, not placeholder-only labels.
-- Explain enrollment format only after the official format is confirmed.
-- If department detection is not configured, say that profile verification is pending; do not show a fabricated department.
-- Disable a submit button while a request is in flight, but still enforce uniqueness on the server.
-- Display errors near the relevant field.
-- Do not show success until the server confirms the operation.
-- Confirm status updates and show the resulting server state.
-
-## 9. Accessibility
-- Keyboard-accessible navigation and controls.
-- Visible focus indicators.
-- Correct semantic headings and form labels.
-- Sufficient text/background contrast.
-- Statuses use text labels, not color alone.
-- Support action has an accessible name and announces updated count where practical.
-
-## 10. Responsive and Interaction States
-Every core page should include:
-- Loading state
-- Empty state
-- Validation error state
-- API/network error state
-- Successful result state
-- Unauthorized/access-denied state where relevant
-
-## 11. Design Scope Rules
-- Build reusable components only where they help consistency.
-- Avoid animations, complex charting, and custom illustration work in the MVP.
-- Prioritize clarity, trust, and a usable community feed.
+**Version:** 2.0.0 | **Date:** 10 November 2026
 
 
-## Raise Complaint Form Specification
+## Authoritative product rules (effective 10 November 2026)
 
-Use the supplied reference screenshot as the visual target: white rounded form card, two-column rows where space allows, clear labels, comfortable input spacing, and bottom-aligned Cancel and primary Submit Complaint actions.
+### Stack
+- Frontend: Next.js App Router + TypeScript.
+- Authentication: Appwrite Cloud Auth with Google OAuth.
+- Database: Appwrite Cloud Database.
+- Backend: Appwrite Cloud Functions only.
+- Frontend hosting: Vercel.
+- Design source: Stitch MCP.
+- Do not introduce FastAPI, another backend service, or a Super Admin role.
 
-- Row 1: Student Name (prefilled, read-only) and Enrollment Number (prefilled, read-only).
-- Row 2: Problem / Complaint Title (required, full width).
-- Row 3: Department (prefilled, read-only) and Location (required).
-- Row 4: Description (required, multiline).
-- Row 5: Priority (required; selectable Low, Medium, High options with distinct blue, amber, and red indicators).
-- Row 6: Attachment (optional file input).
-- Footer: Cancel and Submit Complaint buttons.
+### Departments and jurisdiction
+Six departments exist:
+1. Computer
+2. Civil
+3. Electrical
+4. Mechanical
+5. Water
+6. Sanitation
 
-Read-only fields should look like normal inputs but cannot be edited. Show helper text that the name, enrollment number, and department come from the student's profile. Keep the layout responsive: stack columns on narrow screens. Do not rely on color alone to communicate priority.
+Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
 
-## First-time profile warning
+Keep separate identifiers:
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
+- `maintenance_department_id`: the department responsible for resolving a complaint.
 
-Place a small, readable warning below the Name and Enrollment Number inputs and above the Save/Continue button:
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
 
-“Please check your name and enrollment number carefully. Once you save them, they cannot be changed through your account.”
+### Roles and permissions
+Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
 
-Reference example values: **Rahul** and **246510307054**. These are illustrative only, not universal defaults. After first save, both fields are read-only in normal student flows.
+Department Admin has a scoped assignment. Maintenance Admin manages complaints routed to their maintenance department. A student's academic Department Admin handles that student's phone-change request. Water and Sanitation Admins cannot approve student phone changes.
+
+Principal can monitor all six departments, view authorized complaint/student details, see metrics/history/delays, issue manual warnings on eligible unresolved complaints, review admin warning responses, manage departments/admin assignments/accounts/permissions/settings, and inspect audit/security history. Principal cannot change complaint status and cannot warn on resolved complaints.
+
+### Student onboarding and phone profile
+First login collects student name, enrollment number, and phone number. Name and enrollment number lock after saving. Phone number locks after saving except through the approved phone-change workflow. Phone validation is exactly 10 digits and begins with 6, 7, 8, or 9. Validate server-side. Format validation does not establish ownership.
+
+Phone-change workflow: student requests change through their own academic Department Admin; admin approves/rejects; approval grants a one-time update permission; old number remains active until successful save; permission is consumed only after successful database save; invalid input, network failure, or database failure must not consume permission; audit request, decision, and outcome.
+
+### Complaints
+A student can file a complaint to any of the six maintenance departments. Fields: title, maintenance department, location, description, priority (Low/Medium/High), optional attachment. Attachment max 5 MB; allowed PDF/JPG/JPEG/PNG only; verify actual file existence, ownership, MIME/type, size, and private access server-side. Public complaint functionality is removed completely.
+
+Original complaint record is immutable after creation. Statuses are Pending, In Progress, Resolved. The concerned Maintenance Department Admin alone changes status. Admin official responses, substantive progress updates, clarification requests, and student replies are separate append-only timeline entries.
+
+### Visibility and privacy
+Students see complaints created by students from their own academic department, regardless of the selected maintenance department. Peer visibility is based only on `student_department_id`. The complaint's `maintenance_department_id` determines which Maintenance Admin manages it.
+
+Peer students must not receive creator name, enrollment number, phone number, or private attachment references/URLs. Creator can see their own full complaint. Concerned Maintenance Admin and Principal can see full details within authorization. Never rely on frontend hiding; project sensitive fields out of backend responses.
+
+### Support
+Initial support count is 1 (creator baseline). Creator cannot support own complaint. Only same-academic-department students may support. One active support per student per complaint. Student may remove their support and support again later. Displayed count is `1 + active support records`; do not trust or increment a client-provided count. Prevent duplicate active records and handle concurrent requests safely.
+
+### Delay and warnings
+Pending complaints become warning-eligible after more than five days in Pending. In Progress complaints become eligible after more than five days since the last meaningful status change or substantive progress update. Minor edits, views, refreshes, and unrelated actions do not reset the timer. Resolved complaints are excluded. Principal issues manual warnings; multiple warnings may be issued while a complaint remains unresolved.
+
+### Security and audit
+Authenticate and authorize every protected backend operation. Derive identity, role, academic department, maintenance assignment, support count, and permissions from trusted server-side records. Protect against IDOR, privilege escalation, cross-department leakage, attachment access abuse, and secret exposure. Append-only audit history must cover complaint lifecycle, support add/remove, timeline/clarification, warnings/responses, phone-change workflow, admin assignments, role/permission changes, and settings changes. Normal users/admins cannot modify or delete audit history through application operations.
+
+
+## 1. Design direction
+Use a modern, accessible college portal. Reuse the approved visual language and components where they remain compatible. Do not let legacy screens imply removed product behavior.
+
+## 2. Required screens
+1. Google OAuth sign-in.
+2. First-time student profile setup (name, enrollment, phone).
+3. Student dashboard with academic-department complaint feed.
+4. Raise complaint form with six-maintenance-department selector.
+5. Complaint details with privacy-aware peer/creator/staff variants.
+6. Support and remove-support states.
+7. Complaint timeline with status, progress, clarification, and replies.
+8. Student phone-change request and status.
+9. Department Admin dashboard scoped to maintenance assignment.
+10. Department Admin complaint management, progress update, clarification, status change, and warning response.
+11. Academic Department Admin phone-change review.
+12. Principal dashboard across six departments.
+13. Principal warning issuance and warning history.
+14. Principal department/admin/permission/settings management.
+15. Audit history viewer for authorized Principal/granted accounts.
+16. Loading, empty, validation-error, network-error, and access-denied states.
+
+## 3. Key interaction requirements
+- Student's academic department is displayed as profile context, not editable.
+- Complaint form lets student select maintenance department.
+- Do not show public/private issue-type toggle or public feed.
+- Peer complaint cards do not display creator identity or private attachments.
+- Creator sees their own identity and private attachment controls.
+- Admin and Principal views expose only fields permitted by backend authorization.
+- Support control toggles between Support and Remove support.
+- Timeline is chronological and distinguishes status changes, progress updates, clarification requests/replies, and admin responses.
+- Principal warning action is disabled/absent for resolved or not-yet-eligible complaints.
+- Principal has no status-change control.
+- Phone-change status explains pending, approved, rejected, and completed states without implying the update succeeded before persistence.
+
+## 4. Accessibility and states
+- Keyboard navigable controls and visible focus.
+- Labels and field-level validation.
+- Responsive layouts for desktop/mobile.
+- Confirm destructive/irreversible user actions clearly.
+- Do not render sensitive values in hidden DOM elements; privacy must be enforced by backend projection, not CSS.
+- Never display a success toast before backend confirmation.
+
+## 5. Stitch MCP gate
+Do not invoke Stitch MCP during a read-only audit or before explicit design-stage approval. When approved, design the screens above and wait for user approval before implementation.

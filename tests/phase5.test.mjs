@@ -11,15 +11,14 @@ function evaluateAdminAccess(adminCaller, complaint) {
     return { allowed: false, status: 403, error: 'Forbidden' };
   }
 
-  // Admin jurisdiction: Own department OR Public Issue
+  // Admin jurisdiction: strictly own department (public complaints are removed)
   const isOwnDepartment = complaint.department_code === adminCaller.department_code;
-  const isPublicIssue = complaint.issue_type === 'public';
 
-  if (isOwnDepartment || isPublicIssue) {
+  if (isOwnDepartment) {
     return { allowed: true, status: 200 };
   }
 
-  // Department B private complaint: Generic 404 Oracle Elimination
+  // Cross-department complaint: Generic 404 Oracle Elimination
   return { allowed: false, status: 404, error: 'Complaint not found.' };
 }
 
@@ -85,16 +84,15 @@ function processAdminUpdateComplaint({ adminCaller, complaint, newStatus, offici
 }
 
 function computeAdminMetrics(adminDeptCode, complaintsDatabase) {
-  // Counts open, in_progress, and resolved within admin's jurisdiction
+  // Counts open, in_progress, and resolved strictly within admin's own department jurisdiction
   let totalOpen = 0;
   let totalInProgress = 0;
   let totalResolved = 0;
 
   for (const c of complaintsDatabase) {
-    const isOwnDept = c.department_code === adminDeptCode && c.issue_type === 'department';
-    const isPublic = c.issue_type === 'public';
+    const isOwnDept = c.department_code === adminDeptCode;
 
-    if (isOwnDept || isPublic) {
+    if (isOwnDept) {
       if (c.status === 'open') totalOpen++;
       else if (c.status === 'in_progress') totalInProgress++;
       else if (c.status === 'resolved') totalResolved++;
@@ -111,9 +109,8 @@ function computeAdminMetrics(adminDeptCode, complaintsDatabase) {
 
 function listAdminComplaints(adminDeptCode, complaintsDatabase, filterStatus) {
   return complaintsDatabase.filter((c) => {
-    const isOwnDept = c.department_code === adminDeptCode && c.issue_type === 'department';
-    const isPublic = c.issue_type === 'public';
-    if (!isOwnDept && !isPublic) return false;
+    const isOwnDept = c.department_code === adminDeptCode;
+    if (!isOwnDept) return false;
 
     if (filterStatus && c.status !== filterStatus) return false;
     return true;
@@ -124,10 +121,10 @@ function listAdminComplaints(adminDeptCode, complaintsDatabase, filterStatus) {
 // Phase 5 Test Suite
 // ---------------------------------------------------------------------
 
-test('Phase 5 Exit Criteria: Admin A can manage own department complaints and Public Issues', () => {
+test('Phase 5 Exit Criteria: Admin A can manage own department complaints, and cross-department public issues are rejected', () => {
   const adminCivil = { id: 'admin_civil_01', role: 'department_admin', department_code: '06' };
 
-  // 1. Own department private complaint (Civil 06)
+  // 1. Own department complaint (Civil 06)
   const civilComplaint = {
     $id: 'complaint_civil_01',
     department_code: '06',
@@ -147,25 +144,25 @@ test('Phase 5 Exit Criteria: Admin A can manage own department complaints and Pu
   assert.equal(civilComplaint.status, 'in_progress');
   assert.equal(civilComplaint.official_response, 'Surveying technicians dispatched for recalibration.');
 
-  // 2. Public Issue (even if filed by student in Computer department 07)
-  const publicComplaint = {
+  // 2. Cross-department issue attempt (even if tagged public) -> rejected with 404 Oracle Elimination
+  const crossDeptComplaint = {
     $id: 'complaint_pub_library',
     department_code: '07', // Created by computer student
-    issue_type: 'public',  // Public issue
+    issue_type: 'public',  // Legacy public tag
     status: 'open',
     title: 'Central Library Air Conditioning Down',
   };
 
-  const updatePubRes = processAdminUpdateComplaint({
+  const updateCrossRes = processAdminUpdateComplaint({
     adminCaller: adminCivil,
-    complaint: publicComplaint,
+    complaint: crossDeptComplaint,
     newStatus: 'resolved',
-    officialResponse: 'Central Facilities replaced the main chiller pump.',
+    officialResponse: 'Unauthorized cross-department resolution attempt.',
   });
 
-  assert.equal(updatePubRes.status, 200);
-  assert.equal(publicComplaint.status, 'resolved');
-  assert.ok(publicComplaint.resolved_at, 'resolved_at timestamp must be set');
+  assert.equal(updateCrossRes.status, 404);
+  assert.equal(updateCrossRes.body.code, 'NOT_FOUND');
+  assert.equal(crossDeptComplaint.status, 'open', 'Cross-department complaint must remain unmutated');
 });
 
 test('Phase 5 Exit Criteria: Admin A CANNOT read or mutate Department B private complaints (Oracle Elimination: 404)', () => {
@@ -201,16 +198,14 @@ test('Phase 5 Exit Criteria: Admin A CANNOT read or mutate Department B private 
 
 test('Phase 5 Metrics: Admin dashboard counts department private issues and public issues without cross-department leakage', () => {
   const complaintsDB = [
-    // Civil private (06)
+    // Civil department (06)
     { $id: 'c1', department_code: '06', issue_type: 'department', status: 'open' },
     { $id: 'c2', department_code: '06', issue_type: 'department', status: 'in_progress' },
     { $id: 'c3', department_code: '06', issue_type: 'department', status: 'resolved' },
-
-    // Public issues
     { $id: 'p1', department_code: '06', issue_type: 'public', status: 'open' },
-    { $id: 'p2', department_code: '07', issue_type: 'public', status: 'resolved' },
 
-    // Computer private (07) - Must NOT leak into Civil admin metrics
+    // Computer department (07) - Must NOT leak into Civil admin metrics
+    { $id: 'p2', department_code: '07', issue_type: 'public', status: 'resolved' },
     { $id: 'x1', department_code: '07', issue_type: 'department', status: 'open' },
     { $id: 'x2', department_code: '07', issue_type: 'department', status: 'open' },
     { $id: 'x3', department_code: '07', issue_type: 'department', status: 'in_progress' },
@@ -218,20 +213,20 @@ test('Phase 5 Metrics: Admin dashboard counts department private issues and publ
 
   // Civil Admin (06)
   const civilMetrics = computeAdminMetrics('06', complaintsDB);
-  // Open: c1 (dept 06) + p1 (public) = 2
-  assert.equal(civilMetrics.total_open, 2, 'Civil open = c1 (civil) + p1 (public)');
+  // Open: c1 (dept 06) + p1 (dept 06) = 2
+  assert.equal(civilMetrics.total_open, 2, 'Civil open = c1 (civil) + p1 (civil)');
   // In Progress: c2 (dept 06) = 1
   assert.equal(civilMetrics.total_in_progress, 1);
-  // Resolved: c3 (dept 06) + p2 (public) = 2
-  assert.equal(civilMetrics.total_resolved, 2);
+  // Resolved: c3 (dept 06) = 1 (p2 from dept 07 must NOT leak)
+  assert.equal(civilMetrics.total_resolved, 1);
 
   // Computer Admin (07)
   const compMetrics = computeAdminMetrics('07', complaintsDB);
-  // Open: x1 + x2 (dept 07) + p1 (public) = 3
-  assert.equal(compMetrics.total_open, 3);
+  // Open: x1 + x2 (dept 07) = 2 (p1 from dept 06 must NOT leak)
+  assert.equal(compMetrics.total_open, 2);
   // In Progress: x3 (dept 07) = 1
   assert.equal(compMetrics.total_in_progress, 1);
-  // Resolved: p2 (public) = 1
+  // Resolved: p2 (dept 07) = 1
   assert.equal(compMetrics.total_resolved, 1);
 });
 
@@ -247,12 +242,12 @@ test('Phase 5 Scoped Queue: Admin complaints list strictly excludes Department B
   const civilList = listAdminComplaints('06', complaintsDB);
   const civilIds = civilList.map((c) => c.$id);
 
-  // Civil list must contain c1, p1, p2
+  // Civil list must contain c1 and p1 (both dept 06)
   assert.ok(civilIds.includes('c1'));
   assert.ok(civilIds.includes('p1'));
-  assert.ok(civilIds.includes('p2'));
 
-  // Civil list MUST NOT contain Computer private complaints
+  // Civil list MUST NOT contain Computer complaints (x1, x2, p2)
+  assert.ok(!civilIds.includes('p2'), 'Computer issue p2 must NOT appear in Civil admin queue');
   assert.ok(!civilIds.includes('x1'), 'Computer private issue x1 must NOT appear in Civil admin queue');
   assert.ok(!civilIds.includes('x2'), 'Computer private issue x2 must NOT appear in Civil admin queue');
 });

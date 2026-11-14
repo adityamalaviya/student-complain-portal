@@ -12,6 +12,7 @@ interface AuthContextValue {
   error: string | null;
   isOnboarded: boolean;
   isAdmin: boolean;
+  isPrincipal: boolean;
   signIn: () => void;
   signOutUser: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -38,8 +39,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         if (response.success && response.data) {
           setProfile(response.data.profile);
         } else if (response.error) {
-          // If profile fetch returned an error, log it
           console.warn('[useAuth] Profile retrieval issue:', response.error);
+          setError(response.error);
+          setUser(null);
+          setProfile(null);
         }
       } else {
         setProfile(null);
@@ -87,8 +90,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     setProfile(newProfile);
   }, []);
 
-  const isOnboarded = Boolean(profile && profile.is_locked && profile.enrollment_no);
   const isAdmin = Boolean(profile?.role === 'department_admin');
+  const isPrincipal = Boolean(profile?.role === 'principal');
+  const isOnboarded = Boolean(
+    profile &&
+      (isAdmin ||
+        isPrincipal ||
+        ((profile.name_locked || profile.is_locked) &&
+          (profile.enrollment_locked || profile.is_locked) &&
+          Boolean(profile.enrollment_no) &&
+          Boolean(profile.student_department_id || profile.department_code) &&
+          Boolean(profile.phone_locked) &&
+          Boolean(profile.phone_number)))
+  );
 
   const contextValue: AuthContextValue = {
     user,
@@ -97,6 +111,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     error,
     isOnboarded,
     isAdmin,
+    isPrincipal,
     signIn: handleSignIn,
     signOutUser: handleSignOut,
     refreshProfile: fetchAuthAndProfile,

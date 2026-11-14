@@ -1,0 +1,483 @@
+CampusVoice: Existing Source Code Requirement-Gap Audit Report
+
+Audit Mode: STRICT READ-ONLY AUDIT
+Lead Auditor: Senior Software Architect, Full-Stack Code Auditor, Appwrite Security Specialist & QA Lead
+Audit Baseline Date: 10 November 2026
+Target Completion Deadline: 16 November 2026
+Repository Inspected: D:\college\student complain protal
+
+Section 1: Executive Summary
+1. Overall Implementation Condition
+
+The existing repository represents a functional baseline implemented against an outdated specification (documented in docs/handoff.md as "Phases 1–6 Completed"). While the existing codebase contains solid scaffolding for Appwrite Cloud integration, strict TypeScript typing, and Next.js 15 App Router pages, it was architected under assumptions that directly contradict the latest approved business requirements:
+
+Two-Department Model: The existing codebase is hardcoded around exactly two academic departments: Civil (06) and Computer (07). The database, Cloud Functions, and UI lack support for the six approved institutional departments (Computer, Civil, Electrical, Mechanical, Water, Sanitation).
+Conflated Department Architecture: The system uses a single attribute (department_code) rather than maintaining two strictly separated attributes: student_department_id (academic jurisdiction) and maintenance_department_id (maintenance jurisdiction). A student cannot select a maintenance department when filing a complaint; complaints are automatically stamped with the student's academic department.
+Pervasive Public Complaint Architecture: Public complaint functionality—which has been completely removed in the latest requirements—is deeply embedded across the database schema (issue_type), Cloud Function query logic, frontend form toggles, filter bars, and test suites.
+Critical PII Data Leakage: Current API endpoints (handleListComplaints and handleGetComplaint) serialize and return the student creator's full name (student_name) and enrollment number (student_enrollment_no) directly to peer students, violating the mandatory privacy requirement.
+Missing Enterprise Workflows: Entire subsystems—including the Principal Role, Five-Day Delay & Warning Logic, Phone Number Change Workflow, Separate Timeline Entries for Complaint Immutability, Support Revocation / Re-Support, and Append-Only Audit History—are 100% missing from the codebase.
+Hardcoded Admin Provisioning: Department admin authentication relies on static environment variables (ADMIN_ALLOWLIST_06, ADMIN_ALLOWLIST_07) rather than database-driven, server-enforced, and auditable permission grants.
+2. Percentage of Requirements Verified
+Total Requirements Evaluated: 32 granular requirements derived from Sections 3 and 4 of the latest specification.
+Implemented and Verified: 1 requirement (3.1%)
+Implemented but Needs Modification: 4 requirements (12.5%)
+Partially Implemented: 6 requirements (18.8%)
+Missing: 10 requirements (31.3%)
+Conflicting: 11 requirements (34.4%)
+Not Verifiable: 0 requirements (0.0%)
+
+Compliance Rate: Only 3.1% of latest approved requirements are fully satisfied without code or schema changes. 84.5% of the project requirements are either Conflicting, Missing, or Partially Implemented.
+
+3. Major Architectural Conflicts
+Single Department Field vs. Academic/Maintenance Separation: Current database schema and backend code combine student academic department and complaint target department into a single department_code field. The new requirements mandate strict separation into student_department_id and maintenance_department_id.
+Direct Mutation vs. Separate Timeline Immutability: Current admin status updates directly overwrite status, official_response, resolved_at, and updated_at on the complaints collection document. The new specification mandates that original complaint documents remain permanently immutable, with administrator notes and student replies recorded as separate timeline records.
+Public Grievance Infrastructure: The concept of issue_type: 'public' permeates database indexes, API queries, feed aggregation, and frontend UI, whereas public complaints have been completely excised.
+Static Email Allowlist vs. Auditable Dynamic Roles: Administrator access is hardcoded in functions/campusvoice-api/src/auth.ts via environment variables, completely bypassing database-driven role grants, permission management, and audit tracking.
+4. Critical Security Concerns
+Critical (P0) — Student PII Exposure to Peers: When any student lists or views complaints in their department, the backend returns the creator's full name and enrollment number in the JSON response payload (functions/campusvoice-api/src/handlers/complaints.ts#L246-L248). The requirement mandates that creator name, enrollment number, phone number, and private attachments must be hidden from peer students.
+High (P1) — Unvalidated Attachment IDs & Oversized Storage Limits: In handleCreateComplaint, the API accepts arbitrary attachment_file_id strings without verifying actual file existence, MIME type, or file size. Furthermore, scripts/setup-appwrite.mjs#L303-L304 provisions the storage bucket with a 10MB limit and allows webp, conflicting with the approved 5MB limit and [PDF, JPG, JPEG, PNG] formats.
+High (P1) — Non-Atomic Support Counter Concurrency: Support count incrementing in complaints.ts#L647-L656 uses a non-atomic read-then-update pattern on the complaint document rather than deriving support_count = 1 + active_supports, creating counter drift under concurrent traffic.
+5. Reusability Verdict
+
+The existing codebase CAN and SHOULD be reused as the foundational baseline. The technology stack (Next.js 15 App Router, TypeScript strict mode, Appwrite Cloud Client & Functions, Tailwind CSS, @phosphor-icons/react) exactly matches the mandatory technology stack. The authentication handshake (Google OAuth via Appwrite Client SDK), the zero-based slice enrollment extraction mechanism (slice(7, 9)), the deterministic SHA-256 voting ID deduplication logic, and core UI layouts provide substantial reusability. A total rewrite is neither necessary nor recommended.
+
+Section 2: Requirement-Gap Matrix
+Req ID	Requirement Description	Classification	Existing Evidence	Identified Gap	Required Modification	Priority
+A.1	Support 6 departments (Computer, Civil, Electrical, Mechanical, Water, Sanitation)	Conflicting	scripts/setup-appwrite.mjs#L214-L217, functions/.../types.ts#L1	Seed data and TypeScript types hardcode only 06 and 07.	Provision 6 departments in database, update domain types, seed official records.	P0
+A.2	Academic vs. Maintenance department classification	Missing	scripts/setup-appwrite.mjs#L206-L211	departments collection only contains code, name, is_active.	Add boolean/enum attributes (e.g. is_academic, is_maintenance) to classify Water & Sanitation as maintenance-only.	P0
+A.3	Separate student_department_id and maintenance_department_id attributes	Missing	functions/.../complaints.ts#L151, scripts/setup-appwrite.mjs#L256	Complaints collection only has single department_code.	Refactor schema to store student_department_id and maintenance_department_id.	P0
+B.1	Enrollment number department extraction (slice(7, 9), characters 8-9)	Implemented and Verified	functions/.../profile.ts#L213-L214, src/lib/schemas/index.ts#L10	Uses rawEnrollment.slice(7, 9) server-side on 12-digit enrollment number.	Retain existing server extraction logic.	P2
+B.2	Enrollment code mapping: 06 -> Dept 1, 07 -> Dept 2, unmapped handled safely	Implemented but Needs Modification	functions/.../profile.ts#L216-L229	Maps 06 to Civil and 07 to Computer; unmapped rejected with 400. Remaining 4 mappings unconfirmed.	Keep safe rejection of unmapped codes; align 06 and 07 with official department numbering.	P1
+C.1	Exactly three main roles: Student, Department Admin, Principal (No Super Admin)	Conflicting	functions/.../types.ts#L3, src/types/models.ts#L3	Types define only 'student' | 'department_admin'.	Add 'principal' to UserRole union across frontend and backend; verify no Super Admin exists.	P0
+C.2	Server-enforced, auditable, revocable administrative permissions	Missing	functions/.../auth.ts#L71-L88	Roles evaluated against static environment variable allowlists.	Replace env allowlist with database-backed role assignments, revocations, and audit logging.	P1
+D.1	First login student profile collection: Name, Enrollment No, Phone Number	Partially Implemented	src/app/onboarding/page.tsx#L23-L24, functions/.../profile.ts#L187-L202	Only Name and Enrollment No are collected. Phone number is omitted.	Add phone number field to UI, onboarding schema, profile attributes, and handler.	P0
+D.2	Student profile immutability (Name, Enrollment, Phone locked after saving)	Partially Implemented	functions/.../profile.ts#L240-L251	Name and enrollment locked via is_locked; phone does not exist to be locked.	Extend immutability enforcement to phone_number field.	P1
+D.3	Server-side phone validation (exactly 10 digits, starts with 6, 7, 8, or 9)	Missing	src/lib/schemas/index.ts#L18-L25, functions/.../profile.ts#L187-L202	No phone validation logic exists on frontend or backend.	Add regex /^[6-9]\d{9}$/ validation in Zod schema and handleCompleteOnboarding.	P0
+E.1	Complaint creation across any of 6 maintenance departments	Conflicting	functions/.../complaints.ts#L151, src/app/complaints/new/page.tsx#L247-L254	Department is hardcoded to student's academic department; no dropdown to choose maintenance dept.	Provide dropdown of 6 maintenance departments; validate chosen department in handler.	P0
+E.2	Complaint fields: Title, Maintenance Dept, Location, Description, Priority [Low, Med, High], Attachment	Partially Implemented	functions/.../complaints.ts#L80-L88	Title, location, description, priority exist. Maintenance dept missing; attachment is unvalidated.	Add maintenance_department_id to schema and payload; validate all fields.	P0
+E.3	Attachment constraints: 5MB max, PDF/JPG/JPEG/PNG, server-side validated, private access	Conflicting	scripts/setup-appwrite.mjs#L303-L304, functions/.../complaints.ts#L85-L88	Storage bucket allows 10MB and webp. Function does zero server validation of file size/MIME.	Reconfigure bucket to 5MB, restrict MIME types, implement server-side validation.	P1
+E.4	Complete removal of public complaint functionality	Conflicting	functions/.../complaints.ts#L134-L143, src/app/complaints/new/page.tsx#L332-L359	issue_type ('department' | 'public') exists in DB, backend handlers, and frontend UI.	Remove issue_type from DB, backend logic, Zod schemas, filter tabs, and submission form.	P0
+F.1	Peer complaint visibility based strictly on student_department_id	Conflicting	functions/.../complaints.ts#L268, L457-L471	Queries compare caller's department against single department_code.	Query peer complaints where student_department_id == caller.academic_department_id.	P0
+F.2	Student privacy: Hide Creator Name, Enrollment, Phone, Attachments from peers	Conflicting	functions/.../complaints.ts#L244-L263, L434-L453	handleListComplaints and handleGetComplaint expose student_name and student_enrollment_no to all students.	Mask creator details in responses unless caller is the author, concerned Dept Admin, or Principal.	P0
+F.3	Full detail access for Creator, concerned Maintenance Admin, and Principal	Partially Implemented	functions/.../complaints.ts#L434-L501	Full details exposed to all; Principal does not exist.	Enforce conditional field projection: unmask only for Author, Maintenance Admin, or Principal.	P0
+G.1	Support count invariant: Initial = 1; Support count = 1 + active support records	Conflicting	functions/.../complaints.ts#L159, scripts/setup-appwrite.mjs#L266	support_count initializes to 0. Incremented as an integer field rather than calculated.	Initialize count to 1 on creation; compute total as 1 + count(active_supports).	P0
+G.2	Prevent creator self-support	Implemented and Verified	functions/.../complaints.ts#L588-L597	Returns 400 CANNOT_SUPPORT_OWN_COMPLAINT if doc.student_user_id === caller.id.	Retain existing check.	P2
+G.3	Support eligibility: Same academic department peers only	Implemented but Needs Modification	functions/.../complaints.ts#L600-L612	Verifies caller department against single department_code.	Update check to verify caller's academic department matches complaint's student_department_id.	P0
+G.4	Support revocation and re-support workflow	Missing	functions/.../complaints.ts#L632-L644, src/components/ComplaintSupportButton.tsx#L31	No un-support endpoint exists. Duplicate click yields permanent 409 conflict; button is disabled.	Add remove-support action, update support records status or delete record, toggle UI.	P0
+G.5	Concurrency safety and duplicate active support prevention	Partially Implemented	functions/.../complaints.ts#L614-L644	Deterministic 32-char SHA-256 ID prevents duplicate inserts; counter increment is non-atomic.	Retain deterministic key for active supports; derive count from database records or atomic counter.	P1
+G.6	Supporting a complaint never creates another complaint	Implemented and Verified	functions/.../complaints.ts#L620-L657, tests/phase4.test.mjs#L188-L227	Writes strictly to complaint_supports collection; verified by tests.	Retain existing isolated write pattern.	P2
+H.1	Department Admin manages assigned maintenance department only	Partially Implemented	functions/.../complaints.ts#L807-L850	Scopes admin queries by single department_code and includes public complaints.	Scope admin queries strictly by maintenance_department_id == admin.department_id.	P0
+H.2	Admin status transitions (Pending, In Progress, Resolved) by concerned admin only	Implemented but Needs Modification	functions/.../complaints.ts#L1029-L1037, L1071-L1083	Allows in_progress and resolved (uses open for pending). Checks against single department_code.	Standardize status values (Pending, In Progress, Resolved); check against maintenance_department_id.	P1
+H.3	Complaint immutability & separate timeline entries for updates and replies	Conflicting	functions/.../complaints.ts#L1086-L1101	Overwrites official_response, status, and resolved_at directly on complaint doc.	Create complaint_timeline collection; store admin updates and student replies as timeline entries.	P0
+H.4	Admin substantive progress updates and clarification requests	Missing	functions/.../complaints.ts#L994-L1146	Only provides single official_response string on status change.	Implement handlers for progress updates and clarification requests in timeline.	P1
+I.1	Student phone change request to academic Dept Admin	Missing	Entire codebase	No phone change request collection, endpoint, or UI exists.	Create phone_change_requests collection, API handler, and student submission modal.	P0
+I.2	Academic Admin review, approval, and one-time permission grant	Missing	Entire codebase	No admin review or approval endpoint for phone changes.	Implement admin review endpoint; generate one-time permission record upon approval.	P0
+I.3	Permission consumption only after successful database save; failure safety	Missing	Entire codebase	No permission token validation or consumption logic exists.	Enforce one-time token consumption within atomic write handler; retain old phone on failure.	P0
+I.4	Water and Sanitation Admins restricted from approving student phone changes	Missing	Entire codebase	No logic distinguishing academic vs maintenance admin approval scopes.	Block phone-change approval actions if admin's department is Water or Sanitation.	P0
+J.1	Principal role & system-wide monitoring across all 6 departments	Missing	Entire codebase	No principal role, no Principal dashboard, no cross-department analytics endpoint.	Add Principal role, /principal Next.js route, and system-wide monitoring API handlers.	P0
+J.2	Manual warnings for eligible unresolved complaints (>5 days); multiple warnings	Missing	Entire codebase	No warning issuance logic, warning records, or eligibility checks.	Create complaint_warnings collection; implement warning issuance API and admin response view.	P0
+J.3	Principal restrictions: Cannot change status; cannot warn resolved complaints	Missing	Entire codebase	No status mutation guard specifically forbidding Principal.	Enforce that status changes are restricted to Maintenance Dept Admin only.	P1
+J.4	Principal system management: Assign/remove Dept Admins, settings, audit history	Missing	Entire codebase	No admin user management endpoints or system settings handlers exist.	Implement admin management endpoints, settings schema, and audit viewer for Principal.	P1
+K.1	5-day delay logic: Pending > 5 days; In Progress > 5 days since last meaningful update	Missing	Entire codebase	No delay tracking, timestamp comparison, or delay calculation exists.	Implement delay calculation evaluating status and last_meaningful_update_at.	P1
+K.2	Substantive updates reset timer; minor edits and views do NOT reset timer	Missing	Entire codebase	No distinction between substantive and non-substantive actions.	Update last_meaningful_update_at only on status change or progress update; ignore views/edits.	P1
+L.1	Server-side authentication and authorization on every protected operation	Implemented but Needs Modification	functions/.../auth.ts#L66-L76	Verified caller checked via JWT; but role authorization relies on static env allowlists.	Migrate role verification to database-backed permissions; eliminate env allowlists.	P1
+L.2	Append-only audit history for all security and lifecycle actions	Missing	Entire codebase	No audit log collection or logging utility exists.	Create audit_logs collection with append-only access; log all lifecycle events.	P0
+Section 3: Reusable Existing Implementation
+
+The existing repository contains well-constructed components that align directly with the mandatory technology stack and should be preserved:
+
+1. Appwrite Cloud Authentication Infrastructure
+Files: src/lib/appwrite/client.ts, src/lib/appwrite/auth.ts, src/lib/hooks/useAuth.tsx, src/app/auth/callback/page.tsx
+Why Reusable: The Google OAuth token exchange via Appwrite Web SDK (createOAuth2Token), session creation, JWT generation (createJWT), and client initialization are cleanly implemented and fully functional without requiring redesign.
+2. Enrollment Extraction Logic
+Files: functions/campusvoice-api/src/handlers/profile.ts#L213-L214, src/lib/schemas/index.ts#L10
+Why Reusable: The zero-based slice rawEnrollment.slice(7, 9) precisely extracts characters 8 and 9 of the 12-digit enrollment number server-side. It correctly enforces numeric bounds and safely rejects malformed or unmapped codes.
+3. Server-Authoritative Identity Derivation Pattern
+Files: functions/campusvoice-api/src/handlers/complaints.ts#L61-L77, L146-L163
+Why Reusable: The backend handler fetches the caller's verified profile directly from the database and derives student identity attributes server-side, discarding any untrusted student metadata sent in client request bodies.
+4. Deterministic 32-Character SHA-256 Support Deduplication Pattern
+Files: functions/campusvoice-api/src/handlers/complaints.ts#L614-L618
+Why Reusable: Generating a 32-character SHA-256 hash sha256(complaintId + ':' + callerId).slice(0, 32) as the document ID satisfies Appwrite's 36-character document ID constraint and provides primary-key collision prevention for duplicate votes.
+5. Self-Support Prevention
+Files: functions/campusvoice-api/src/handlers/complaints.ts#L588-L597
+Why Reusable: The check doc.student_user_id === caller.id correctly rejects self-support attempts with HTTP 400 CANNOT_SUPPORT_OWN_COMPLAINT.
+6. Design System, Tokens, and Core UI Components
+Files: src/styles/tokens.ts, src/components/ComplaintPriorityBadge.tsx, src/components/ComplaintStatusBadge.tsx, src/components/EmptyState.tsx, src/components/ErrorState.tsx, src/components/LoadingSkeleton.tsx
+Why Reusable: Built with Tailwind CSS, @phosphor-icons/react, and strict TypeScript. They provide production-ready design tokens, accessible color contrasts, and dark mode variants that can be retained directly.
+Section 4: Modification Required
+
+The following existing files and components require specific modifications to align with the latest approved requirements:
+
+1. Database Provisioning Script
+File: scripts/setup-appwrite.mjs
+Modifications Required:
+Departments Collection (Lines 205–228): Add is_academic (boolean) and is_maintenance (boolean) attributes. Seed all 6 departments: Computer, Civil, Electrical, Mechanical, Water (maintenance only), Sanitation (maintenance only).
+Profiles Collection (Lines 230–250): Add phone_number (string, size 15, required). Rename/refactor department_code to academic_department_id.
+Complaints Collection (Lines 251–276): Add student_department_id (string 50, required) and maintenance_department_id (string 50, required). Remove issue_type (lines 262, 273). Change default support_count from 0 to 1 (line 266). Update status enum to Pending, In Progress, Resolved.
+Storage Bucket (Lines 287–312): Change max file size from 10MB (10485760) to 5MB (5242880). Remove webp from allowed extensions; restrict to ['jpg', 'jpeg', 'png', 'pdf'].
+New Collections Required: Add provisioning routines for complaint_timeline, phone_change_requests, complaint_warnings, department_admins, and audit_logs.
+2. Domain TypeScript Types
+Files: functions/campusvoice-api/src/types.ts, src/types/models.ts
+Modifications Required:
+Expand DepartmentCode union beyond '06' | '07' to support all 6 departments.
+Expand UserRole from 'student' | 'department_admin' to 'student' | 'department_admin' | 'principal'.
+Remove IssueType ('department' | 'public') completely.
+Update UserProfile to include phone_number: string and academic_department_id: string.
+Update Complaint to replace department_code/department_name with student_department_id and maintenance_department_id. Remove issue_type and official_response.
+Define interfaces for TimelineEntry, PhoneChangeRequest, ComplaintWarning, and AuditLogEntry.
+3. Backend Authentication & Authorization Middleware
+File: functions/campusvoice-api/src/auth.ts
+Modifications Required:
+Lines 71–88: Eliminate static environment allowlists (ADMIN_ALLOWLIST_06, ADMIN_ALLOWLIST_07). Replace with a database lookup against the department_admins collection to resolve admin roles and maintenance department assignments dynamically.
+Add resolution for the principal role from verified user accounts.
+4. Backend Profile & Onboarding Handlers
+File: functions/campusvoice-api/src/handlers/profile.ts
+Modifications Required:
+handleCompleteOnboarding (Lines 167–328): Add validation for phone_number (string of 10 digits starting with 6, 7, 8, or 9). Persist phone_number in the profile document. Map enrollment_no.slice(7, 9) to the confirmed academic department ID. Lock phone number alongside name and enrollment number.
+handleListDepartments (Lines 330–344): Query and return all 6 departments from the database with academic/maintenance classification flags.
+5. Backend Complaints Handlers
+File: functions/campusvoice-api/src/handlers/complaints.ts
+Modifications Required:
+handleCreateComplaint (Lines 51–202): Accept maintenance_department_id from client and validate it belongs to one of the 6 maintenance departments. Stamp student_department_id from caller's academic department. Initialize support_count = 1. Remove all issue_type handling. Add server-side file attachment validation (size <= 5MB, MIME type in allowed list).
+handleListComplaints (Lines 207–369): Filter complaints strictly by student_department_id == caller.academic_department_id. Remove public feed queries. PII Masking: Strip student_name, student_enrollment_no, and attachments from complaint records unless student_user_id === caller.id.
+handleGetComplaint (Lines 374–514): Check peer visibility against student_department_id. If caller is a peer student, mask creator name, enrollment number, phone number, and private attachments. Only expose full PII to the creator, the concerned Maintenance Dept Admin, or the Principal.
+handleSupportComplaint (Lines 519–682): Check peer eligibility against student_department_id. Support count must equal 1 + count(active_supports). Add support revocation (handleRemoveSupport) allowing students to remove support and re-support later.
+handleUpdateAdminComplaint (Lines 994–1147): Verify caller is the admin for complaint.maintenance_department_id. Forbid status mutations by Principal. Complaint Immutability: Do not overwrite the complaint document; write official responses, progress updates, and status transitions as discrete records to complaint_timeline.
+6. Frontend Onboarding View
+File: src/app/onboarding/page.tsx
+Modifications Required:
+Add Phone Number input field with live 10-digit validation (/^[6-9]\d{9}$/).
+Update the verbatim lock warning to mention phone number locking and the approved change workflow.
+Remove hardcoded Civil (06) vs Computer (07) UI branching (lines 51–54, 262–316); handle all active department codes.
+7. Frontend Complaint Filing Form
+File: src/app/complaints/new/page.tsx
+Modifications Required:
+Replace read-only department display (lines 237–255) with a Maintenance Department selector allowing the student to choose from any of the 6 maintenance departments.
+Remove "Visibility Scope" segmented button ("Department Only" vs "Public Issue", lines 332–359) completely.
+Wire file upload handling to upload attachments to Appwrite Storage and pass the verified file ID.
+8. Frontend Dashboard & Complaint Cards
+Files: src/app/dashboard/page.tsx, src/components/ComplaintCard.tsx, src/components/SearchAndFilterBar.tsx, src/components/ComplaintSupportButton.tsx
+Modifications Required:
+Remove "Public Issues" tab and count from SearchAndFilterBar.tsx and page.tsx.
+Update ComplaintCard.tsx to display Maintenance Department instead of Public/Department badges, and hide student name/enrollment for peer students.
+Update ComplaintSupportButton.tsx to allow toggling (supporting and unsupporting), rather than locking into a permanent disabled state.
+9. Frontend Complaint Detail View
+File: src/app/complaints/[id]/page.tsx
+Modifications Required:
+Render timeline history from complaint_timeline instead of showing only a single static official response.
+Conditionally display student PII only if viewer is author, admin, or principal.
+Display maintenance department and academic department separately.
+Section 5: Missing Implementation
+
+The following features do not exist in the current repository and must be implemented from scratch:
+
+MISSING IMPLEMENTATION
+├── Frontend
+│   ├── Principal Dashboard (/principal)
+│   ├── Phone Number Change Modal & Request Tracking UI
+│   ├── Complaint Timeline Component (replacing single response card)
+│   ├── Substantive Progress Update & Clarification Forms (Admin)
+│   └── Manual Warning Issuance & Warning Response Modal (Principal)
+├── Backend (Appwrite Cloud Function: campusvoice-api)
+│   ├── Phone Change Workflow Handlers (submit, list, review, update-phone)
+│   ├── Principal Monitoring & Management Handlers (dashboard, depts, admin-assign)
+│   ├── Manual Warning Handlers (issue-warning, list-warnings, respond-warning)
+│   ├── Complaint Timeline Handlers (add-progress-update, request-clarification, reply)
+│   ├── Support Revocation Handler (remove-support)
+│   └── 5-Day Delay Eligibility Evaluation Engine
+├── Database (Appwrite Cloud Database)
+│   ├── Collection: complaint_timeline
+│   ├── Collection: phone_change_requests
+│   ├── Collection: complaint_warnings
+│   ├── Collection: department_admins
+│   └── Collection: audit_logs
+├── Security
+│   ├── Server-Side PII Masking Engine (Student Name, Enrollment, Phone, Attachment)
+│   ├── Attachment Server-Side MIME & Size Validator
+│   ├── Water & Sanitation Admin Phone Approval Guard
+│   └── Append-Only Audit Logging Middleware
+└── Testing
+    ├── Phone Change Workflow E2E Test Suite
+    ├── Principal Permissions & Warning Test Suite
+    ├── 5-Day Delay & Substantive Update Timer Tests
+    ├── Privacy & PII Leakage Regression Tests
+    └── Dynamic Admin Role Assignment & Revocation Tests
+Section 6: Conflicting Implementation
+
+The following existing implementations directly contradict the latest approved business requirements and must be eliminated or refactored:
+
+1. Two-Department Hardcoding
+Current Behavior: Codebase assumes only two departments exist: Civil (06) and Computer (07). Seed data (setup-appwrite.mjs#L214-L217), health endpoints (functions/.../index.ts#L52-L55, src/app/api/health/route.ts#L9-L12), and UI banners hardcode this limitation.
+New Requirement: System must support six departments: Computer, Civil, Electrical, Mechanical, Water, Sanitation.
+2. Conflated Academic and Maintenance Department Logic
+Current Behavior: A complaint only has one department attribute (department_code), which is automatically stamped with the student's academic department (complaints.ts#L151). A student cannot file a complaint against a different maintenance department.
+New Requirement: Must maintain two separate attributes: student_department_id (academic) and maintenance_department_id (maintenance). Computer, Civil, Electrical, and Mechanical serve academic and maintenance; Water and Sanitation are maintenance-only.
+3. Public Complaint System Remains Active
+Current Behavior: issue_type: 'public' is defined in types, collections, schemas, creation forms, dashboard filters, and test suites (tests/phase3.test.mjs#L38-L56). Public complaints bypass department isolation.
+New Requirement: Public complaint functionality has been completely removed. Every complaint is private to the filer's academic department for peer visibility and routed to the selected maintenance department for resolution.
+4. Direct Complaint Document Mutation
+Current Behavior: handleUpdateAdminComplaint directly updates status, official_response, and resolved_at on the original complaint document.
+New Requirement: Original complaint document is permanently immutable after creation. Admin updates, substantive progress notes, and student replies must be stored as separate records in a timeline collection.
+5. Initial Support Count is Zero
+Current Behavior: Complaints are created with support_count: 0 (complaints.ts#L159, setup-appwrite.mjs#L266).
+New Requirement: Initial support count = 1. Active count = 1 + active support records.
+6. Permanent Support Lock (No Revocation)
+Current Behavior: Once supported, any subsequent attempt returns HTTP 409 ALREADY_SUPPORTED (complaints.ts#L635-L642), and the frontend button is permanently disabled (ComplaintSupportButton.tsx#L31).
+New Requirement: Students must be able to remove their support, and support the complaint again later.
+7. Static Environment Allowlist for Admin Roles
+Current Behavior: Admin roles are resolved by matching user email against ADMIN_ALLOWLIST_07 and ADMIN_ALLOWLIST_06 in server environment variables (auth.ts#L71-L87).
+New Requirement: Department Admins must be assignable and revocable via explicit database-backed permission grants managed by the Principal, with every change audited.
+Section 7: Database Gap Analysis
+1. Existing Collection Inventory
+Collection ID	Current Attributes	Current Permissions	Indexes
+departments	code, name, is_active	[]	idx_code (unique)
+profiles	user_id, auth_user_id, email, name, display_name, enrollment_no, department_code, department_name, role, is_locked, profile_status, created_at, updated_at	[]	idx_user_id, idx_enrollment_no, idx_dept_code
+complaints	student_user_id, student_name, student_enrollment_no, department_code, department_name, title, location, description, priority, issue_type, status, official_response, resolved_at, support_count, attachment_file_id, created_at, updated_at	[]	idx_student_user_id, idx_department_code, idx_issue_type, idx_status
+complaint_supports	complaint_id, user_id, supported_at	[]	idx_support_complaint, idx_support_user
+2. Required Target Collection Inventory
+departments (modified)
+profiles (modified)
+complaints (modified)
+complaint_supports (modified)
+complaint_timeline (NEW)
+phone_change_requests (NEW)
+complaint_warnings (NEW)
+department_admins (NEW)
+audit_logs (NEW)
+3. Attribute Level Schema Delta
+departments Delta:
+Add is_academic (boolean, required).
+Add is_maintenance (boolean, required).
+profiles Delta:
+Add phone_number (string 15, required).
+Rename department_code to academic_department_id.
+complaints Delta:
+Add student_department_id (string 50, required).
+Add maintenance_department_id (string 50, required).
+Add last_meaningful_update_at (string 64, required).
+Remove issue_type.
+Remove official_response (moved to timeline).
+Remove resolved_at (derived from timeline or retained as resolution flag).
+Update support_count default value to 1.
+complaint_supports Delta:
+Add status ('active' | 'revoked', string 20, default 'active').
+Add revoked_at (string 64, optional).
+complaint_timeline (New Collection):
+complaint_id: string 50, required, indexed.
+author_id: string 50, required.
+author_role: string 32, required ('department_admin' | 'student' | 'principal').
+entry_type: string 32, required ('status_change' | 'progress_update' | 'clarification_request' | 'clarification_reply').
+content: string 5000, required.
+old_status: string 32, optional.
+new_status: string 32, optional.
+created_at: string 64, required.
+phone_change_requests (New Collection):
+student_user_id: string 50, required, indexed.
+academic_department_id: string 50, required, indexed.
+old_phone_number: string 15, required.
+reason: string 1000, required.
+status: string 32, required ('pending' | 'approved' | 'rejected' | 'completed').
+reviewed_by: string 50, optional.
+decision_reason: string 1000, optional.
+permission_token: string 64, optional, indexed.
+permission_consumed: boolean, default false.
+created_at: string 64, required.
+updated_at: string 64, required.
+complaint_warnings (New Collection):
+complaint_id: string 50, required, indexed.
+issued_by_principal_id: string 50, required.
+warning_reason: string 2000, required.
+days_delayed: integer, required.
+admin_response: string 2000, optional.
+responded_at: string 64, optional.
+created_at: string 64, required.
+department_admins (New Collection):
+user_id: string 50, required, indexed.
+email: string 255, required.
+department_id: string 50, required, indexed.
+assigned_by: string 50, required.
+is_active: boolean, default true.
+created_at: string 64, required.
+audit_logs (New Collection):
+action: string 64, required, indexed.
+actor_id: string 50, required, indexed.
+actor_role: string 32, required.
+target_resource_id: string 50, required, indexed.
+target_resource_type: string 32, required.
+details: string 10000, required (JSON serialized payload).
+ip_address: string 64, optional.
+created_at: string 64, required.
+4. Index and Constraint Modifications
+complaints: Create compound index idx_student_dept_created (student_department_id, created_at) for student peer feeds. Create compound index idx_maint_dept_status (maintenance_department_id, status) for admin queues.
+complaint_timeline: Index on complaint_id with created_at ascending.
+complaint_supports: Composite index on complaint_id and user_id.
+5. Collection Permissions Policy
+
+All collections must retain empty permissions ($permissions = []). All reads, writes, updates, and deletes are executed strictly through Appwrite Cloud Functions using server API keys. Document security remains false.
+
+6. Data Migration Risks
+Existing records in complaints contain conflated department_code. Any existing test or production documents will lack student_department_id and maintenance_department_id.
+Existing profiles documents lack phone_number. Adding phone_number as a required attribute will fail if unmigrated documents exist without default values.
+Existing complaints documents contain support_count = 0, conflicting with the new base-1 standard.
+Section 8: Security Audit
+
+Findings are classified by standard severity tiers:
+
+1. Critical Severity (P0)
+SEC-01: Direct Exposure of Student Creator PII to Peer Students
+Severity: Critical
+Vulnerable Code: functions/campusvoice-api/src/handlers/complaints.ts#L244-L263, L434-L453
+Description: handleListComplaints and handleGetComplaint map raw database records into the API response without projecting or sanitizing identity attributes. When Student B views complaints from their academic department, the JSON response includes student_name and student_enrollment_no of the complaint author.
+Requirement Violated: Requirement F ("When another student views a complaint, hide: Creator name, Enrollment number, Phone number, Private attachments... No student's phone number may be exposed to other students").
+Exploitation Scenario: Any authenticated student can call list-complaints or get-complaint via DevTools or API to enumerate full names, enrollment numbers, and grievance history of every student in their academic department.
+High-Level Fix: Implement server-side projection in complaints.ts: If caller.id !== complaint.student_user_id and caller is not Admin/Principal, omit student_name, student_enrollment_no, phone_number, and attachment_file_id.
+2. High Severity (P1)
+SEC-02: Missing Server-Side File Validation & Oversized Storage Limits
+Severity: High
+Vulnerable Code: functions/campusvoice-api/src/handlers/complaints.ts#L85-L88, scripts/setup-appwrite.mjs#L303-L304
+Description: The create complaint endpoint accepts an unvalidated string attachment_file_id without inspecting whether the referenced file exists in Appwrite Storage, whether the caller owns it, or whether its MIME type and byte size conform to policy. The provisioning script sets the bucket ceiling to 10MB (requirement is 5MB) and allows .webp.
+Requirement Violated: Requirement E ("Maximum size: 5 MB. Allowed formats: PDF, JPG, JPEG, PNG. Actual file type and size must be validated server-side. Attachments must have private access protection").
+Exploitation Scenario: A malicious user could attach arbitrary files up to 10MB or reference files uploaded by other users (IDOR on storage bucket).
+High-Level Fix: Enforce server-side inspection via Appwrite Storage API (storage.getFile) verifying size <= 5,242,880 bytes and MIME type in ['application/pdf', 'image/jpeg', 'image/png'].
+SEC-03: Hardcoded Admin Assignment & Lack of Revocation
+Severity: High
+Vulnerable Code: functions/campusvoice-api/src/auth.ts#L71-L88
+Description: Admin roles are resolved exclusively by environment variables ADMIN_ALLOWLIST_06 and ADMIN_ALLOWLIST_07. There is no mechanism for dynamic role assignment, role revocation, or Principal oversight.
+Requirement Violated: Requirement C & J ("Selected authorized accounts may receive additional system-management permissions through explicit permission grants... Principal can assign and remove Department Admins").
+High-Level Fix: Move admin authorization to a dedicated department_admins collection managed by Principal endpoints, with audit logs on assignment/removal.
+3. Medium Severity (P2)
+SEC-04: Non-Atomic Support Counter Concurrency
+Severity: Medium
+Vulnerable Code: functions/campusvoice-api/src/handlers/complaints.ts#L647-L656
+Description: While unique voter records are deduplicated via deterministic SHA-256 keys, the complaint's support_count is read, incremented in Node.js memory (newCount = currentCount + 1), and written back via databases.updateDocument. Concurrent requests will race, leading to counter drift.
+Requirement Violated: Requirement G ("Support count = 1 + active support records. Concurrent support requests must be handled safely").
+High-Level Fix: Calculate support_count = 1 + count(active_supports) dynamically or derive it from the active supports collection.
+SEC-05: Water & Sanitation Admins Missing Approval Restriction
+Severity: Medium
+Vulnerable Code: Entire codebase (missing phone change module)
+Description: The system lacks any guard preventing Water and Sanitation Admins from performing academic actions such as reviewing student phone changes.
+Requirement Violated: Requirement I ("Water and Sanitation Admins cannot approve student phone-change requests").
+High-Level Fix: Implement strict department role guards ensuring only academic department admins (Computer, Civil, Electrical, Mechanical) can approve phone change requests for their students.
+4. Low Severity (P3)
+SEC-06: Cross-Department Oracle Prevention Mismatch
+Severity: Low
+Vulnerable Code: functions/campusvoice-api/src/handlers/complaints.ts#L457-L471
+Description: Oracle elimination returns generic HTTP 404 for cross-department probes, but compares caller department against department_code rather than student_department_id.
+High-Level Fix: Realign oracle elimination checks to compare caller's academic department against student_department_id.
+5. Informational (P4)
+SEC-07: Public Complaint Residual Vectors
+Severity: Informational
+Vulnerable Code: functions/campusvoice-api/src/handlers/complaints.ts#L281-L329, src/app/complaints/new/page.tsx#L332-L359
+Description: Unused public grievance routes and form toggles add attack surface and clutter.
+High-Level Fix: Purge all public complaint logic and schemas completely.
+Section 9: Test Coverage Gap
+Test Area	Existing Tests	Missing Tests	Risk
+Department Model & Mapping	tests/phase2.test.mjs (Tests 06 and 07 extraction only)	Tests for 6 departments, academic vs maintenance classification, unmapped code fallback	High: Departments 3–6 unverified; academic vs maintenance isolation untested
+Phone Number Setup & Validation	None	Regex validation (10 digits, starts with 6–9), server-side validation tests, lock immutability tests	Critical: Invalid or malformed phone numbers can be persisted
+Phone Change Workflow	None	Request submission, admin review, one-time permission consumption, failure safety, Water/Sanitation restriction	Critical: Phone update security completely unverified
+Complaint Creation & Departments	tests/phase3.test.mjs (Tests single department_code and public issues)	Creation across 6 maintenance departments, separation of student vs maintenance department	Critical: Complaint routing and department isolation unverified
+Peer Visibility & PII Masking	None (Existing tests verify department 404, but ignore PII payload leakage)	Privacy masking tests: verify student_name, enrollment_no, phone_number are stripped for peer students	Critical: PII data leakage into student feeds remains unmonitored
+Support System & Revocation	tests/phase4.test.mjs (Tests SHA-256 key, duplicate 409, self-support)	Base-1 support count (1 + active), support removal, re-support, concurrency under high load	High: Inability to revoke support; counter drift unmonitored
+Complaint Immutability & Timeline	None (Existing tests verify direct mutation of complaint document)	Immutability of original complaint, timeline append-only behavior, progress updates, clarification workflows	High: Data integrity violations unmonitored
+Principal Oversight & Warnings	None	Cross-department viewing, Principal restriction on status changes, 5-day delay logic, warning issuance, multiple warnings	Critical: Principal governance and warning engine completely untested
+Audit Logging & Tamper Resistance	None	Verification that every lifecycle event writes an append-only audit record; non-tampering verification	High: Administrative accountability unverified
+Section 10: Dependency Map & Implementation Sequence
+
+To implement the new requirements safely without circular dependencies, follow this strict dependency sequence:
+
+Safest Implementation Order:
+Database Schema & Provisioning: Establish new collections (complaint_timeline, phone_change_requests, complaint_warnings, department_admins, audit_logs) and modify attributes (student_department_id, maintenance_department_id, phone_number, is_academic, is_maintenance).
+Department Structure & Dynamic Admin Provisioning: Seed 6 departments with classification flags. Implement department_admins table and remove static environment allowlists.
+Student Profile & Phone Onboarding: Implement 10-digit phone collection, validation, and locking in handleCompleteOnboarding and frontend onboarding page.
+Complaint Creation with Dual Department IDs: Update create-complaint and /complaints/new to require selection of maintenance department while deriving student_department_id from profile. Remove public complaints.
+PII Masking & Peer Visibility: Refactor handleListComplaints and handleGetComplaint to project data safely, stripping creator name, enrollment, phone, and attachments from peer student views.
+Timeline & Immutability Engine: Replace direct mutation in handleUpdateAdminComplaint with discrete inserts into complaint_timeline.
+Support System Refactor: Change initial support count to 1. Implement remove-support and re-support workflows.
+Phone Number Change Workflow: Implement submission, academic admin review, one-time permission generation, failure-safe consumption, and Water/Sanitation restrictions.
+Principal Role & 5-Day Warning Logic: Implement /principal dashboard, delay calculator, warning issuance, and admin response tracking.
+Audit History Instrumentation: Hook append-only audit logging into every state mutation.
+Comprehensive Test Suite Update: Rebuild unit, integration, and E2E suites to verify all new business rules.
+Section 11: Revised Implementation Roadmap & Feasibility Assessment
+
+1. Constraint & Capacity Analysis
+Current Audit Baseline Date: 10 November 2026
+Target Deadline: 16 November 2026
+Available Calendar Days: 7 (10–16 November inclusive)
+Available Working Hours: Approximately 11 hours per day for Days 1–6 and 12 hours on Day 7
+Total Planned Engineering Capacity: 78 focused hours
+
+2. Honest Feasibility Verdict
+
+The audit estimate is 65–80 engineering hours. A 7-day schedule targeting 78 focused hours is mathematically within the upper part of that estimate, but it is aggressive and not guaranteed. It assumes the existing repository is stable, Appwrite access is available, department mappings are confirmed promptly, and no major migration or infrastructure blocker appears. The schedule must not be met by skipping security, privacy, data-integrity, or regression testing.
+
+3. Seven-Day Implementation Roadmap
+
+Day 1 (10 Nov): Domain and database foundation — 11 hours
+- Confirm official department names and code mappings; do not guess.
+- Model all six departments and academic/maintenance classifications.
+- Separate student_department_id and maintenance_department_id.
+- Design scoped admin assignments, timeline, phone-change, warning, and audit records.
+- Review migration, backfill, backup, and rollback approach.
+Exit criteria: reviewed schema, confirmed mappings, approved migration plan, schema checks.
+
+Day 2 (11 Nov): Onboarding and complaint creation — 11 hours
+- Add phone number to first-time profile setup and server-side validation.
+- Enforce profile field locking.
+- Add maintenance-department selection to complaint creation.
+- Derive student identity and academic department server-side.
+- Remove obsolete public complaint functionality.
+Exit criteria: onboarding and complaint creation tests pass.
+
+Day 3 (12 Nov): Privacy and attachment security — 11 hours
+- Scope student feeds by student_department_id.
+- Scope admin queues by maintenance_department_id.
+- Redact creator identity and private attachment metadata from peer responses.
+- Validate attachment ownership, existence, actual type, size <= 5 MB, and private access.
+Exit criteria: privacy, IDOR, attachment, and cross-department tests pass.
+
+Day 4 (13 Nov): Complaint timeline and support lifecycle — 11 hours
+- Preserve original complaint immutability.
+- Add timeline entries for status, progress, clarification, replies, and official responses.
+- Restrict status changes to the concerned Maintenance Department Admin.
+- Implement creator baseline support count of 1, self-support prevention, same-academic-department eligibility, support removal, and re-support.
+- Verify concurrency-safe active support uniqueness and count derivation.
+Exit criteria: timeline integrity and support lifecycle tests pass.
+
+Day 5 (14 Nov): Phone-change workflow and Principal foundation — 11 hours
+- Implement student request to their own academic Department Admin.
+- Implement approval/rejection and one-time update permission.
+- Consume permission only after successful database save; preserve old number and permission on failures.
+- Block Water and Sanitation Admin approval.
+- Implement Principal authentication/authorization and dashboard foundation.
+Exit criteria: phone failure-safety and Principal authorization tests pass.
+
+Day 6 (15 Nov): Warnings, governance, and audit history — 11 hours
+- Implement five-day Pending/In Progress eligibility using meaningful events only.
+- Exclude resolved complaints; allow multiple warnings while unresolved.
+- Implement warning responses.
+- Implement department/admin assignment and permission management.
+- Add append-only audit events for required lifecycle and privileged operations.
+Exit criteria: warning, governance, and audit coverage tests pass.
+
+Day 7 (16 Nov): Integration, security, and release verification — 12 hours
+- Run full typecheck, lint, unit, integration, and end-to-end tests.
+- Verify role matrix, academic visibility, maintenance assignment, and privacy projections.
+- Test attachment access, support concurrency, phone failure paths, Principal restrictions, and warning eligibility.
+- Review audit-log protection and secret exposure.
+- Verify deployed Appwrite OAuth, Function invocation, database permissions, and Vercel integration.
+- Fix release-blocking defects and document unresolved issues honestly.
+Exit criteria: no open critical/high issue, acceptance suite passes, deployment verified end-to-end.
+
+Total planned effort: 78 hours.
+
+4. Schedule Contingency
+If actual work exceeds the estimate, defer cosmetic polish and nonessential analytics before security, privacy, authorization, data integrity, or testing. Do not silently drop requirements or claim completion when acceptance criteria fail. Reforecast the deadline when blockers emerge.
+
+Section 12: Final Readiness Decision
+Decision: MAJOR ARCHITECTURAL CORRECTIONS REQUIRED
+Evidence-Based Justification:
+Critical PII Data Leakage (P0 Security Risk): The existing code actively exposes student creator names and enrollment numbers to peer students in API responses. This must be fixed before release.
+Fundamental Domain Model Incompatibility: The codebase conflates academic and maintenance departments into a single department_code field. The latest requirement requires separate student_department_id and maintenance_department_id.
+Pervasive Obsolete Architecture: Public complaint functionality remains embedded in collection indexes, backend queries, and UI components and must be removed.
+Missing Governance Subsystems: Principal role, five-day warning logic, phone-change approval workflow, timeline-based complaint immutability, and audit logging require implementation.
+Timeline Reality: A 78-hour plan across 7 days is an aggressive target within the 65–80 hour estimate, not a guarantee. Completion is conditional on verified acceptance tests and no major blockers. Security and privacy requirements must not be waived to meet the date.

@@ -2,5 +2,5 @@
 
 ## Purpose
 Client-side invocation wrapper for Appwrite Cloud Function `campusvoice-api`.
-Provides typed methods for profile fetching, student onboarding, and department listing.
+Provides typed methods for profile fetching, student onboarding, department listing, complaint creation/listing/detail, private attachment retrieval (`apiGetComplaintAttachment`), community support, and maintenance admin operations.
 Protects calls with Appwrite JWT.
