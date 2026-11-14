@@ -92,12 +92,14 @@ export async function handleGetProfile(
   caller: AuthenticatedCaller,
   deps?: ProfileHandlerDeps
 ): Promise<unknown> {
-  const { res, log, error } = context;
-  const config = getAppwriteConfig();
-  const databases = deps?.databases ?? getServerClient().databases;
-
+  console.log('[get-profile] handler entered');
   try {
-    const listResult = await databases.listDocuments(
+    const { res, log, error } = context;
+    const config = getAppwriteConfig();
+    const databases = deps?.databases ?? getServerClient().databases;
+
+    try {
+      const listResult = await databases.listDocuments(
       config.databaseId,
       config.profilesCollectionId,
       [Query.equal('user_id', caller.id), Query.limit(1)]
@@ -466,6 +468,10 @@ export async function handleGetProfile(
       500
     );
   }
+} catch (err) {
+  console.error('[get-profile] FATAL ERROR:', err);
+  throw err;
+}
 }
 
 /**
