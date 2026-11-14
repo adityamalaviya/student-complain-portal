@@ -1,6 +1,7 @@
 import { ID, Query } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from '../db.js';
 import { calculateComplaintDelay, INSTITUTIONAL_DEPARTMENTS, normalizeComplaintStatus, readNumberField, readStringField, } from '../departments.js';
+import { isDelayed } from './complaints.js';
 import { appendAuditLog } from './audit.js';
 function toComplaintModel(doc) {
     return {
@@ -106,12 +107,20 @@ export async function handleGetPrincipalDashboard(context, caller, deps) {
                 totalResolved += 1;
                 breakdown[deptId].resolved += 1;
             }
-            // Check 5-day delay eligibility
-            const delayInfo = calculateComplaintDelay(complaint, now);
-            if (delayInfo.is_delayed) {
+            // Check 5-day delay eligibility using authoritative isDelayed
+            const isComplaintDelayed = isDelayed({
+                status: complaint.status,
+                created_at: complaint.created_at || doc.$createdAt || '',
+                last_meaningful_update_at: complaint.last_meaningful_update_at ||
+                    complaint.created_at ||
+                    doc.$createdAt ||
+                    '',
+            });
+            if (isComplaintDelayed) {
                 totalDelayed += 1;
                 breakdown[deptId].delayed += 1;
                 const complaintId = complaint.$id || doc.$id;
+                const delayInfo = calculateComplaintDelay(complaint, now);
                 const complaintWarnings = complaintId ? warningsByComplaint.get(complaintId) || [] : [];
                 delayedComplaintsList.push({
                     complaint,

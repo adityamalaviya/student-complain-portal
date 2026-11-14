@@ -44,17 +44,19 @@ export function isDelayed(complaint: {
   created_at: string;
   last_meaningful_update_at: string;
 }): boolean {
-  if (complaint.status === 'Resolved') return false;
+  const status = complaint.status;
+  if (status === 'Resolved' || status === 'resolved') return false;
   const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
   const now = new Date();
-  if (complaint.status === 'Pending') {
-    return now.getTime() - 
-      new Date(complaint.created_at).getTime() > FIVE_DAYS_MS;
+  if (status === 'Pending' || status === 'pending' || status === 'open') {
+    const time = new Date(complaint.created_at).getTime();
+    if (isNaN(time)) return false;
+    return now.getTime() - time > FIVE_DAYS_MS;
   }
-  if (complaint.status === 'In Progress') {
-    return now.getTime() - 
-      new Date(complaint.last_meaningful_update_at).getTime() 
-      > FIVE_DAYS_MS;
+  if (status === 'In Progress' || status === 'in_progress') {
+    const time = new Date(complaint.last_meaningful_update_at || complaint.created_at).getTime();
+    if (isNaN(time)) return false;
+    return now.getTime() - time > FIVE_DAYS_MS;
   }
   return false;
 }
@@ -2982,3 +2984,5 @@ export async function handleReplyClarification(
     );
   }
 }
+
+export { handleGetPrincipalDashboard } from './principal.js';

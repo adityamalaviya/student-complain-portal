@@ -10,7 +10,6 @@ import {
   Funnel,
   Buildings,
   ShieldCheck,
-  WarningCircle,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
 import { apiGetPrincipalDashboard } from '@/lib/api';
@@ -109,11 +108,11 @@ export default function PrincipalDashboardPage(): React.ReactElement {
     if (departmentFilter === 'all') {
       return recentComplaints;
     }
-    return recentComplaints.filter(
-      (c) =>
-        c.maintenance_department_id === departmentFilter ||
-        c.student_department_id === departmentFilter
-    );
+    return recentComplaints.filter((c) => {
+      const maintId = resolveDepartment(c.maintenance_department_id)?.id || c.maintenance_department_id;
+      const studentDeptId = resolveDepartment(c.student_department_id)?.id || c.student_department_id;
+      return maintId === departmentFilter || studentDeptId === departmentFilter;
+    });
   }, [recentComplaints, departmentFilter]);
 
   if (loading || !user || !isPrincipal) {
@@ -229,7 +228,8 @@ export default function PrincipalDashboardPage(): React.ReactElement {
                     resolved: 0,
                     delayed: 0,
                   };
-                  const hasDelayed = breakdown.delayed > 0;
+                  const delayedCount = breakdown.delayed ?? (breakdown as Record<string, number>).delayed_count ?? 0;
+                  const hasDelayed = delayedCount > 0;
 
                   return (
                     <div
@@ -261,7 +261,7 @@ export default function PrincipalDashboardPage(): React.ReactElement {
                           </div>
                           <div className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
                             <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                              In Prog
+                              In Progress
                             </span>
                             <span className="font-mono text-base font-bold text-blue-700 dark:text-blue-400">
                               {breakdown.in_progress}
@@ -297,7 +297,7 @@ export default function PrincipalDashboardPage(): React.ReactElement {
                               : 'text-slate-600 dark:text-slate-400'
                           }`}
                         >
-                          {breakdown.delayed}
+                          {delayedCount}
                         </span>
                       </div>
                     </div>
@@ -389,7 +389,15 @@ export default function PrincipalDashboardPage(): React.ReactElement {
                         return (
                           <tr
                             key={c.$id}
+                            tabIndex={0}
+                            role="button"
                             onClick={() => router.push(`/complaints/${c.$id}`)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                router.push(`/complaints/${c.$id}`);
+                              }
+                            }}
                             className="cursor-pointer transition hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
                           >
                             <td className="max-w-xs px-6 py-4 font-medium text-slate-900 sm:max-w-md dark:text-white">

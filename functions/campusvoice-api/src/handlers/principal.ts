@@ -10,6 +10,7 @@ import {
   resolveDepartment,
   type DatabaseClientLike,
 } from '../departments.js';
+import { isDelayed } from './complaints.js';
 import type {
   AppwriteContext,
   AuthenticatedCaller,
@@ -161,13 +162,22 @@ export async function handleGetPrincipalDashboard(
         breakdown[deptId].resolved += 1;
       }
 
-      // Check 5-day delay eligibility
-      const delayInfo = calculateComplaintDelay(complaint, now);
-      if (delayInfo.is_delayed) {
+      // Check 5-day delay eligibility using authoritative isDelayed
+      const isComplaintDelayed = isDelayed({
+        status: complaint.status,
+        created_at: complaint.created_at || (doc.$createdAt as string) || '',
+        last_meaningful_update_at:
+          complaint.last_meaningful_update_at ||
+          complaint.created_at ||
+          (doc.$createdAt as string) ||
+          '',
+      });
+      if (isComplaintDelayed) {
         totalDelayed += 1;
         breakdown[deptId].delayed += 1;
 
         const complaintId = complaint.$id || doc.$id;
+        const delayInfo = calculateComplaintDelay(complaint, now);
         const complaintWarnings = complaintId ? warningsByComplaint.get(complaintId) || [] : [];
         delayedComplaintsList.push({
           complaint,

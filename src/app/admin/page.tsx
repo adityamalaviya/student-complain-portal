@@ -78,9 +78,6 @@ export default function AdminDashboardPage(): React.ReactElement {
   const [phoneRequests, setPhoneRequests] = useState<PhoneChangeRequest[]>([]);
   const [isPhoneLoading, setIsPhoneLoading] = useState<boolean>(false);
   const [phoneFilter, setPhoneFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
-  const [selectedPhoneReq, setSelectedPhoneReq] = useState<PhoneChangeRequest | null>(null);
-  const [reviewDecision, setReviewDecision] = useState<'approved' | 'rejected'>('approved');
-  const [decisionReason, setDecisionReason] = useState<string>('');
   const [isReviewSubmitting, setIsReviewSubmitting] = useState<boolean>(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
@@ -191,11 +188,12 @@ export default function AdminDashboardPage(): React.ReactElement {
 
   const pendingPhoneRequests = useMemo(() => {
     const adminDeptId = adminDeptAlt?.id || profile?.department_id || profile?.student_department_id;
-    return phoneRequests.filter(
-      (r) =>
-        r.status === 'pending' &&
-        (!adminDeptId || r.academic_department_id === adminDeptId)
-    );
+    return phoneRequests.filter((r) => {
+      if (r.status !== 'pending') return false;
+      if (!adminDeptId) return true;
+      const reqDeptId = resolveDepartment(r.academic_department_id)?.id || r.academic_department_id;
+      return reqDeptId === adminDeptId;
+    });
   }, [phoneRequests, adminDeptAlt?.id, profile?.department_id, profile?.student_department_id]);
 
   useEffect(() => {
@@ -203,33 +201,6 @@ export default function AdminDashboardPage(): React.ReactElement {
       void fetchPhoneRequests();
     }
   }, [isAdmin, isAcademicAdmin, fetchPhoneRequests]);
-
-  const handleReviewPhone = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
-    if (!selectedPhoneReq) return;
-    setIsReviewSubmitting(true);
-    setReviewError(null);
-    setReviewSuccess(null);
-    try {
-      const res = await apiReviewPhoneChange({
-        request_id: selectedPhoneReq.$id,
-        decision: reviewDecision,
-        decision_reason: decisionReason.trim() || undefined,
-      });
-      if (res.success) {
-        setReviewSuccess(`Request successfully marked as ${reviewDecision}.`);
-        setSelectedPhoneReq(null);
-        setDecisionReason('');
-        await fetchPhoneRequests();
-      } else {
-        setReviewError(res.error || 'Failed to update phone change request.');
-      }
-    } catch {
-      setReviewError('Network error reviewing phone change request.');
-    } finally {
-      setIsReviewSubmitting(false);
-    }
-  };
 
   // Handle modal submit
   const handleResolutionSubmit = async (
@@ -296,7 +267,7 @@ export default function AdminDashboardPage(): React.ReactElement {
   const openCount = metrics?.total_open ?? 0;
   const inProgressCount = metrics?.total_in_progress ?? 0;
   const resolvedCount = metrics?.total_resolved ?? 0;
-  const pendingPhoneCount = phoneRequests.filter((r) => r.status === 'pending').length;
+  const pendingPhoneCount = pendingPhoneRequests.length;
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
@@ -662,64 +633,68 @@ export default function AdminDashboardPage(): React.ReactElement {
                 </div>
               ) : (
                 <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {pendingPhoneRequests.map((req) => (
-                    <li
-                      key={req.$id}
-                      className="flex flex-col justify-between gap-4 px-6 py-5 transition hover:bg-slate-50/60 sm:flex-row sm:items-center dark:hover:bg-slate-800/30"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2.5">
-                          <span className="font-semibold text-slate-900 dark:text-white">
-                            {req.student_name || req.student_user_id}
-                          </span>
-                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                            Pending
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                          <span>Requested: {formatTimestamp(req.created_at || req.$createdAt)}</span>
-                          {req.old_phone_number && (
-                            <>
-                              <span>·</span>
-                              <span>Current: {req.old_phone_number}</span>
-                            </>
+                  {pendingPhoneRequests.map((req) => {
+                    const reqId = (req as { request_id?: string }).request_id || req.$id;
+                    const requestedDate = req.requested_at || req.created_at || req.$createdAt;
+                    return (
+                      <li
+                        key={reqId}
+                        className="flex flex-col justify-between gap-4 px-6 py-5 transition hover:bg-slate-50/60 sm:flex-row sm:items-center dark:hover:bg-slate-800/30"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2.5">
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {req.student_name || req.student_user_id || 'Student'}
+                            </span>
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                              Pending
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                            <span>Requested: {formatTimestamp(requestedDate)}</span>
+                            {req.old_phone_number && (
+                              <>
+                                <span>·</span>
+                                <span>Current: {req.old_phone_number}</span>
+                              </>
+                            )}
+                            {req.requested_phone_number && (
+                              <>
+                                <span>·</span>
+                                <span>New: {req.requested_phone_number}</span>
+                              </>
+                            )}
+                          </div>
+                          {req.reason && (
+                            <p className="text-xs italic text-slate-600 dark:text-slate-400">
+                              Reason: &ldquo;{req.reason}&rdquo;
+                            </p>
                           )}
-                          {req.requested_phone_number && (
-                            <>
-                              <span>·</span>
-                              <span>New: {req.requested_phone_number}</span>
-                            </>
-                          )}
                         </div>
-                        {req.reason && (
-                          <p className="text-xs italic text-slate-600 dark:text-slate-400">
-                            Reason: &ldquo;{req.reason}&rdquo;
-                          </p>
-                        )}
-                      </div>
 
-                      <div className="flex shrink-0 items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={isReviewSubmitting}
-                          onClick={() => handleQuickReviewPhone(req.$id, 'approved')}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
-                        >
-                          <CheckCircle size={14} weight="bold" />
-                          Approve
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isReviewSubmitting}
-                          onClick={() => handleQuickReviewPhone(req.$id, 'rejected')}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
-                        >
-                          <XCircle size={14} weight="bold" />
-                          Reject
-                        </button>
-                      </div>
-                    </li>
-                  ))}
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isReviewSubmitting}
+                            onClick={() => handleQuickReviewPhone(reqId, 'approved')}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
+                          >
+                            <CheckCircle size={14} weight="bold" />
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isReviewSubmitting}
+                            onClick={() => handleQuickReviewPhone(reqId, 'rejected')}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                          >
+                            <XCircle size={14} weight="bold" />
+                            Reject
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>
