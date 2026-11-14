@@ -513,13 +513,32 @@ async function step3SeedDepartments() {
   console.log('📌 STEP 3: Seeding canonical departments');
   console.log('============================================================');
 
+  // Check if collection has a legacy 'code' attribute (e.g. from earlier schema)
+  let hasCodeAttribute = false;
+  try {
+    const codeAttr = await withRetry(() => databases.getAttribute(DATABASE_ID, DEPARTMENTS_COLL_ID, 'code'));
+    if (codeAttr) {
+      hasCodeAttribute = true;
+      if (codeAttr.required) {
+        try {
+          await withRetry(() => databases.updateStringAttribute(DATABASE_ID, DEPARTMENTS_COLL_ID, 'code', false, null));
+          console.log(`ℹ️ Updated legacy attribute 'code' on '${DEPARTMENTS_COLL_ID}' to optional`);
+        } catch {
+          // If Appwrite rejects update, we provide dept.code in the payload anyway
+        }
+      }
+    }
+  } catch {
+    // 'code' attribute does not exist on collection
+  }
+
   const canonicalDepartments = [
-    { $id: 'dept_civil', name: 'Civil', is_academic: true, is_maintenance: true, is_active: true },
-    { $id: 'dept_comp', name: 'Computer', is_academic: true, is_maintenance: true, is_active: true },
-    { $id: 'dept_elec', name: 'Electrical', is_academic: true, is_maintenance: true, is_active: true },
-    { $id: 'dept_mech', name: 'Mechanical', is_academic: true, is_maintenance: true, is_active: true },
-    { $id: 'dept_water', name: 'Water', is_academic: false, is_maintenance: true, is_active: true },
-    { $id: 'dept_sanit', name: 'Sanitation', is_academic: false, is_maintenance: true, is_active: true },
+    { $id: 'dept_civil', name: 'Civil', code: '06', is_academic: true, is_maintenance: true, is_active: true },
+    { $id: 'dept_comp', name: 'Computer', code: '07', is_academic: true, is_maintenance: true, is_active: true },
+    { $id: 'dept_elec', name: 'Electrical', code: '09', is_academic: true, is_maintenance: true, is_active: true },
+    { $id: 'dept_mech', name: 'Mechanical', code: '19', is_academic: true, is_maintenance: true, is_active: true },
+    { $id: 'dept_water', name: 'Water', code: 'water', is_academic: false, is_maintenance: true, is_active: true },
+    { $id: 'dept_sanit', name: 'Sanitation', code: 'sanit', is_academic: false, is_maintenance: true, is_active: true },
   ];
 
   for (const dept of canonicalDepartments) {
@@ -530,17 +549,22 @@ async function step3SeedDepartments() {
       const isNotFound = err?.code === 404 || err?.message?.includes('not found') || err?.message?.includes('could not be found');
       if (isNotFound) {
         try {
+          const docPayload = {
+            name: dept.name,
+            is_academic: dept.is_academic,
+            is_maintenance: dept.is_maintenance,
+            is_active: dept.is_active,
+          };
+          if (hasCodeAttribute && dept.code) {
+            docPayload.code = dept.code;
+          }
+
           await withRetry(() =>
             databases.createDocument(
               DATABASE_ID,
               DEPARTMENTS_COLL_ID,
               dept.$id,
-              {
-                name: dept.name,
-                is_academic: dept.is_academic,
-                is_maintenance: dept.is_maintenance,
-                is_active: dept.is_active,
-              },
+              docPayload,
               []
             )
           );
