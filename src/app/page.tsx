@@ -8,11 +8,13 @@ import { useAuth } from '@/lib/hooks';
 
 export default function HomePage(): React.ReactElement {
   const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin } = useAuth();
+  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal } = useAuth();
 
   useEffect(() => {
     if (!loading && user) {
-      if (isAdmin) {
+      if (isPrincipal) {
+        router.replace('/principal');
+      } else if (isAdmin) {
         router.push('/admin');
       } else if (isOnboarded) {
         router.push('/dashboard');
@@ -20,7 +22,7 @@ export default function HomePage(): React.ReactElement {
         router.push('/onboarding');
       }
     }
-  }, [loading, user, isOnboarded, isAdmin, router]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-center antialiased dark:bg-gray-950">

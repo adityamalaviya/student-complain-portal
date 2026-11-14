@@ -15,14 +15,16 @@ import { useAuth } from '@/lib/hooks';
 function SignInContent(): React.ReactElement {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, profile, loading, isOnboarded, isAdmin, signIn } = useAuth();
+  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal, signIn } = useAuth();
   const rawError = searchParams.get('error');
   const errorMsg = searchParams.get('message') || searchParams.get('error_description') || (rawError && rawError !== 'oauth_failed' ? rawError : null);
   const oauthError = Boolean(rawError);
 
   useEffect(() => {
     if (!loading && user) {
-      if (isAdmin) {
+      if (isPrincipal) {
+        router.replace('/principal');
+      } else if (isAdmin) {
         router.push('/admin');
       } else if (isOnboarded) {
         router.push('/dashboard');
@@ -30,7 +32,7 @@ function SignInContent(): React.ReactElement {
         router.push('/onboarding');
       }
     }
-  }, [loading, user, isOnboarded, isAdmin, router]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
 
   return (
     <div className="flex min-h-screen flex-col justify-between bg-slate-50 text-slate-900 antialiased selection:bg-blue-600 selection:text-white dark:bg-gray-950 dark:text-slate-100">
