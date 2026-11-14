@@ -46,9 +46,7 @@ export function ComplaintCard({
   onAdminUpdate,
 }: ComplaintCardProps): React.ReactElement {
   const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
-  const maintDept = resolveDepartment(
-    complaint.maintenance_department_id || complaint.department_code
-  );
+  const maintDept = resolveDepartment(complaint.maintenance_department_id);
 
   return (
     <article className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300 sm:p-6 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700">
@@ -56,7 +54,7 @@ export function ComplaintCard({
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <DepartmentBadge
-            code={maintDept?.id || complaint.maintenance_department_id || complaint.department_code || 'dept_comp'}
+            departmentId={maintDept?.id ?? complaint.maintenance_department_id}
             name={maintDept?.name || complaint.department_name}
             size="sm"
           />

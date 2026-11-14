@@ -8,6 +8,7 @@ import {
   SignOut,
   Lock,
   CircleNotch,
+  Phone,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
 import {
@@ -25,6 +26,7 @@ import {
   LoadingSkeleton,
   EmptyState,
   ErrorState,
+  PhoneChangeModal,
 } from '@/components';
 
 function statusMatchesFilter(
@@ -46,7 +48,7 @@ function statusMatchesFilter(
 
 export default function StudentDashboardPage(): React.ReactElement {
   const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin, signOutUser } = useAuth();
+  const { user, profile, loading, isOnboarded, isAdmin, signOutUser, refreshProfile } = useAuth();
 
   const [feedType, setFeedType] = useState<FeedType>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -56,6 +58,7 @@ export default function StudentDashboardPage(): React.ReactElement {
   const [userSupportedIds, setUserSupportedIds] = useState<Set<string>>(new Set());
   const [isLoadingFeed, setIsLoadingFeed] = useState<boolean>(true);
   const [feedError, setFeedError] = useState<string | null>(null);
+  const [isPhoneModalOpen, setIsPhoneModalOpen] = useState<boolean>(false);
 
   // Guard: Redirect if not student or not authenticated
   useEffect(() => {
@@ -214,9 +217,7 @@ export default function StudentDashboardPage(): React.ReactElement {
     );
   }
 
-  const academicDept = resolveDepartment(
-    profile.student_department_id || profile.department_code
-  );
+  const academicDept = resolveDepartment(profile.student_department_id);
   const academicDeptName = academicDept?.name || profile.department_name || 'Academic Department';
 
   return (
@@ -236,7 +237,7 @@ export default function StudentDashboardPage(): React.ReactElement {
             <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
 
             <DepartmentBadge
-              code={academicDept?.id || profile.student_department_id || 'dept_comp'}
+              departmentId={academicDept?.id ?? profile.student_department_id}
               name={academicDeptName}
               showVerified
               size="sm"
@@ -254,6 +255,22 @@ export default function StudentDashboardPage(): React.ReactElement {
             </Link>
 
             <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
+
+            {/* Student Phone Profile & Request Trigger */}
+            {profile.phone_number && (
+              <button
+                type="button"
+                onClick={() => setIsPhoneModalOpen(true)}
+                title="View Phone Profile & Request Change"
+                className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                <Phone size={13} className="text-blue-600 dark:text-blue-400" />
+                <span className="font-mono">+91 {profile.phone_number}</span>
+                <span className="rounded bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                  Update
+                </span>
+              </button>
+            )}
 
             <div className="flex items-center gap-2.5">
               <div className="hidden text-right md:block">
@@ -347,6 +364,19 @@ export default function StudentDashboardPage(): React.ReactElement {
           </span>
         </div>
       </footer>
+
+      {/* Student Phone Change Request Modal */}
+      {profile.phone_number && (
+        <PhoneChangeModal
+          isOpen={isPhoneModalOpen}
+          onClose={() => setIsPhoneModalOpen(false)}
+          currentPhoneNumber={profile.phone_number}
+          academicDepartmentName={academicDeptName}
+          onPhoneUpdated={async () => {
+            await refreshProfile();
+          }}
+        />
+      )}
     </div>
   );
 }

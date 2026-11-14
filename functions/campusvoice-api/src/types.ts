@@ -5,7 +5,23 @@
  * Aligns with Authoritative Product Rules (effective 10 November 2026).
  */
 
-export type DepartmentCode = '06' | '07' | string;
+export type AcademicDepartmentId =
+  | 'dept_civil'
+  | 'dept_comp'
+  | 'dept_elec'
+  | 'dept_mech';
+
+export type MaintenanceOnlyDepartmentId = 'dept_water' | 'dept_sanit';
+
+export type DepartmentId = AcademicDepartmentId | MaintenanceOnlyDepartmentId;
+
+export type MaintenanceDepartmentId = DepartmentId;
+
+export interface EnrollmentMapping {
+  enrollment_code: string;
+  department_id: AcademicDepartmentId;
+  confirmed: boolean;
+}
 
 export type UserRole = 'student' | 'department_admin' | 'principal';
 
@@ -31,8 +47,7 @@ export type ProfileStatus = 'incomplete' | 'pending_verification' | 'complete' |
 export type IssueType = 'department' | 'public';
 
 export interface Department {
-  $id?: string;
-  code: string;
+  $id: DepartmentId;
   name: string;
   is_academic: boolean;
   is_maintenance: boolean;
@@ -49,7 +64,8 @@ export interface UserProfile {
   name: string;
   display_name?: string;
   enrollment_no: string;
-  student_department_id?: string | null;
+  student_department_id?: AcademicDepartmentId | null;
+  department_id?: DepartmentId | null;
   phone_number?: string;
   role: UserRole;
   profile_status?: ProfileStatus;
@@ -57,7 +73,6 @@ export interface UserProfile {
   enrollment_locked: boolean;
   phone_locked: boolean;
   is_locked?: boolean;
-  department_code?: DepartmentCode;
   department_name?: string;
   created_at: string;
   updated_at: string;
@@ -80,7 +95,6 @@ export interface Complaint {
   last_meaningful_update_at?: string;
   attachment_file_id?: string;
   is_own_complaint?: boolean;
-  department_code?: DepartmentCode;
   department_name?: string;
   issue_type?: IssueType;
   official_response?: string;
@@ -110,8 +124,9 @@ export interface ComplaintSupport {
 export interface ComplaintTimeline {
   $id?: string;
   complaint_id: string;
-  author_id: string;
+  author_id?: string;
   author_role: UserRole;
+  author_label?: string;
   entry_type: TimelineEntryType;
   content: string;
   old_status?: ComplaintStatus;
@@ -171,8 +186,23 @@ export interface AdminMetrics {
   total_open: number;
   total_in_progress: number;
   total_resolved: number;
-  department_id?: string;
-  department_code?: DepartmentCode;
+  department_id?: DepartmentId;
+}
+
+export interface PrincipalMetrics {
+  total_complaints: number;
+  total_pending: number;
+  total_in_progress: number;
+  total_resolved: number;
+  total_delayed: number;
+  total_warnings_issued: number;
+  department_breakdown: Record<string, {
+    total: number;
+    pending: number;
+    in_progress: number;
+    resolved: number;
+    delayed: number;
+  }>;
 }
 
 export interface AuthenticatedCaller {
@@ -180,9 +210,9 @@ export interface AuthenticatedCaller {
   email: string;
   name: string;
   role: UserRole;
-  student_department_id?: string | null;
+  student_department_id?: AcademicDepartmentId | null;
   admin_assignments?: DepartmentAdminAssignment[];
-  department_code: DepartmentCode | null;
+  department_id: DepartmentId | null;
   department_name: string | null;
 }
 

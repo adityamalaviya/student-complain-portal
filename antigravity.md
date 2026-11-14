@@ -10,18 +10,24 @@ CampusVoice is an institutional student complaint and facilities-governance port
 - **Hosting:** Vercel (Frontend) and Appwrite Cloud (Backend/DB/Auth/Storage).
 - **Design:** Stitch MCP approved Minimalist Institutional Design System.
 
-## Critical Business & Architecture Rules (Effective 10 November 2026)
-1. **Six Institutional Departments:**
-   - Computer, Civil, Electrical, Mechanical (Academic & Maintenance departments).
-   - Water, Sanitation (Maintenance-only departments).
+## Critical Business & Architecture Rules (Updated Step 5 Canonical Department Registry)
+1. **Six Institutional Departments (Canonical IDs Independent of Enrollment Codes):**
+   - `dept_civil` (`Civil`): Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+   - `dept_comp` (`Computer`): Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+   - `dept_elec` (`Electrical`): Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+   - `dept_mech` (`Mechanical`): Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+   - `dept_water` (`Water`): Maintenance-only (`is_academic: false`, `is_maintenance: true`) — NO enrollment code
+   - `dept_sanit` (`Sanitation`): Maintenance-only (`is_academic: false`, `is_maintenance: true`) — NO enrollment code
 2. **Dual Department Jurisdiction:**
-   - `student_department_id`: Academic jurisdiction for student peer feed visibility and community support.
-   - `maintenance_department_id`: Maintenance routing jurisdiction determining which admin manages the complaint.
-   - Water and Sanitation can never be assigned as student academic departments.
+   - `student_department_id`: Academic jurisdiction for student peer feed visibility and community support (must be one of the 4 active academic departments).
+   - `maintenance_department_id`: Maintenance routing jurisdiction determining which admin manages the complaint (any of the 6 active maintenance departments).
+   - Water (`dept_water`) and Sanitation (`dept_sanit`) can never be assigned as student academic departments or academic admin scopes.
 3. **Enrollment Department Detection:**
-   - Zero-based slice `enrollment_no.slice(7, 9)`.
-   - Known mappings: `06` → Department 1, `07` → Department 2 (official names confirmed before activation).
-   - Zero guessing of unmapped codes; unmapped codes fail validation or route to pending verification.
+   - Zero-based slice `enrollment_no.slice(7, 9)` (`enrollment_no[7:9]`).
+   - Confirmed mappings (`ENROLLMENT_CODE_MAPPINGS`): `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, `19` → `dept_mech`.
+   - Water and Sanitation have zero enrollment codes. Invented codes (`03`, `04`, `05`, `08`) and aliases (`water`, `sanitation`) are prohibited.
+   - Zero guessing of unmapped or inactive codes; unmapped codes are rejected without fallback assignment.
+   - **Pending Appwrite Migration:** Canonical `$id` department seeding and removal of `departments.code` / `idx_dept_code` are implemented in code/provisioning scripts; live Appwrite schema/document migration is still pending.
 4. **Student Profile & Phone Number:**
    - First-time onboarding collects student name, enrollment number, and phone number (`/^[6-9]\d{9}$/`).
    - Name, enrollment number, and phone number are locked after saving.

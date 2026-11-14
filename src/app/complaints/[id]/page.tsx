@@ -14,20 +14,32 @@ import {
   DownloadSimple,
   User,
   ShieldCheck,
+  ClockCounterClockwise,
+  ArrowsClockwise,
+  ChatText,
+  NotePencil,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
 import {
   apiGetComplaint,
   apiGetComplaintAttachment,
   apiSupportComplaint,
+  apiRemoveSupport,
+  apiRequestClarification,
+  apiReplyClarification,
+  apiUpdateAdminComplaint,
 } from '@/lib/api';
 import { resolveDepartment } from '@/lib/utils';
-import type { Complaint } from '@/types';
+import type { Complaint, ComplaintStatus, ComplaintTimeline } from '@/types';
 import {
   ComplaintStatusBadge,
   ComplaintPriorityBadge,
   ComplaintSupportButton,
   DepartmentBadge,
+  AdminResolutionModal,
+  ClarificationRequestModal,
+  ClarificationReplyBox,
+  type AdminResolutionSubmitResult,
 } from '@/components';
 
 function formatReportedDate(dateString?: string): string {
@@ -44,6 +56,91 @@ function formatReportedDate(dateString?: string): string {
   }
 }
 
+function formatTimelineDate(dateString?: string): string {
+  if (!dateString) return 'Recently';
+  try {
+    const d = new Date(dateString);
+    if (Number.isNaN(d.getTime())) return 'Recently';
+    return d.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return 'Recently';
+  }
+}
+
+function getTimelineEntryMeta(entry: ComplaintTimeline): {
+  title: string;
+  badgeClass: string;
+  containerClass: string;
+} {
+  switch (entry.entry_type) {
+    case 'status_change':
+      return {
+        title: 'Status Change',
+        badgeClass:
+          'border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300',
+        containerClass:
+          'border-slate-200 border-l-slate-500 bg-slate-50/70 dark:border-slate-800 dark:border-l-slate-400 dark:bg-slate-800/30',
+      };
+    case 'progress_update':
+      return {
+        title: 'Progress Update',
+        badgeClass:
+          'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300',
+        containerClass:
+          'border-slate-200 border-l-indigo-600 bg-indigo-50/25 dark:border-slate-800 dark:border-l-indigo-400 dark:bg-indigo-950/20',
+      };
+    case 'clarification_request':
+    case 'request_clarification' as unknown as ComplaintTimeline['entry_type']:
+      return {
+        title: 'Clarification Requested',
+        badgeClass:
+          'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+        containerClass:
+          'border-slate-200 border-l-amber-500 bg-amber-50/20 dark:border-slate-800 dark:border-l-amber-400 dark:bg-amber-950/15',
+      };
+    case 'clarification_reply':
+    case 'reply_clarification' as unknown as ComplaintTimeline['entry_type']:
+      return {
+        title: 'Student Reply',
+        badgeClass:
+          'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300',
+        containerClass:
+          'border-slate-200 border-l-emerald-600 bg-emerald-50/20 dark:border-slate-800 dark:border-l-emerald-400 dark:bg-emerald-950/15',
+      };
+    case 'admin_response':
+    default:
+      return {
+        title: 'Official Response',
+        badgeClass:
+          'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300',
+        containerClass:
+          'border-slate-200 border-l-blue-700 bg-blue-50/20 dark:border-slate-800 dark:border-l-blue-500 dark:bg-blue-950/20',
+      };
+  }
+}
+
+function getSafeTimelineAuthorLabel(
+  entry: ComplaintTimeline,
+  maintDeptName?: string
+): string {
+  if (entry.author_label) {
+    return entry.author_label;
+  }
+  if (entry.author_role === 'department_admin') {
+    return maintDeptName ? `${maintDeptName} Maintenance Admin` : 'Maintenance Admin';
+  }
+  if (entry.author_role === 'principal') {
+    return 'Principal';
+  }
+  return 'Complaint Creator';
+}
+
 export default function ComplaintDetailPage(): React.ReactElement {
   const router = useRouter();
   const params = useParams();
@@ -52,6 +149,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
   const { user, loading, isOnboarded, isAdmin, isPrincipal } = useAuth();
 
   const [complaint, setComplaint] = useState<Complaint | null>(null);
+  const [timeline, setTimeline] = useState<ComplaintTimeline[]>([]);
   const [hasSupported, setHasSupported] = useState<boolean>(false);
   const [supportCount, setSupportCount] = useState<number>(1);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -59,6 +157,8 @@ export default function ComplaintDetailPage(): React.ReactElement {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isDownloadingAttachment, setIsDownloadingAttachment] = useState<boolean>(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isResolutionModalOpen, setIsResolutionModalOpen] = useState<boolean>(false);
+  const [isClarificationModalOpen, setIsClarificationModalOpen] = useState<boolean>(false);
 
   // Authentication & Onboarding Guards
   useEffect(() => {
@@ -82,6 +182,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
       const res = await apiGetComplaint(complaintId);
       if (res.success && res.data) {
         setComplaint(res.data.complaint);
+        setTimeline(Array.isArray(res.data.timeline) ? res.data.timeline : []);
         setHasSupported(Boolean(res.data.has_supported));
         setSupportCount(res.data.complaint.support_count ?? 1);
       } else if (
@@ -106,37 +207,62 @@ export default function ComplaintDetailPage(): React.ReactElement {
     }
   }, [user, complaintId, fetchComplaintDetails]);
 
-  // Support complaint handler
+  // Support complaint handler (with full toggle lifecycle: support / remove-support)
   const handleSupportClick = async (_id?: string): Promise<void> => {
-    if (hasSupported || !complaintId) return;
+    if (!complaintId) return;
 
     const prevSupported = hasSupported;
     const prevCount = supportCount;
 
-    setHasSupported(true);
-    setSupportCount((prev) => prev + 1);
+    if (hasSupported) {
+      // Optimistic revocation
+      setHasSupported(false);
+      setSupportCount((prev) => Math.max(1, prev - 1));
 
-    try {
-      const res = await apiSupportComplaint(complaintId);
-      if (res.success && res.data) {
-        setSupportCount(res.data.support_count);
-        setHasSupported(res.data.has_supported);
-      } else {
-        if (res.code === 'ALREADY_SUPPORTED') {
-          setHasSupported(true);
-          setSupportCount(prevCount);
+      try {
+        const res = await apiRemoveSupport(complaintId);
+        if (res.success && res.data) {
+          setSupportCount(res.data.support_count);
+          setHasSupported(res.data.has_supported);
         } else {
           setHasSupported(prevSupported);
           setSupportCount(prevCount);
+          if (res.error) {
+            console.warn('[handleSupportClick remove]', res.error);
+          }
         }
-        if (res.error) {
-          console.warn('[handleSupportClick]', res.error);
-        }
+      } catch (err: unknown) {
+        setHasSupported(prevSupported);
+        setSupportCount(prevCount);
+        console.warn('[handleSupportClick remove] Network error:', err);
       }
-    } catch (err: unknown) {
-      setHasSupported(prevSupported);
-      setSupportCount(prevCount);
-      console.warn('[handleSupportClick] Network error:', err);
+    } else {
+      // Optimistic support
+      setHasSupported(true);
+      setSupportCount((prev) => prev + 1);
+
+      try {
+        const res = await apiSupportComplaint(complaintId);
+        if (res.success && res.data) {
+          setSupportCount(res.data.support_count);
+          setHasSupported(res.data.has_supported);
+        } else {
+          if (res.code === 'ALREADY_SUPPORTED') {
+            setHasSupported(true);
+            setSupportCount(prevCount);
+          } else {
+            setHasSupported(prevSupported);
+            setSupportCount(prevCount);
+          }
+          if (res.error) {
+            console.warn('[handleSupportClick add]', res.error);
+          }
+        }
+      } catch (err: unknown) {
+        setHasSupported(prevSupported);
+        setSupportCount(prevCount);
+        console.warn('[handleSupportClick add] Network error:', err);
+      }
     }
   };
 
@@ -183,6 +309,87 @@ export default function ComplaintDetailPage(): React.ReactElement {
     }
   };
 
+  const handleDetailResolutionSubmit = async (
+    targetComplaintId: string,
+    newStatus: ComplaintStatus,
+    officialResponse: string,
+    isSubstantive?: boolean
+  ): Promise<AdminResolutionSubmitResult> => {
+    try {
+      const res = await apiUpdateAdminComplaint(targetComplaintId, {
+        status: newStatus,
+        official_response: officialResponse,
+        ...(typeof isSubstantive === 'boolean' ? { is_substantive: isSubstantive } : {}),
+      });
+
+      if (!res.success || !res.data) {
+        return {
+          success: false,
+          error: res.error || 'Failed to persist department response.',
+        };
+      }
+
+      // Refetch persisted complaint and timeline from Appwrite instead of relying on temporary submission response.
+      await fetchComplaintDetails();
+      return { success: true };
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Unexpected network error while saving update.';
+      return {
+        success: false,
+        error: msg,
+      };
+    }
+  };
+
+  const handleClarificationSubmit = async (
+    targetComplaintId: string,
+    question: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await apiRequestClarification(targetComplaintId, question);
+      if (!res.success || !res.data) {
+        return {
+          success: false,
+          error: res.error || 'Failed to submit clarification request.',
+        };
+      }
+      await fetchComplaintDetails();
+      return { success: true };
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Unexpected error submitting clarification request.';
+      return {
+        success: false,
+        error: msg,
+      };
+    }
+  };
+
+  const handleClarificationReplySubmit = async (
+    targetComplaintId: string,
+    reply: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await apiReplyClarification(targetComplaintId, reply);
+      if (!res.success || !res.data) {
+        return {
+          success: false,
+          error: res.error || 'Failed to submit clarification reply.',
+        };
+      }
+      await fetchComplaintDetails();
+      return { success: true };
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Unexpected error submitting clarification reply.';
+      return {
+        success: false,
+        error: msg,
+      };
+    }
+  };
+
   if (loading || isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-gray-950">
@@ -217,10 +424,19 @@ export default function ComplaintDetailPage(): React.ReactElement {
   }
 
   const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
-  const maintDept = resolveDepartment(
-    complaint.maintenance_department_id || complaint.department_code
-  );
+  const maintDept = resolveDepartment(complaint.maintenance_department_id);
   const academicDept = resolveDepartment(complaint.student_department_id);
+  const isCreator = Boolean(
+    user &&
+      complaint &&
+      ((user as { id?: string }).id === complaint.student_user_id ||
+        (user as { $id?: string }).$id === complaint.student_user_id)
+  );
+  const hasClarificationRequest = timeline.some(
+    (entry) =>
+      entry.entry_type === 'clarification_request' ||
+      (entry.entry_type as string) === 'request_clarification'
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
@@ -244,7 +460,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
 
           <div className="flex items-center gap-3">
             <DepartmentBadge
-              code={maintDept?.id || complaint.maintenance_department_id || 'dept_comp'}
+              departmentId={maintDept?.id ?? complaint.maintenance_department_id}
               name={maintDept?.name || complaint.department_name}
               size="sm"
             />
@@ -405,43 +621,181 @@ export default function ComplaintDetailPage(): React.ReactElement {
               supportCount={supportCount}
               hasSupported={hasSupported}
               onToggleSupport={handleSupportClick}
+              disabled={isCreator}
               variant="detail"
             />
           </div>
 
-          {/* Official Admin Response Box */}
-          {complaint.official_response && (
-            <div className="mt-8 rounded-r-xl border border-l-4 border-slate-200 border-l-blue-700 bg-blue-50/20 p-5 dark:border-slate-800 dark:border-l-blue-500 dark:bg-blue-950/20">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-700 text-white dark:bg-blue-600">
-                    <CheckCircle size={14} weight="bold" />
-                  </div>
-                  <span className="text-xs font-bold text-slate-900 sm:text-sm dark:text-white">
-                    Administrator Response
-                  </span>
-                  <span className="hidden rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600 sm:inline-block dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                    {maintDept?.name || complaint.department_name} Administration
-                  </span>
-                </div>
-                {complaint.resolved_at && (
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    Resolved {formatReportedDate(complaint.resolved_at)}
-                  </span>
-                )}
+          {/* Official Responses & Chronological Complaint Timeline */}
+          <section className="mt-8 border-t border-slate-100 pt-6 dark:border-slate-800">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <ClockCounterClockwise
+                  size={18}
+                  weight="bold"
+                  className="text-blue-700 dark:text-blue-400"
+                />
+                <h2 className="text-sm font-bold text-slate-900 sm:text-base dark:text-white">
+                  Official Response &amp; Activity Timeline
+                </h2>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  {timeline.length}
+                </span>
               </div>
 
-              <div className="text-xs leading-relaxed text-slate-700 sm:pl-8 sm:text-sm dark:text-slate-300">
-                <p className="whitespace-pre-wrap">{complaint.official_response}</p>
-                <div className="mt-3 flex items-center gap-2 border-t border-slate-200/60 pt-2 text-xs dark:border-slate-800/60">
-                  <span className="font-semibold text-slate-500 dark:text-slate-400">Current Status:</span>
-                  <ComplaintStatusBadge status={complaint.status} size="sm" />
-                </div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                {complaint.status === 'Resolved' && complaint.resolved_at && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">
+                    <CheckCircle size={13} weight="bold" />
+                    <span>Resolved {formatTimelineDate(complaint.resolved_at)}</span>
+                  </span>
+                )}
+
+                {isAdmin && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsClarificationModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-1.5 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 active:scale-95 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/50"
+                    >
+                      <Question size={14} weight="bold" />
+                      <span>Request Clarification</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsResolutionModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3.5 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 active:scale-95 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300 dark:hover:bg-blue-900/50"
+                    >
+                      <NotePencil size={14} weight="bold" />
+                      <span>Update / Respond</span>
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-          )}
+
+            {timeline.length > 0 ? (
+              <ol className="space-y-3">
+                {timeline.map((entry, idx) => {
+                  const meta = getTimelineEntryMeta(entry);
+                  const authorLabel = getSafeTimelineAuthorLabel(
+                    entry,
+                    maintDept?.name || complaint.department_name
+                  );
+                  return (
+                    <li
+                      key={entry.$id || `${entry.entry_type}-${entry.created_at}-${idx}`}
+                      className={`rounded-r-xl border border-l-4 p-4 ${meta.containerClass}`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${meta.badgeClass}`}
+                          >
+                            {entry.entry_type === 'status_change' ? (
+                              <ArrowsClockwise size={12} weight="bold" />
+                            ) : entry.entry_type === 'progress_update' ? (
+                              <CheckCircle size={12} weight="bold" />
+                            ) : (
+                              <ChatText size={12} weight="bold" />
+                            )}
+                            <span>{meta.title}</span>
+                          </span>
+                          <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                            {authorLabel}
+                          </span>
+                        </div>
+                        <time
+                          dateTime={entry.created_at}
+                          className="font-mono text-xs text-slate-500 dark:text-slate-400"
+                        >
+                          {formatTimelineDate(entry.created_at)}
+                        </time>
+                      </div>
+
+                      {entry.entry_type === 'status_change' &&
+                        entry.old_status &&
+                        entry.new_status && (
+                          <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                            <ComplaintStatusBadge status={entry.old_status} size="sm" />
+                            <span aria-hidden="true" className="font-bold text-slate-400">
+                              →
+                            </span>
+                            <ComplaintStatusBadge status={entry.new_status} size="sm" />
+                          </div>
+                        )}
+
+                      <p className="mt-2.5 whitespace-pre-wrap text-xs leading-relaxed text-slate-700 sm:text-sm dark:text-slate-200">
+                        {entry.content}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : complaint.official_response ? (
+              <div className="rounded-r-xl border border-l-4 border-slate-200 border-l-blue-700 bg-blue-50/20 p-5 dark:border-slate-800 dark:border-l-blue-500 dark:bg-blue-950/20">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-700 text-white dark:bg-blue-600">
+                      <CheckCircle size={14} weight="bold" />
+                    </div>
+                    <span className="text-xs font-bold text-slate-900 sm:text-sm dark:text-white">
+                      Administrator Response
+                    </span>
+                    <span className="hidden rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600 sm:inline-block dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                      {maintDept?.name || complaint.department_name} Administration
+                    </span>
+                  </div>
+                  {complaint.resolved_at && (
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      Resolved {formatReportedDate(complaint.resolved_at)}
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-xs leading-relaxed text-slate-700 sm:pl-8 sm:text-sm dark:text-slate-300">
+                  <p className="whitespace-pre-wrap">{complaint.official_response}</p>
+                  <div className="mt-3 flex items-center gap-2 border-t border-slate-200/60 pt-2 text-xs dark:border-slate-800/60">
+                    <span className="font-semibold text-slate-500 dark:text-slate-400">
+                      Current Status:
+                    </span>
+                    <ComplaintStatusBadge status={complaint.status} size="sm" />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800/30 dark:text-slate-400">
+                No administrative responses or status updates recorded yet.
+              </div>
+            )}
+
+            {/* Student Clarification Reply Interface (Complaint Author Only) */}
+            {isCreator && hasClarificationRequest && complaint.status !== 'Resolved' && (
+              <ClarificationReplyBox
+                complaintId={complaint.$id}
+                onSubmit={handleClarificationReplySubmit}
+              />
+            )}
+          </section>
         </article>
       </main>
+
+      {isAdmin && (
+        <>
+          <AdminResolutionModal
+            isOpen={isResolutionModalOpen}
+            complaint={complaint}
+            onClose={() => setIsResolutionModalOpen(false)}
+            onSubmit={handleDetailResolutionSubmit}
+          />
+          <ClarificationRequestModal
+            isOpen={isClarificationModalOpen}
+            complaint={complaint}
+            onClose={() => setIsClarificationModalOpen(false)}
+            onSubmit={handleClarificationSubmit}
+          />
+        </>
+      )}
 
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 bg-white py-5 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">

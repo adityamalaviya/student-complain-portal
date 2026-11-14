@@ -16,21 +16,19 @@
 - Do not introduce FastAPI, another backend service, or a Super Admin role.
 
 ### Departments and jurisdiction
-Six departments exist:
-1. Computer
-2. Civil
-3. Electrical
-4. Mechanical
-5. Water
-6. Sanitation
-
-Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
+Six departments exist with canonical internal IDs independent of enrollment codes:
+1. `dept_civil` (`Civil`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+2. `dept_comp` (`Computer`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+3. `dept_elec` (`Electrical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+4. `dept_mech` (`Mechanical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+5. `dept_water` (`Water`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
+6. `dept_sanit` (`Sanitation`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
 
 Keep separate identifiers:
-- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
-- `maintenance_department_id`: the department responsible for resolving a complaint.
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction (restricted to the 4 active academic departments).
+- `maintenance_department_id`: the department responsible for resolving a complaint (any of the 6 active maintenance departments).
 
-Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Confirmed mappings in `ENROLLMENT_CODE_MAPPINGS` are `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, and `19` → `dept_mech`. Water and Sanitation have zero enrollment codes and must never appear in enrollment-code mappings. Codes `03`, `04`, `05`, `08`, aliases `water`/`sanitation`, and unmapped/inactive codes are rejected without guessing. Appwrite live migration remains pending.
 
 ### Roles and permissions
 Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
@@ -65,9 +63,9 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 
 
 ## ADR-001: Six-department model with separate academic and maintenance jurisdiction
-**Decision:** Maintain six departments and separate `student_department_id` from `maintenance_department_id`. Computer/Civil/Electrical/Mechanical serve both purposes; Water/Sanitation are maintenance-only.
+**Decision:** Maintain six departments with canonical database IDs (`dept_civil`, `dept_comp`, `dept_elec`, `dept_mech`, `dept_water`, `dept_sanit`) independent of enrollment codes, separating `student_department_id` from `maintenance_department_id`. Civil/Computer/Electrical/Mechanical serve both academic and maintenance scopes; Water/Sanitation are maintenance-only with zero enrollment codes.
 
-**Mapping guard:** Code extraction is fixed at `enrollment_no[7:9]`. `06` and `07` are known code mappings to Department 1 and Department 2, but official names and remaining mappings must be confirmed. Earlier documents assigning specific names to these codes must be reconciled against institutional approval before deployment. Do not guess.
+**Mapping guard:** Code extraction is fixed at `enrollment_no[7:9]`. Confirmed mappings are `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, and `19` → `dept_mech`. Codes `03`, `04`, `05`, `08`, aliases `water`/`sanitation`, and all unknown or inactive codes are rejected without guessing. Live Appwrite migration from legacy `$id = '06'/'07'` documents remains pending.
 
 ## ADR-002: Three main roles and explicit scoped grants
 **Decision:** Student, Department Admin, Principal. No Super Admin. System-management powers may be granted to selected existing accounts as explicit server-side permission grants with audit and revocation.

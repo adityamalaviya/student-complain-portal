@@ -2,7 +2,6 @@
 
 **Updated:** 10 November 2026  
 **Target completion:** 16 November 2026  
-**Capacity target:** 78 focused engineering hours  
 **Mode:** Reuse existing source code; implement only against approved requirements.
 
 
@@ -18,21 +17,19 @@
 - Do not introduce FastAPI, another backend service, or a Super Admin role.
 
 ### Departments and jurisdiction
-Six departments exist:
-1. Computer
-2. Civil
-3. Electrical
-4. Mechanical
-5. Water
-6. Sanitation
-
-Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
+Six departments exist with canonical internal IDs independent of enrollment codes:
+1. `dept_civil` (`Civil`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+2. `dept_comp` (`Computer`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+3. `dept_elec` (`Electrical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+4. `dept_mech` (`Mechanical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+5. `dept_water` (`Water`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
+6. `dept_sanit` (`Sanitation`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
 
 Keep separate identifiers:
-- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
-- `maintenance_department_id`: the department responsible for resolving a complaint.
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction (restricted to the 4 active academic departments).
+- `maintenance_department_id`: the department responsible for resolving a complaint (any of the 6 active maintenance departments).
 
-Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Confirmed mappings in `ENROLLMENT_CODE_MAPPINGS` are `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, and `19` → `dept_mech`. Water and Sanitation have zero enrollment codes and must never appear in enrollment-code mappings. Codes `03`, `04`, `05`, `08`, aliases `water`/`sanitation`, and unmapped/inactive codes are rejected without guessing. Appwrite live migration remains pending.
 
 ### Roles and permissions
 Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
@@ -67,12 +64,10 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 
 
 ## Planning assumptions
-- Seven calendar workdays are available counting 10–16 November inclusive.
-- Target is approximately 11 hours on Days 1–6 and 12 hours on Day 7.
 - This is an aggressive estimate, not a promise. Any unconfirmed mapping, Appwrite limitation, migration issue, or critical regression must be escalated rather than hidden.
 - No feature is complete until acceptance tests pass.
 
-## Day 1 — Domain and database foundation (11 hours)
+## Day 1 — Domain and database foundation
 - Confirm institutional department names/code mappings; no guessing.
 - Model six departments with academic/maintenance flags.
 - Separate student academic and complaint maintenance identifiers.
@@ -81,7 +76,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Review migration/backfill/rollback plan before applying any schema changes.
 **Exit:** schema reviewed, mapping confirmed, migration plan approved, schema checks pass.
 
-## Day 2 — Onboarding and complaint creation (11 hours)
+## Day 2 — Onboarding and complaint creation
 - Add phone number to first-time profile setup.
 - Server-side format validation: exactly 10 digits, starts 6–9.
 - Lock name/enrollment and phone according to policy.
@@ -90,7 +85,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Remove public complaint form/API/schema behavior.
 **Exit:** onboarding and complaint creation integration tests pass.
 
-## Day 3 — Privacy and attachment security (11 hours)
+## Day 3 — Privacy and attachment security
 - Student feeds filtered by `student_department_id`.
 - Admin queues filtered by `maintenance_department_id`.
 - Server-side peer response projection removes creator PII and private attachment references.
@@ -98,7 +93,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Validate attachment ownership, existence, actual MIME/type, 5 MB maximum, and private access.
 **Exit:** privacy, IDOR, attachment, and cross-department tests pass.
 
-## Day 4 — Timeline and support lifecycle (11 hours)
+## Day 4 — Timeline and support lifecycle
 - Make original complaint immutable after creation.
 - Add timeline events for status, progress, clarification, replies, and official responses.
 - Restrict status changes to concerned Maintenance Admin.
@@ -106,7 +101,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Prove concurrency-safe active support uniqueness and derived count.
 **Exit:** timeline integrity and support lifecycle tests pass.
 
-## Day 5 — Phone-change workflow and Principal foundation (11 hours)
+## Day 5 — Phone-change workflow and Principal foundation
 - Student request routed to own academic Department Admin.
 - Admin approve/reject.
 - One-time update permission.
@@ -115,7 +110,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Principal cross-department dashboard foundation and role authorization.
 **Exit:** phone workflow failure-safety and Principal authorization tests pass.
 
-## Day 6 — Warnings, governance, audit history (11 hours)
+## Day 6 — Warnings, governance, audit history
 - Implement Pending/In Progress five-day eligibility.
 - Meaningful status/progress events reset timer; views/minor edits do not.
 - Manual Principal warnings, multiple warnings while unresolved, exclude Resolved.
@@ -124,7 +119,7 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 - Append-only audit events for all required actions.
 **Exit:** warning logic, governance, and audit coverage tests pass.
 
-## Day 7 — Stabilization and release verification (12 hours)
+## Day 7 — Stabilization and release verification
 - Run full typecheck, lint, unit, integration, and E2E suites.
 - Test role matrix and department isolation.
 - Test peer privacy and attachment access.
