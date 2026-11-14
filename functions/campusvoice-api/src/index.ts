@@ -1,9 +1,10 @@
-import { verifyCaller } from './auth.js';
+import { verifyCaller, type AuthVerifierDeps } from './auth.js';
 import { INSTITUTIONAL_DEPARTMENTS, toDepartmentModel } from './departments.js';
 import {
   handleGetProfile,
   handleCompleteOnboarding,
   handleListDepartments,
+  type ProfileHandlerDeps,
 } from './handlers/profile.js';
 import {
   handleCreateComplaint,
@@ -11,111 +12,205 @@ import {
   handleGetComplaint,
   handleGetComplaintAttachment,
   handleSupportComplaint,
+  handleRemoveSupport,
   handleGetSupportState,
   handleGetAdminDashboard,
   handleListAdminComplaints,
   handleUpdateAdminComplaint,
+  handleRequestClarification,
+  handleReplyClarification,
+  type ComplaintHandlerDeps,
 } from './handlers/complaints.js';
+import {
+  handleRequestPhoneChange,
+  handleReviewPhoneChange,
+  handleCompletePhoneChange,
+  handleListPhoneChangeRequests,
+  type PhoneChangeHandlerDeps,
+} from './handlers/phoneChange.js';
+import {
+  handleGetPrincipalDashboard,
+  handleIssueWarning,
+  handleRespondToWarning,
+  type PrincipalHandlerDeps,
+} from './handlers/principal.js';
 import type { AppwriteContext } from './types.js';
 
-export default async function main(context: AppwriteContext): Promise<unknown> {
+export interface MainHandlerDeps {
+  verifyCaller?: typeof verifyCaller;
+  authDeps?: AuthVerifierDeps;
+  profileDeps?: ProfileHandlerDeps;
+  complaintDeps?: ComplaintHandlerDeps;
+  phoneChangeDeps?: PhoneChangeHandlerDeps;
+  principalDeps?: PrincipalHandlerDeps;
+}
+
+export default async function main(
+  context: AppwriteContext,
+  deps?: MainHandlerDeps
+): Promise<unknown> {
   const { req, res, log } = context;
 
-  log(`[campusvoice-api] Incoming execution: ${req.method} ${req.path}`);
+  try {
+    log(`[campusvoice-api] Incoming execution: ${req.method} ${req.path}`);
 
-  // Safe CORS header inspection (Appwrite Function responses or standard triggers)
-  if (req.method === 'OPTIONS') {
-    return res.empty();
-  }
-
-  // Parse payload safely
-  let payload: Record<string, unknown> = {};
-  if (typeof req.body === 'string') {
-    try {
-      payload = req.body.trim().length > 0 ? (JSON.parse(req.body) as Record<string, unknown>) : {};
-    } catch {
-      payload = {};
+    // Safe CORS header inspection (Appwrite Function responses or standard triggers)
+    if (req.method === 'OPTIONS') {
+      return res.empty();
     }
-  } else if (req.body && typeof req.body === 'object') {
-    payload = req.body;
-  }
 
-  const action = (payload.action as string) || (req.headers['x-action'] as string) || 'health';
-  const data = (payload.data as Record<string, unknown>) || payload;
+    // Parse payload safely
+    let payload: Record<string, unknown> = {};
+    if (typeof req.body === 'string') {
+      try {
+        payload = req.body.trim().length > 0 ? (JSON.parse(req.body) as Record<string, unknown>) : {};
+      } catch {
+        payload = {};
+      }
+    } else if (req.body && typeof req.body === 'object') {
+      payload = req.body;
+    }
 
-  // Unprotected / Public Actions
-  if (action === 'health') {
-    return res.json(
-      {
-        success: true,
-        service: 'campusvoice-api',
-        version: '2.0.0',
-        timestamp: new Date().toISOString(),
-        active_departments: INSTITUTIONAL_DEPARTMENTS.map(toDepartmentModel),
-      },
-      200
-    );
-  }
+    const action = (payload.action as string) || (req.headers['x-action'] as string) || 'health';
+    const data = (payload.data as Record<string, unknown>) || payload;
 
-  if (action === 'list-departments') {
-    return handleListDepartments(context);
-  }
+    // Unprotected / Public Actions
+    if (action === 'health') {
+      return res.json(
+        {
+          success: true,
+          service: 'campusvoice-api',
+          version: '2.0.0',
+          timestamp: new Date().toISOString(),
+          active_departments: INSTITUTIONAL_DEPARTMENTS.map(toDepartmentModel),
+        },
+        200
+      );
+    }
 
-  // Protected Actions requiring verified caller
-  const { caller, error: authError, statusCode } = await verifyCaller(context, payload);
-  if (!caller) {
-    return res.json(
-      {
-        success: false,
-        error: authError || 'Unauthorized',
-        code: 'UNAUTHORIZED',
-      },
-      statusCode || 401
-    );
-  }
+    if (action === 'list-departments') {
+      return await handleListDepartments(context);
+    }
 
-  switch (action) {
-    case 'get-profile':
-      return handleGetProfile(context, caller);
-
-    case 'complete-onboarding':
-      return handleCompleteOnboarding(context, caller, data);
-
-    case 'create-complaint':
-      return handleCreateComplaint(context, caller, data);
-
-    case 'list-complaints':
-      return handleListComplaints(context, caller, data);
-
-    case 'get-complaint':
-      return handleGetComplaint(context, caller, data);
-
-    case 'get-complaint-attachment':
-      return handleGetComplaintAttachment(context, caller, data);
-
-    case 'support-complaint':
-      return handleSupportComplaint(context, caller, data);
-
-    case 'get-support-state':
-      return handleGetSupportState(context, caller, data);
-
-    case 'get-admin-dashboard':
-      return handleGetAdminDashboard(context, caller);
-
-    case 'list-admin-complaints':
-      return handleListAdminComplaints(context, caller, data);
-
-    case 'update-admin-complaint':
-      return handleUpdateAdminComplaint(context, caller, data);
-
-    default:
+    // Protected Actions requiring verified caller
+    const verify = deps?.verifyCaller ?? verifyCaller;
+    let authResult: Awaited<ReturnType<typeof verifyCaller>>;
+    try {
+      authResult = await verify(context, payload, deps?.authDeps);
+    } catch (err) {
+      context.error(`[campusvoice-api] Caller verification threw: ${String(err)}`);
       return res.json(
         {
           success: false,
-          error: `Action '${action}' is not supported.`,
-          code: 'INVALID_ACTION',
+          error: 'Authentication verification is temporarily unavailable.',
+          code: 'INTERNAL_ERROR',
         },
-        400
+        500
       );
+    }
+
+    if (!authResult.caller) {
+      const resolvedStatus = authResult.statusCode || 401;
+      const isServerError = resolvedStatus >= 500;
+      return res.json(
+        {
+          success: false,
+          error: isServerError
+            ? 'Authentication verification is temporarily unavailable.'
+            : authResult.error || 'Unauthorized',
+          code: isServerError ? 'INTERNAL_ERROR' : 'UNAUTHORIZED',
+        },
+        resolvedStatus
+      );
+    }
+
+    const caller = authResult.caller;
+
+    log(`[campusvoice-api] Routing action '${action}' for caller '${caller.id}'`);
+
+    switch (action) {
+      case 'get-profile':
+        return await handleGetProfile(context, caller, deps?.profileDeps);
+
+      case 'complete-onboarding':
+        return await handleCompleteOnboarding(context, caller, data, deps?.profileDeps);
+
+      case 'create-complaint':
+        return await handleCreateComplaint(context, caller, data, deps?.complaintDeps);
+
+      case 'list-complaints':
+        return await handleListComplaints(context, caller, data, deps?.complaintDeps);
+
+      case 'get-complaint':
+        return await handleGetComplaint(context, caller, data, deps?.complaintDeps);
+
+      case 'get-complaint-attachment':
+        return await handleGetComplaintAttachment(context, caller, data, deps?.complaintDeps);
+
+      case 'support-complaint':
+        return await handleSupportComplaint(context, caller, data, deps?.complaintDeps);
+
+      case 'remove-support':
+        return await handleRemoveSupport(context, caller, data, deps?.complaintDeps);
+
+      case 'get-support-state':
+        return await handleGetSupportState(context, caller, data, deps?.complaintDeps);
+
+      case 'request-clarification':
+        return await handleRequestClarification(context, caller, data, deps?.complaintDeps);
+
+      case 'reply-clarification':
+        return await handleReplyClarification(context, caller, data, deps?.complaintDeps);
+
+      case 'get-admin-dashboard':
+        return await handleGetAdminDashboard(context, caller, deps?.complaintDeps);
+
+      case 'list-admin-complaints':
+        return await handleListAdminComplaints(context, caller, data, deps?.complaintDeps);
+
+      case 'update-admin-complaint':
+        return await handleUpdateAdminComplaint(context, caller, data, deps?.complaintDeps);
+
+      case 'request-phone-change':
+        return await handleRequestPhoneChange(context, caller, data, deps?.phoneChangeDeps);
+
+      case 'review-phone-change':
+        return await handleReviewPhoneChange(context, caller, data, deps?.phoneChangeDeps);
+
+      case 'complete-phone-change':
+        return await handleCompletePhoneChange(context, caller, data, deps?.phoneChangeDeps);
+
+      case 'list-phone-change-requests':
+        return await handleListPhoneChangeRequests(context, caller, data, deps?.phoneChangeDeps);
+
+      case 'get-principal-dashboard':
+        return await handleGetPrincipalDashboard(context, caller, deps?.principalDeps);
+
+      case 'issue-warning':
+        return await handleIssueWarning(context, caller, data, deps?.principalDeps);
+
+      case 'respond-to-warning':
+        return await handleRespondToWarning(context, caller, data, deps?.principalDeps);
+
+      default:
+        return res.json(
+          {
+            success: false,
+            error: `Action '${action}' is not supported.`,
+            code: 'INVALID_ACTION',
+          },
+          400
+        );
+    }
+  } catch (err) {
+    context.error(`[campusvoice-api] Top-level unhandled exception: ${String(err)}`);
+    return res.json(
+      {
+        success: false,
+        error: 'An internal server error occurred.',
+        code: 'INTERNAL_ERROR',
+      },
+      500
+    );
   }
 }

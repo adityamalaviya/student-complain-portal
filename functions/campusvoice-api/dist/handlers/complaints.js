@@ -1,13 +1,33 @@
 import crypto from 'crypto';
 import { ID, Query } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from '../db.js';
-import { PHONE_NUMBER_REGEX, isAcademicDepartment, normalizeComplaintStatus, readBooleanField, readNumberField, readStringField, resolveDepartment, } from '../departments.js';
+import { PHONE_NUMBER_REGEX, isAcademicDepartment, normalizeComplaintStatus, readBooleanField, readNumberField, readStringField, resolveDepartment, resolveLegacyDepartmentCode, } from '../departments.js';
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
     'application/pdf',
     'image/jpeg',
     'image/png',
 ]);
+export function isDelayed(complaint) {
+    const status = complaint.status;
+    if (status === 'Resolved' || status === 'resolved')
+        return false;
+    const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
+    const now = new Date();
+    if (status === 'Pending' || status === 'pending' || status === 'open') {
+        const time = new Date(complaint.created_at).getTime();
+        if (isNaN(time))
+            return false;
+        return now.getTime() - time > FIVE_DAYS_MS;
+    }
+    if (status === 'In Progress' || status === 'in_progress') {
+        const time = new Date(complaint.last_meaningful_update_at || complaint.created_at).getTime();
+        if (isNaN(time))
+            return false;
+        return now.getTime() - time > FIVE_DAYS_MS;
+    }
+    return false;
+}
 const MIME_TO_EXTENSIONS = {
     'application/pdf': ['pdf'],
     'image/jpeg': ['jpg', 'jpeg'],
@@ -189,17 +209,204 @@ async function validateAttachmentForComplaint(databases, storage, config, caller
         originalPermissions: [...(fileMeta.$permissions || [])],
     };
 }
+const ALLOWED_TIMELINE_ENTRY_TYPES = new Set([
+    'status_change',
+    'progress_update',
+    'clarification_request',
+    'clarification_reply',
+    'admin_response',
+]);
 function resolveProfileRole(rawRole) {
     if (rawRole === 'principal' || rawRole === 'department_admin') {
         return rawRole;
     }
     return 'student';
 }
+function normalizeTimelineEntryType(raw) {
+    if (raw === 'clarification_request' || raw === 'request_clarification') {
+        return 'clarification_request';
+    }
+    if (raw === 'clarification_reply' || raw === 'reply_clarification') {
+        return 'clarification_reply';
+    }
+    if (ALLOWED_TIMELINE_ENTRY_TYPES.has(raw)) {
+        return raw;
+    }
+    return null;
+}
+function mapDocToTimelineEntry(doc) {
+    const complaintId = readStringField(doc, 'complaint_id').trim();
+    const rawEntryType = readStringField(doc, 'entry_type').trim();
+    const content = readStringField(doc, 'content').trim();
+    const createdAt = readStringField(doc, 'created_at').trim() || doc.$createdAt;
+    const entryType = normalizeTimelineEntryType(rawEntryType);
+    if (!complaintId || !content || !createdAt || !entryType) {
+        return null;
+    }
+    const rawAuthorRole = readStringField(doc, 'author_role').trim();
+    const authorRole = resolveProfileRole(rawAuthorRole);
+    const authorId = readStringField(doc, 'author_id').trim();
+    const oldStatus = normalizeComplaintStatus(doc['old_status']) ?? undefined;
+    const newStatus = normalizeComplaintStatus(doc['new_status']) ?? undefined;
+    return {
+        $id: doc.$id,
+        complaint_id: complaintId,
+        ...(authorId ? { author_id: authorId } : {}),
+        author_role: authorRole,
+        entry_type: entryType,
+        content,
+        ...(oldStatus ? { old_status: oldStatus } : {}),
+        ...(newStatus ? { new_status: newStatus } : {}),
+        created_at: createdAt,
+    };
+}
+function compareTimelineChronological(a, b) {
+    const timeA = Date.parse(a.created_at);
+    const timeB = Date.parse(b.created_at);
+    if (!Number.isNaN(timeA) && !Number.isNaN(timeB) && timeA !== timeB) {
+        return timeA - timeB;
+    }
+    const cmp = a.created_at.localeCompare(b.created_at);
+    if (cmp !== 0) {
+        return cmp;
+    }
+    // Preserve stable DB/insertion order when timestamps fall within the same millisecond.
+    return 0;
+}
+function buildTimelineAuthorLabel(entry, options) {
+    if (entry.author_role === 'department_admin') {
+        return options.maintenanceDeptName
+            ? `${options.maintenanceDeptName} Maintenance Admin`
+            : 'Maintenance Admin';
+    }
+    if (entry.author_role === 'principal') {
+        return 'Principal';
+    }
+    if (entry.author_id && entry.author_id === options.viewerUserId) {
+        return 'You';
+    }
+    return 'Complaint Creator';
+}
+function projectTimelineEntry(entry, options) {
+    const authorLabel = buildTimelineAuthorLabel(entry, {
+        viewerUserId: options.viewerUserId,
+        maintenanceDeptName: options.maintenanceDeptName,
+    });
+    return {
+        ...(entry.$id ? { $id: entry.$id } : {}),
+        complaint_id: entry.complaint_id,
+        ...(options.includePrivateDetails && entry.author_id ? { author_id: entry.author_id } : {}),
+        author_role: entry.author_role,
+        author_label: authorLabel,
+        entry_type: entry.entry_type,
+        content: entry.content,
+        ...(entry.old_status ? { old_status: entry.old_status } : {}),
+        ...(entry.new_status ? { new_status: entry.new_status } : {}),
+        created_at: entry.created_at,
+    };
+}
+async function fetchComplaintTimeline(databases, config, complaintId) {
+    const docs = [];
+    let offset = 0;
+    let total = 0;
+    do {
+        const result = await databases.listDocuments(config.databaseId, config.timelineCollectionId, [
+            Query.equal('complaint_id', complaintId),
+            Query.orderAsc('created_at'),
+            Query.limit(100),
+            Query.offset(offset),
+        ]);
+        docs.push(...result.documents);
+        total = result.total;
+        offset += result.documents.length;
+        if (result.documents.length === 0)
+            break;
+    } while (docs.length < total);
+    return docs
+        .map((doc) => mapDocToTimelineEntry(doc))
+        .filter((entry) => Boolean(entry && entry.complaint_id === complaintId))
+        .sort(compareTimelineChronological);
+}
+function deriveComplaintSummaryFromTimeline(complaint, timeline) {
+    let officialResponse;
+    let fallbackStatusResponse;
+    let resolvedAt;
+    for (let i = timeline.length - 1; i >= 0; i--) {
+        const entry = timeline[i];
+        if (!officialResponse &&
+            entry.author_role === 'department_admin' &&
+            (entry.entry_type === 'admin_response' || entry.entry_type === 'progress_update')) {
+            officialResponse = entry.content;
+        }
+        if (!fallbackStatusResponse &&
+            entry.author_role === 'department_admin' &&
+            entry.entry_type === 'status_change') {
+            fallbackStatusResponse = entry.content;
+        }
+        if (!resolvedAt &&
+            complaint.status === 'Resolved' &&
+            entry.entry_type === 'status_change' &&
+            normalizeComplaintStatus(entry.new_status) === 'Resolved') {
+            resolvedAt = entry.created_at;
+        }
+    }
+    return {
+        officialResponse: officialResponse ?? fallbackStatusResponse ?? complaint.official_response,
+        resolvedAt: resolvedAt ?? (complaint.status === 'Resolved' ? complaint.resolved_at : undefined),
+    };
+}
+async function fetchLatestTimelineSummariesForComplaints(databases, config, complaints) {
+    const summaryMap = new Map();
+    const complaintIds = Array.from(new Set(complaints.map((c) => c.$id).filter((id) => Boolean(id))));
+    if (complaintIds.length === 0) {
+        return summaryMap;
+    }
+    const grouped = new Map();
+    const chunkSize = 25;
+    for (let idx = 0; idx < complaintIds.length; idx += chunkSize) {
+        const chunk = complaintIds.slice(idx, idx + chunkSize);
+        const docs = [];
+        let offset = 0;
+        let total = 0;
+        do {
+            const result = await databases.listDocuments(config.databaseId, config.timelineCollectionId, [
+                Query.equal('complaint_id', chunk),
+                Query.orderAsc('created_at'),
+                Query.limit(100),
+                Query.offset(offset),
+            ]);
+            docs.push(...result.documents);
+            total = result.total;
+            offset += result.documents.length;
+            if (result.documents.length === 0)
+                break;
+        } while (docs.length < total);
+        for (const doc of docs) {
+            const entry = mapDocToTimelineEntry(doc);
+            if (!entry || !chunk.includes(entry.complaint_id)) {
+                continue;
+            }
+            const list = grouped.get(entry.complaint_id) ?? [];
+            list.push(entry);
+            grouped.set(entry.complaint_id, list);
+        }
+    }
+    for (const complaint of complaints) {
+        if (!complaint.$id)
+            continue;
+        const entries = (grouped.get(complaint.$id) ?? []).sort(compareTimelineChronological);
+        summaryMap.set(complaint.$id, deriveComplaintSummaryFromTimeline(complaint, entries));
+    }
+    return summaryMap;
+}
 function mapDocToComplaint(doc) {
-    const rawStudentDept = readStringField(doc, 'student_department_id') || readStringField(doc, 'department_code');
-    const rawMaintDept = readStringField(doc, 'maintenance_department_id') || readStringField(doc, 'department_code');
-    const resolvedStudentDept = resolveDepartment(rawStudentDept);
-    const resolvedMaintDept = resolveDepartment(rawMaintDept);
+    const rawStudentDept = readStringField(doc, 'student_department_id');
+    const rawMaintDept = readStringField(doc, 'maintenance_department_id');
+    const rawLegacyDeptCode = readStringField(doc, 'department_code');
+    const resolvedStudentDept = resolveDepartment(rawStudentDept) ||
+        (!rawStudentDept ? resolveLegacyDepartmentCode(rawLegacyDeptCode) : null);
+    const resolvedMaintDept = resolveDepartment(rawMaintDept) ||
+        (!rawMaintDept ? resolveLegacyDepartmentCode(rawLegacyDeptCode) : null);
     const rawPriority = readStringField(doc, 'priority');
     const priority = rawPriority === 'low' || rawPriority === 'high' ? rawPriority : 'medium';
     const status = normalizeComplaintStatus(doc['status']) ?? 'Pending';
@@ -226,7 +433,6 @@ function mapDocToComplaint(doc) {
         ...(attachmentFileId ? { attachment_file_id: attachmentFileId } : {}),
         ...(resolvedMaintDept
             ? {
-                department_code: resolvedMaintDept.code,
                 department_name: resolvedMaintDept.name,
             }
             : {}),
@@ -239,6 +445,8 @@ function mapDocToComplaint(doc) {
  * Peer students receive a strictly redacted projection with zero creator PII or attachment references.
  */
 function projectComplaint(complaint, options) {
+    const effectiveOfficialResponse = options.officialResponse ?? complaint.official_response;
+    const effectiveResolvedAt = options.resolvedAt ?? (complaint.status === 'Resolved' ? complaint.resolved_at : undefined);
     const base = {
         ...(complaint.$id ? { $id: complaint.$id } : {}),
         student_department_id: complaint.student_department_id,
@@ -252,8 +460,9 @@ function projectComplaint(complaint, options) {
         ...(complaint.last_meaningful_update_at
             ? { last_meaningful_update_at: complaint.last_meaningful_update_at }
             : {}),
-        ...(complaint.department_code ? { department_code: complaint.department_code } : {}),
         ...(complaint.department_name ? { department_name: complaint.department_name } : {}),
+        ...(effectiveOfficialResponse ? { official_response: effectiveOfficialResponse } : {}),
+        ...(effectiveResolvedAt ? { resolved_at: effectiveResolvedAt } : {}),
         is_own_complaint: options.isOwnComplaint,
         created_at: complaint.created_at,
         updated_at: complaint.updated_at,
@@ -272,48 +481,25 @@ function projectComplaint(complaint, options) {
 }
 /**
  * Resolves active maintenance department IDs authorized for a Department Admin caller.
- * Supports DB-backed department_admins records (with scope='maintenance') and legacy department_code fallback.
+ * Requires explicitly validated active caller.admin_assignments with scope='maintenance'.
  */
-async function resolveAuthorizedMaintenanceDeptIds(databases, config, caller) {
-    if (caller.role !== 'department_admin') {
+function resolveAuthorizedMaintenanceDeptIds(caller) {
+    if (caller.role !== 'department_admin' || !Array.isArray(caller.admin_assignments)) {
         return [];
     }
-    if (Array.isArray(caller.admin_assignments)) {
-        const ids = new Set();
-        for (const assignment of caller.admin_assignments) {
-            if (assignment.is_active && assignment.scope === 'maintenance') {
-                const dept = resolveDepartment(assignment.department_id);
-                if (dept && dept.is_maintenance && dept.is_active) {
-                    ids.add(dept.id);
-                }
+    const ids = new Set();
+    for (const assignment of caller.admin_assignments) {
+        if (assignment &&
+            assignment.is_active === true &&
+            assignment.scope === 'maintenance' &&
+            assignment.user_id === caller.id) {
+            const dept = resolveDepartment(assignment.department_id);
+            if (dept && dept.is_maintenance && dept.is_active) {
+                ids.add(dept.id);
             }
         }
-        return [...ids];
     }
-    try {
-        const adminRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('user_id', caller.id), Query.limit(20)]);
-        if (adminRes.total > 0) {
-            const ids = new Set();
-            for (const doc of adminRes.documents) {
-                const isActive = readBooleanField(doc, 'is_active') ?? true;
-                const scope = readStringField(doc, 'scope');
-                const rawDeptId = readStringField(doc, 'department_id');
-                const dept = resolveDepartment(rawDeptId);
-                if (isActive && scope === 'maintenance' && dept && dept.is_maintenance && dept.is_active) {
-                    ids.add(dept.id);
-                }
-            }
-            return [...ids];
-        }
-    }
-    catch {
-        // department_admins collection may not exist in legacy mock or pre-migration DB
-    }
-    const fallbackDept = caller.department_code ? resolveDepartment(caller.department_code) : null;
-    if (fallbackDept && fallbackDept.is_maintenance && fallbackDept.is_active) {
-        return [fallbackDept.id];
-    }
-    return [];
+    return [...ids];
 }
 /**
  * Looks up the creator's verified phone number for authorized viewers (Creator, concerned Maintenance Admin, Principal).
@@ -348,8 +534,14 @@ async function getCallerProfile(databases, userId, databaseId, profilesCollectio
     }
     const doc = res.documents[0];
     const role = resolveProfileRole(readStringField(doc, 'role'));
-    const rawDeptId = readStringField(doc, 'student_department_id') || readStringField(doc, 'department_code');
-    const resolvedDept = resolveDepartment(rawDeptId);
+    const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
+    const rawDeptId = readStringField(doc, 'student_department_id');
+    const rawLegacyDeptCode = readStringField(doc, 'department_code');
+    const resolvedDept = resolveDepartment(rawDeptId) ||
+        (!rawDeptId && enrollmentNo.length === 12 ? resolveLegacyDepartmentCode(rawLegacyDeptCode) : null);
+    const effectiveStudentDeptId = role === 'student' && resolvedDept && resolvedDept.is_academic && resolvedDept.is_active
+        ? resolvedDept.id
+        : null;
     const legacyLocked = readBooleanField(doc, 'is_locked');
     const nameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
     const enrollmentLocked = readBooleanField(doc, 'enrollment_locked') ?? Boolean(legacyLocked);
@@ -362,8 +554,8 @@ async function getCallerProfile(databases, userId, databaseId, profilesCollectio
         auth_user_id: readStringField(doc, 'auth_user_id') || userId,
         email: readStringField(doc, 'email'),
         name: readStringField(doc, 'name'),
-        enrollment_no: readStringField(doc, 'enrollment_no').trim(),
-        student_department_id: role === 'student' ? (resolvedDept?.id ?? null) : null,
+        enrollment_no: enrollmentNo,
+        student_department_id: effectiveStudentDeptId,
         phone_number: phoneNumber,
         role,
         name_locked: nameLocked,
@@ -372,7 +564,6 @@ async function getCallerProfile(databases, userId, databaseId, profilesCollectio
         is_locked: nameLocked && enrollmentLocked && phoneLocked,
         ...(resolvedDept
             ? {
-                department_code: resolvedDept.code,
                 department_name: resolvedDept.name,
             }
             : {}),
@@ -432,7 +623,25 @@ export async function handleCreateComplaint(context, caller, data, deps) {
             ? data.maintenance_department_id.trim()
             : '';
         const maintenanceDept = resolveDepartment(rawMaintDeptId);
-        if (!maintenanceDept || !maintenanceDept.is_maintenance || !maintenanceDept.is_active) {
+        if (!maintenanceDept) {
+            return res.json({
+                success: false,
+                error: 'Please select a valid active maintenance department.',
+                code: 'INVALID_MAINTENANCE_DEPARTMENT',
+            }, 400);
+        }
+        let dbIsMaintenance;
+        let dbIsActive;
+        try {
+            const deptDoc = await databases.getDocument(config.databaseId, config.departmentsCollectionId, maintenanceDept.id);
+            dbIsMaintenance = readBooleanField(deptDoc, 'is_maintenance');
+            dbIsActive = readBooleanField(deptDoc, 'is_active');
+        }
+        catch {
+            // Departments collection may not be seeded in unit mocks or pre-migration DB
+        }
+        if (!(dbIsMaintenance ?? maintenanceDept.is_maintenance) ||
+            !(dbIsActive ?? maintenanceDept.is_active)) {
             return res.json({
                 success: false,
                 error: 'Please select a valid active maintenance department.',
@@ -528,7 +737,6 @@ export async function handleCreateComplaint(context, caller, data, deps) {
         const createdComplaint = projectComplaint({
             $id: doc.$id,
             ...complaintData,
-            department_code: maintenanceDept.code,
             department_name: maintenanceDept.name,
         }, {
             includePrivateDetails: true,
@@ -575,6 +783,13 @@ export async function handleListComplaints(context, caller, data, deps) {
             }, 403);
         }
         const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+        if (profile && profile.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students can view the academic department feed.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
         if (!profile || !profile.student_department_id || !isAcademicDepartment(profile.student_department_id)) {
             return res.json({
                 success: false,
@@ -617,13 +832,26 @@ export async function handleListComplaints(context, caller, data, deps) {
         }
         const total = complaints.length;
         const startIndex = (page - 1) * limit;
-        const paginatedComplaints = complaints.slice(startIndex, startIndex + limit).map((c) => {
+        const pageSlice = complaints.slice(startIndex, startIndex + limit);
+        const summaryMap = await fetchLatestTimelineSummariesForComplaints(databases, config, pageSlice);
+        const paginatedComplaints = pageSlice.map((c) => {
             const isCreator = c.student_user_id === caller.id;
-            return projectComplaint(c, {
+            const summary = c.$id ? summaryMap.get(c.$id) : undefined;
+            const projected = projectComplaint(c, {
                 includePrivateDetails: isCreator,
                 isOwnComplaint: isCreator,
                 ...(isCreator && profile.phone_number ? { studentPhoneNumber: profile.phone_number } : {}),
+                ...(summary?.officialResponse ? { officialResponse: summary.officialResponse } : {}),
+                ...(summary?.resolvedAt ? { resolvedAt: summary.resolvedAt } : {}),
             });
+            return {
+                ...projected,
+                is_delayed: isDelayed({
+                    status: c.status,
+                    created_at: c.created_at || '',
+                    last_meaningful_update_at: c.last_meaningful_update_at || c.created_at || '',
+                }),
+            };
         });
         return res.json({
             success: true,
@@ -683,6 +911,13 @@ export async function handleGetComplaint(context, caller, data, deps) {
         let includePrivateDetails = false;
         let isOwnComplaint = false;
         if (caller.role === 'student') {
+            if (profile?.role === 'principal') {
+                return res.json({
+                    success: false,
+                    error: 'Forbidden: Unauthorized role.',
+                    code: 'FORBIDDEN',
+                }, 403);
+            }
             const callerDept = profile?.student_department_id;
             isOwnComplaint = complaint.student_user_id === caller.id;
             const isSameAcademicDept = Boolean(callerDept && callerDept === complaint.student_department_id);
@@ -696,7 +931,7 @@ export async function handleGetComplaint(context, caller, data, deps) {
             includePrivateDetails = isOwnComplaint;
         }
         else if (caller.role === 'department_admin') {
-            const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
+            const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
             if (!authorizedMaintDeptIds.includes(complaint.maintenance_department_id)) {
                 return res.json({
                     success: false,
@@ -706,7 +941,7 @@ export async function handleGetComplaint(context, caller, data, deps) {
             }
             includePrivateDetails = true;
         }
-        else if (caller.role === 'principal' && profile?.role !== 'student') {
+        else if (caller.role === 'principal' && profile?.role === 'principal') {
             includePrivateDetails = true;
         }
         else {
@@ -716,16 +951,27 @@ export async function handleGetComplaint(context, caller, data, deps) {
                 code: 'FORBIDDEN',
             }, 403);
         }
-        const creatorPhone = includePrivateDetails
-            ? isOwnComplaint && profile?.phone_number
-                ? profile.phone_number
-                : await getCreatorPhoneNumber(databases, config, complaint.student_user_id)
-            : undefined;
+        const [creatorPhone, rawTimeline] = await Promise.all([
+            includePrivateDetails
+                ? isOwnComplaint && profile?.phone_number
+                    ? Promise.resolve(profile.phone_number)
+                    : getCreatorPhoneNumber(databases, config, complaint.student_user_id)
+                : Promise.resolve(undefined),
+            fetchComplaintTimeline(databases, config, complaintId),
+        ]);
+        const { officialResponse, resolvedAt } = deriveComplaintSummaryFromTimeline(complaint, rawTimeline);
         const projectedComplaint = projectComplaint(complaint, {
             includePrivateDetails,
             isOwnComplaint,
             studentPhoneNumber: creatorPhone,
+            officialResponse,
+            resolvedAt,
         });
+        const projectedTimeline = rawTimeline.map((entry) => projectTimelineEntry(entry, {
+            includePrivateDetails,
+            viewerUserId: caller.id,
+            maintenanceDeptName: complaint.department_name,
+        }));
         let hasSupported = false;
         const supportDocId = crypto
             .createHash('sha256')
@@ -743,7 +989,18 @@ export async function handleGetComplaint(context, caller, data, deps) {
         return res.json({
             success: true,
             data: {
-                complaint: projectedComplaint,
+                complaint: {
+                    ...projectedComplaint,
+                    is_delayed: isDelayed({
+                        status: complaint.status,
+                        created_at: complaint.created_at || doc.$createdAt || '',
+                        last_meaningful_update_at: complaint.last_meaningful_update_at ||
+                            complaint.created_at ||
+                            doc.$createdAt ||
+                            '',
+                    }),
+                },
+                timeline: projectedTimeline,
                 has_supported: hasSupported,
             },
         }, 200);
@@ -774,7 +1031,21 @@ export async function handleSupportComplaint(context, caller, data, deps) {
         }, 400);
     }
     try {
+        if (caller.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students are eligible to support complaints.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
         const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+        if (profile && profile.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students are eligible to support complaints.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
         if (!profile ||
             !profile.name_locked ||
             !profile.enrollment_locked ||
@@ -785,13 +1056,6 @@ export async function handleSupportComplaint(context, caller, data, deps) {
                 error: 'Student profile must be complete and verified before supporting complaints.',
                 code: 'PROFILE_INCOMPLETE',
             }, 400);
-        }
-        if (profile.role !== 'student') {
-            return res.json({
-                success: false,
-                error: 'Only students are eligible to support complaints.',
-                code: 'FORBIDDEN',
-            }, 403);
         }
         let doc;
         try {
@@ -825,24 +1089,48 @@ export async function handleSupportComplaint(context, caller, data, deps) {
             .digest('hex')
             .slice(0, 32);
         const now = new Date().toISOString();
+        let existingDoc = null;
         try {
-            await databases.createDocument(config.databaseId, config.supportsCollectionId, supportDocId, {
-                complaint_id: complaintId,
-                user_id: caller.id,
-                status: 'active',
-                created_at: now,
-            }, []);
+            existingDoc = await databases.getDocument(config.databaseId, config.supportsCollectionId, supportDocId);
         }
-        catch (insertErr) {
-            const errObj = insertErr;
-            if (errObj?.code === 409 || errObj?.message?.includes('already exists')) {
+        catch {
+            existingDoc = null;
+        }
+        if (existingDoc) {
+            const currentStatus = readStringField(existingDoc, 'status') || 'active';
+            if (currentStatus === 'active') {
                 return res.json({
                     success: false,
                     error: 'You have already supported this complaint.',
                     code: 'ALREADY_SUPPORTED',
                 }, 409);
             }
-            throw insertErr;
+            // Re-support lifecycle: reactivate revoked support record
+            await databases.updateDocument(config.databaseId, config.supportsCollectionId, supportDocId, {
+                status: 'active',
+                updated_at: now,
+            });
+        }
+        else {
+            try {
+                await databases.createDocument(config.databaseId, config.supportsCollectionId, supportDocId, {
+                    complaint_id: complaintId,
+                    user_id: caller.id,
+                    status: 'active',
+                    created_at: now,
+                }, []);
+            }
+            catch (insertErr) {
+                const errObj = insertErr;
+                if (errObj?.code === 409 || errObj?.message?.includes('already exists')) {
+                    return res.json({
+                        success: false,
+                        error: 'You have already supported this complaint.',
+                        code: 'ALREADY_SUPPORTED',
+                    }, 409);
+                }
+                throw insertErr;
+            }
         }
         let newCount;
         try {
@@ -851,8 +1139,11 @@ export async function handleSupportComplaint(context, caller, data, deps) {
             await databases.updateDocument(config.databaseId, config.complaintsCollectionId, complaintId, { support_count: newCount });
         }
         catch (updateErr) {
-            if (databases.deleteDocument) {
+            if (!existingDoc && databases.deleteDocument) {
                 await databases.deleteDocument(config.databaseId, config.supportsCollectionId, supportDocId).catch(() => undefined);
+            }
+            else if (existingDoc) {
+                await databases.updateDocument(config.databaseId, config.supportsCollectionId, supportDocId, { status: 'revoked' }).catch(() => undefined);
             }
             throw updateErr;
         }
@@ -871,6 +1162,137 @@ export async function handleSupportComplaint(context, caller, data, deps) {
         return res.json({
             success: false,
             error: 'Failed to support complaint.',
+            code: 'DATABASE_ERROR',
+        }, 500);
+    }
+}
+// ----------------------------------------------------
+// 4b. Remove Support
+// ----------------------------------------------------
+export async function handleRemoveSupport(context, caller, data, deps) {
+    const { res, error, log } = context;
+    const config = getAppwriteConfig();
+    const databases = deps?.databases ?? getServerClient().databases;
+    const complaintId = typeof data.complaint_id === 'string' ? data.complaint_id.trim() : '';
+    if (!complaintId) {
+        return res.json({
+            success: false,
+            error: 'Complaint ID is required.',
+            code: 'INVALID_COMPLAINT_ID',
+        }, 400);
+    }
+    try {
+        if (caller.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students are eligible to remove support from complaints.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
+        const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+        if (profile && profile.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students are eligible to remove support from complaints.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
+        if (!profile ||
+            !profile.name_locked ||
+            !profile.enrollment_locked ||
+            !profile.enrollment_no ||
+            !profile.student_department_id) {
+            return res.json({
+                success: false,
+                error: 'Student profile must be complete and verified before managing support.',
+                code: 'PROFILE_INCOMPLETE',
+            }, 400);
+        }
+        let doc;
+        try {
+            doc = await databases.getDocument(config.databaseId, config.complaintsCollectionId, complaintId);
+        }
+        catch {
+            return res.json({
+                success: false,
+                error: 'Complaint not found.',
+                code: 'NOT_FOUND',
+            }, 404);
+        }
+        const complaint = mapDocToComplaint(doc);
+        // Oracle Elimination: same academic department check
+        if (profile.student_department_id !== complaint.student_department_id) {
+            return res.json({
+                success: false,
+                error: 'Complaint not found.',
+                code: 'NOT_FOUND',
+            }, 404);
+        }
+        // Creator baseline cannot be removed
+        if (complaint.student_user_id === caller.id) {
+            return res.json({
+                success: false,
+                error: 'Students cannot remove baseline support from their own complaints.',
+                code: 'CANNOT_REMOVE_CREATOR_SUPPORT',
+            }, 400);
+        }
+        const supportDocId = crypto
+            .createHash('sha256')
+            .update(`${complaintId}:${caller.id}`)
+            .digest('hex')
+            .slice(0, 32);
+        let supportDoc;
+        try {
+            supportDoc = await databases.getDocument(config.databaseId, config.supportsCollectionId, supportDocId);
+        }
+        catch {
+            return res.json({
+                success: false,
+                error: 'You have not supported this complaint.',
+                code: 'NOT_SUPPORTED',
+            }, 400);
+        }
+        const currentStatus = readStringField(supportDoc, 'status') || 'active';
+        if (currentStatus !== 'active') {
+            return res.json({
+                success: false,
+                error: 'You have not actively supported this complaint.',
+                code: 'NOT_SUPPORTED',
+            }, 400);
+        }
+        const now = new Date().toISOString();
+        await databases.updateDocument(config.databaseId, config.supportsCollectionId, supportDocId, {
+            status: 'revoked',
+            revoked_at: now,
+            updated_at: now,
+        });
+        let newCount;
+        try {
+            const activeSupports = await databases.listDocuments(config.databaseId, config.supportsCollectionId, [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(100)]);
+            newCount = 1 + activeSupports.total;
+            await databases.updateDocument(config.databaseId, config.complaintsCollectionId, complaintId, { support_count: newCount });
+        }
+        catch (updateErr) {
+            await databases.updateDocument(config.databaseId, config.supportsCollectionId, supportDocId, {
+                status: 'active',
+            }).catch(() => undefined);
+            throw updateErr;
+        }
+        log(`[complaints] User ${caller.id} removed support from complaint ${complaintId} (new count: ${newCount})`);
+        return res.json({
+            success: true,
+            data: {
+                support_count: newCount,
+                has_supported: false,
+            },
+        }, 200);
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        error(`[complaints] Error removing support from complaint ${complaintId}: ${msg}`);
+        return res.json({
+            success: false,
+            error: 'Failed to remove support.',
             code: 'DATABASE_ERROR',
         }, 500);
     }
@@ -905,6 +1327,13 @@ export async function handleGetSupportState(context, caller, data, deps) {
         const complaint = mapDocToComplaint(doc);
         if (caller.role === 'student') {
             const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+            if (profile?.role === 'principal') {
+                return res.json({
+                    success: false,
+                    error: 'Forbidden: Unauthorized role.',
+                    code: 'FORBIDDEN',
+                }, 403);
+            }
             const isCreator = complaint.student_user_id === caller.id;
             if (!isCreator &&
                 (!profile?.student_department_id ||
@@ -917,7 +1346,7 @@ export async function handleGetSupportState(context, caller, data, deps) {
             }
         }
         else if (caller.role === 'department_admin') {
-            const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
+            const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
             if (!authorizedMaintDeptIds.includes(complaint.maintenance_department_id)) {
                 return res.json({
                     success: false,
@@ -926,7 +1355,17 @@ export async function handleGetSupportState(context, caller, data, deps) {
                 }, 404);
             }
         }
-        else if (caller.role !== 'principal') {
+        else if (caller.role === 'principal') {
+            const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+            if (!profile || profile.role !== 'principal') {
+                return res.json({
+                    success: false,
+                    error: 'Forbidden: Unauthorized role.',
+                    code: 'FORBIDDEN',
+                }, 403);
+            }
+        }
+        else {
             return res.json({
                 success: false,
                 error: 'Forbidden: Unauthorized role.',
@@ -972,7 +1411,7 @@ export async function handleGetAdminDashboard(context, caller, deps) {
     const { res, error } = context;
     const config = getAppwriteConfig();
     const databases = deps?.databases ?? getServerClient().databases;
-    const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
+    const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
     const primaryDeptId = authorizedMaintDeptIds[0];
     const adminDept = primaryDeptId ? resolveDepartment(primaryDeptId) : null;
     if (caller.role !== 'department_admin' || authorizedMaintDeptIds.length === 0 || !adminDept) {
@@ -1006,7 +1445,6 @@ export async function handleGetAdminDashboard(context, caller, deps) {
             total_in_progress: inProgRes.total,
             total_resolved: resolvedRes.total,
             department_id: adminDept.id,
-            department_code: adminDept.code,
         };
         return res.json({
             success: true,
@@ -1032,7 +1470,7 @@ export async function handleListAdminComplaints(context, caller, data, deps) {
     const { res, error } = context;
     const config = getAppwriteConfig();
     const databases = deps?.databases ?? getServerClient().databases;
-    const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
+    const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
     if (caller.role !== 'department_admin' || authorizedMaintDeptIds.length === 0) {
         return res.json({
             success: false,
@@ -1057,7 +1495,21 @@ export async function handleListAdminComplaints(context, caller, data, deps) {
             .filter((c) => authorizedMaintDeptIds.includes(c.maintenance_department_id));
         const total = allComplaints.length;
         const startIndex = (page - 1) * limit;
-        const paginatedComplaints = allComplaints.slice(startIndex, startIndex + limit);
+        const pageSlice = allComplaints.slice(startIndex, startIndex + limit);
+        const summaryMap = await fetchLatestTimelineSummariesForComplaints(databases, config, pageSlice);
+        const paginatedComplaints = pageSlice.map((c) => {
+            const summary = c.$id ? summaryMap.get(c.$id) : undefined;
+            return {
+                ...c,
+                is_delayed: isDelayed({
+                    status: c.status,
+                    created_at: c.created_at || '',
+                    last_meaningful_update_at: c.last_meaningful_update_at || c.created_at || '',
+                }),
+                ...(summary?.officialResponse ? { official_response: summary.officialResponse } : {}),
+                ...(summary?.resolvedAt ? { resolved_at: summary.resolvedAt } : {}),
+            };
+        });
         return res.json({
             success: true,
             data: {
@@ -1083,17 +1535,46 @@ export async function handleUpdateAdminComplaint(context, caller, data, deps) {
     const { res, error, log } = context;
     const config = getAppwriteConfig();
     const databases = deps?.databases ?? getServerClient().databases;
-    const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
-    if (caller.role !== 'department_admin' || authorizedMaintDeptIds.length === 0) {
+    if (!caller || !caller.id) {
+        return res.json({
+            success: false,
+            error: 'Unauthorized: Missing caller identity.',
+            code: 'UNAUTHORIZED',
+        }, 401);
+    }
+    if (caller.role !== 'department_admin') {
         return res.json({
             success: false,
             error: 'Forbidden: Department administrator privileges required.',
             code: 'FORBIDDEN',
         }, 403);
     }
+    const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
+    if (authorizedMaintDeptIds.length === 0) {
+        return res.json({
+            success: false,
+            error: 'Forbidden: Maintenance department administrator privileges required.',
+            code: 'FORBIDDEN',
+        }, 403);
+    }
     const complaintId = typeof data.complaint_id === 'string' ? data.complaint_id.trim() : '';
-    const normalizedStatus = normalizeComplaintStatus(data.status);
-    const officialResponse = typeof data.official_response === 'string' ? data.official_response.trim() : '';
+    const rawStatusInput = data.status !== undefined ? data.status : data.new_status;
+    const normalizedStatus = normalizeComplaintStatus(rawStatusInput);
+    const rawResponse = typeof data.official_response === 'string'
+        ? data.official_response
+        : data.official_response === undefined && typeof data.content === 'string'
+            ? data.content
+            : '';
+    const officialResponse = rawResponse.trim();
+    if (data.entry_type !== undefined &&
+        data.entry_type !== 'admin_response' &&
+        data.entry_type !== 'progress_update') {
+        return res.json({
+            success: false,
+            error: "Timeline entry type must be 'admin_response' or 'progress_update'.",
+            code: 'INVALID_ENTRY_TYPE',
+        }, 400);
+    }
     if (!complaintId) {
         return res.json({
             success: false,
@@ -1101,10 +1582,12 @@ export async function handleUpdateAdminComplaint(context, caller, data, deps) {
             code: 'INVALID_ID',
         }, 400);
     }
-    if (normalizedStatus !== 'In Progress' && normalizedStatus !== 'Resolved') {
+    if (normalizedStatus !== 'Pending' &&
+        normalizedStatus !== 'In Progress' &&
+        normalizedStatus !== 'Resolved') {
         return res.json({
             success: false,
-            error: "Status must be updated to 'In Progress' or 'Resolved'.",
+            error: "Status must be 'Pending', 'In Progress', or 'Resolved'.",
             code: 'INVALID_STATUS',
         }, 400);
     }
@@ -1115,6 +1598,7 @@ export async function handleUpdateAdminComplaint(context, caller, data, deps) {
             code: 'INVALID_RESPONSE',
         }, 400);
     }
+    const requestedSubstantive = data.is_substantive === true || data.entry_type === 'progress_update';
     try {
         let doc;
         try {
@@ -1135,20 +1619,113 @@ export async function handleUpdateAdminComplaint(context, caller, data, deps) {
                 code: 'NOT_FOUND',
             }, 404);
         }
+        const existingStatus = normalizeComplaintStatus(existing.status) ?? 'Pending';
+        const statusChanged = existingStatus !== normalizedStatus;
+        if (statusChanged && normalizedStatus === 'Pending') {
+            return res.json({
+                success: false,
+                error: "Cannot revert an 'In Progress' or 'Resolved' complaint back to 'Pending'.",
+                code: 'INVALID_STATUS_TRANSITION',
+            }, 400);
+        }
         const now = new Date().toISOString();
-        const updatedDoc = await databases.updateDocument(config.databaseId, config.complaintsCollectionId, complaintId, {
-            status: normalizedStatus,
-            last_meaningful_update_at: now,
-            updated_at: now,
+        const responseTimestamp = now;
+        const noteEntryType = requestedSubstantive
+            ? 'progress_update'
+            : 'admin_response';
+        // Pending-to-Pending notes do not reset the meaningful activity timer unless accompanied by substantive progress.
+        const isMeaningfulUpdate = statusChanged || (existingStatus !== 'Resolved' && requestedSubstantive);
+        const timelinePayloads = [];
+        if (statusChanged) {
+            timelinePayloads.push({
+                complaint_id: complaintId,
+                author_id: caller.id,
+                author_role: 'department_admin',
+                entry_type: 'status_change',
+                content: `Status changed from ${existingStatus} to ${normalizedStatus}`,
+                old_status: existingStatus,
+                new_status: normalizedStatus,
+                created_at: now,
+            });
+        }
+        timelinePayloads.push({
+            complaint_id: complaintId,
+            author_id: caller.id,
+            author_role: 'department_admin',
+            entry_type: noteEntryType,
+            content: officialResponse,
+            created_at: responseTimestamp,
         });
-        log(`[admin] Admin ${caller.id} updated complaint ${complaintId} to ${normalizedStatus}`);
+        const createdTimelineDocs = [];
+        try {
+            for (const entryPayload of timelinePayloads) {
+                const createdEntryDoc = await databases.createDocument(config.databaseId, config.timelineCollectionId, ID.unique(), entryPayload, []);
+                createdTimelineDocs.push(createdEntryDoc);
+            }
+        }
+        catch (timelineErr) {
+            for (const createdDoc of createdTimelineDocs) {
+                if (databases.deleteDocument) {
+                    await databases
+                        .deleteDocument(config.databaseId, config.timelineCollectionId, createdDoc.$id)
+                        .catch(() => undefined);
+                }
+            }
+            throw timelineErr;
+        }
+        // Update only status/lifecycle metadata on complaints; original complaint content stays immutable.
+        const complaintPatch = {
+            updated_at: now,
+            ...(statusChanged ? { status: normalizedStatus } : {}),
+            ...(isMeaningfulUpdate ? { last_meaningful_update_at: now } : {}),
+        };
+        let updatedDoc;
+        try {
+            updatedDoc = await databases.updateDocument(config.databaseId, config.complaintsCollectionId, complaintId, complaintPatch);
+        }
+        catch (updateErr) {
+            for (const createdDoc of createdTimelineDocs) {
+                if (databases.deleteDocument) {
+                    await databases
+                        .deleteDocument(config.databaseId, config.timelineCollectionId, createdDoc.$id)
+                        .catch(() => undefined);
+                }
+            }
+            throw updateErr;
+        }
+        const updatedComplaint = mapDocToComplaint(updatedDoc);
+        const createdEntries = createdTimelineDocs
+            .map((entryDoc) => mapDocToTimelineEntry(entryDoc))
+            .filter((entry) => Boolean(entry));
+        const [creatorPhone, fullTimeline] = await Promise.all([
+            getCreatorPhoneNumber(databases, config, updatedComplaint.student_user_id),
+            fetchComplaintTimeline(databases, config, complaintId).catch(() => [...createdEntries].sort(compareTimelineChronological)),
+        ]);
+        const { officialResponse: derivedResponse, resolvedAt } = deriveComplaintSummaryFromTimeline(updatedComplaint, fullTimeline);
+        const projectedComplaint = projectComplaint(updatedComplaint, {
+            includePrivateDetails: true,
+            isOwnComplaint: false,
+            studentPhoneNumber: creatorPhone,
+            officialResponse: derivedResponse,
+            resolvedAt,
+        });
+        const projectedTimeline = fullTimeline.map((entry) => projectTimelineEntry(entry, {
+            includePrivateDetails: true,
+            viewerUserId: caller.id,
+            maintenanceDeptName: updatedComplaint.department_name,
+        }));
+        const projectedCreatedEntries = createdEntries.map((entry) => projectTimelineEntry(entry, {
+            includePrivateDetails: true,
+            viewerUserId: caller.id,
+            maintenanceDeptName: updatedComplaint.department_name,
+        }));
+        log(`[admin] Admin ${caller.id} recorded ${noteEntryType} on complaint ${complaintId} (status: ${existingStatus} -> ${normalizedStatus})`);
         return res.json({
             success: true,
             data: {
-                complaint: {
-                    ...mapDocToComplaint(updatedDoc),
-                    official_response: officialResponse,
-                },
+                complaint: projectedComplaint,
+                timeline: projectedTimeline,
+                timeline_entries: projectedCreatedEntries,
             },
         }, 200);
     }
@@ -1157,7 +1734,7 @@ export async function handleUpdateAdminComplaint(context, caller, data, deps) {
         error(`[admin] Error updating complaint ${complaintId}: ${msg}`);
         return res.json({
             success: false,
-            error: 'Failed to update complaint.',
+            error: 'Failed to persist complaint response and status update.',
             code: 'DATABASE_ERROR',
         }, 500);
     }
@@ -1194,6 +1771,14 @@ export async function handleGetComplaintAttachment(context, caller, data, deps) 
         }
         const complaint = mapDocToComplaint(doc);
         if (caller.role === 'student') {
+            const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
+            if (profile?.role === 'principal') {
+                return res.json({
+                    success: false,
+                    error: 'Forbidden: Unauthorized role.',
+                    code: 'FORBIDDEN',
+                }, 403);
+            }
             if (complaint.student_user_id !== caller.id) {
                 return res.json({
                     success: false,
@@ -1203,7 +1788,7 @@ export async function handleGetComplaintAttachment(context, caller, data, deps) 
             }
         }
         else if (caller.role === 'department_admin') {
-            const authorizedMaintDeptIds = await resolveAuthorizedMaintenanceDeptIds(databases, config, caller);
+            const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
             if (!authorizedMaintDeptIds.includes(complaint.maintenance_department_id)) {
                 return res.json({
                     success: false,
@@ -1214,7 +1799,7 @@ export async function handleGetComplaintAttachment(context, caller, data, deps) 
         }
         else if (caller.role === 'principal') {
             const profile = await getCallerProfile(databases, caller.id, config.databaseId, config.profilesCollectionId);
-            if (profile?.role === 'student') {
+            if (!profile || profile.role !== 'principal') {
                 return res.json({
                     success: false,
                     error: 'Forbidden: Unauthorized role.',
@@ -1286,3 +1871,197 @@ export async function handleGetComplaintAttachment(context, caller, data, deps) 
         }, 500);
     }
 }
+// ----------------------------------------------------
+// 10. Request Clarification (Maintenance Admin Only)
+// ----------------------------------------------------
+export async function handleRequestClarification(context, caller, data, deps) {
+    const { res, error, log } = context;
+    const config = getAppwriteConfig();
+    const databases = deps?.databases ?? getServerClient().databases;
+    const complaintId = typeof data.complaint_id === 'string' ? data.complaint_id.trim() : '';
+    const question = typeof data.question === 'string'
+        ? data.question.trim()
+        : typeof data.content === 'string'
+            ? data.content.trim()
+            : '';
+    if (!complaintId) {
+        return res.json({
+            success: false,
+            error: 'Complaint ID is required.',
+            code: 'INVALID_COMPLAINT_ID',
+        }, 400);
+    }
+    if (question.length < 5 || question.length > 2000) {
+        return res.json({
+            success: false,
+            error: 'Clarification request must be between 5 and 2000 characters.',
+            code: 'VALIDATION_ERROR',
+        }, 400);
+    }
+    try {
+        if (caller.role !== 'department_admin') {
+            return res.json({
+                success: false,
+                error: 'Only maintenance department administrators can request clarification.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
+        let doc;
+        try {
+            doc = await databases.getDocument(config.databaseId, config.complaintsCollectionId, complaintId);
+        }
+        catch {
+            return res.json({
+                success: false,
+                error: 'Complaint not found.',
+                code: 'NOT_FOUND',
+            }, 404);
+        }
+        const complaint = mapDocToComplaint(doc);
+        const authorizedMaintDeptIds = resolveAuthorizedMaintenanceDeptIds(caller);
+        if (!authorizedMaintDeptIds.includes(complaint.maintenance_department_id)) {
+            return res.json({
+                success: false,
+                error: 'Complaint not found.',
+                code: 'NOT_FOUND',
+            }, 404);
+        }
+        const maintDept = resolveDepartment(complaint.maintenance_department_id);
+        const authorLabel = maintDept?.name
+            ? `${maintDept.name} Maintenance Admin`
+            : 'Maintenance Admin';
+        const now = new Date().toISOString();
+        const entryId = ID.unique();
+        const timelineDoc = await databases.createDocument(config.databaseId, config.timelineCollectionId, entryId, {
+            complaint_id: complaintId,
+            author_id: caller.id,
+            author_role: 'department_admin',
+            author_label: authorLabel,
+            entry_type: 'clarification_request',
+            content: question,
+            created_at: now,
+        }, []);
+        log(`[complaints] Admin ${caller.id} requested clarification on complaint ${complaintId}`);
+        const timelineEntry = {
+            $id: timelineDoc.$id,
+            complaint_id: complaintId,
+            author_id: caller.id,
+            author_role: 'department_admin',
+            author_label: authorLabel,
+            entry_type: 'clarification_request',
+            content: question,
+            created_at: now,
+        };
+        return res.json({
+            success: true,
+            data: {
+                timeline_entry: timelineEntry,
+            },
+        }, 200);
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        error(`[complaints] Error requesting clarification on complaint ${complaintId}: ${msg}`);
+        return res.json({
+            success: false,
+            error: 'Failed to record clarification request.',
+            code: 'DATABASE_ERROR',
+        }, 500);
+    }
+}
+// ----------------------------------------------------
+// 11. Reply Clarification (Complaint Creator Only)
+// ----------------------------------------------------
+export async function handleReplyClarification(context, caller, data, deps) {
+    const { res, error, log } = context;
+    const config = getAppwriteConfig();
+    const databases = deps?.databases ?? getServerClient().databases;
+    const complaintId = typeof data.complaint_id === 'string' ? data.complaint_id.trim() : '';
+    const reply = typeof data.reply === 'string'
+        ? data.reply.trim()
+        : typeof data.content === 'string'
+            ? data.content.trim()
+            : '';
+    if (!complaintId) {
+        return res.json({
+            success: false,
+            error: 'Complaint ID is required.',
+            code: 'INVALID_COMPLAINT_ID',
+        }, 400);
+    }
+    if (reply.length < 1 || reply.length > 2000) {
+        return res.json({
+            success: false,
+            error: 'Reply must be between 1 and 2000 characters.',
+            code: 'VALIDATION_ERROR',
+        }, 400);
+    }
+    try {
+        if (caller.role !== 'student') {
+            return res.json({
+                success: false,
+                error: 'Only students can reply to clarification requests.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
+        let doc;
+        try {
+            doc = await databases.getDocument(config.databaseId, config.complaintsCollectionId, complaintId);
+        }
+        catch {
+            return res.json({
+                success: false,
+                error: 'Complaint not found.',
+                code: 'NOT_FOUND',
+            }, 404);
+        }
+        const complaint = mapDocToComplaint(doc);
+        // Only the creator of the complaint can reply
+        if (complaint.student_user_id !== caller.id) {
+            return res.json({
+                success: false,
+                error: 'Only the original complaint author can reply to clarification requests.',
+                code: 'FORBIDDEN',
+            }, 403);
+        }
+        const authorLabel = 'Complaint Creator';
+        const now = new Date().toISOString();
+        const entryId = ID.unique();
+        const timelineDoc = await databases.createDocument(config.databaseId, config.timelineCollectionId, entryId, {
+            complaint_id: complaintId,
+            author_id: caller.id,
+            author_role: 'student',
+            author_label: authorLabel,
+            entry_type: 'clarification_reply',
+            content: reply,
+            created_at: now,
+        }, []);
+        log(`[complaints] Creator ${caller.id} replied to clarification on complaint ${complaintId}`);
+        const timelineEntry = {
+            $id: timelineDoc.$id,
+            complaint_id: complaintId,
+            author_id: caller.id,
+            author_role: 'student',
+            author_label: authorLabel,
+            entry_type: 'clarification_reply',
+            content: reply,
+            created_at: now,
+        };
+        return res.json({
+            success: true,
+            data: {
+                timeline_entry: timelineEntry,
+            },
+        }, 200);
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        error(`[complaints] Error replying to clarification on complaint ${complaintId}: ${msg}`);
+        return res.json({
+            success: false,
+            error: 'Failed to record clarification reply.',
+            code: 'DATABASE_ERROR',
+        }, 500);
+    }
+}
+export { handleGetPrincipalDashboard } from './principal.js';

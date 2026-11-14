@@ -93,10 +93,10 @@ export async function handleGetProfile(
   deps?: ProfileHandlerDeps
 ): Promise<unknown> {
   const { res, log, error } = context;
-  const config = getAppwriteConfig();
-  const databases = deps?.databases ?? getServerClient().databases;
-
   try {
+    const config = getAppwriteConfig();
+    const databases = deps?.databases ?? getServerClient().databases;
+
     const listResult = await databases.listDocuments(
       config.databaseId,
       config.profilesCollectionId,

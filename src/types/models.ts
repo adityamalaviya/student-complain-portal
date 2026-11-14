@@ -15,7 +15,23 @@
 // Department & Role Definitions
 // ==========================================
 
-export type DepartmentCode = '06' | '07' | string;
+export type AcademicDepartmentId =
+  | 'dept_civil'
+  | 'dept_comp'
+  | 'dept_elec'
+  | 'dept_mech';
+
+export type MaintenanceOnlyDepartmentId = 'dept_water' | 'dept_sanit';
+
+export type DepartmentId = AcademicDepartmentId | MaintenanceOnlyDepartmentId;
+
+export type MaintenanceDepartmentId = DepartmentId;
+
+export interface EnrollmentMapping {
+  enrollment_code: string;
+  department_id: AcademicDepartmentId;
+  confirmed: boolean;
+}
 
 export type UserRole = 'student' | 'department_admin' | 'principal';
 
@@ -46,8 +62,7 @@ export type IssueType = 'department' | 'public';
 // ==========================================
 
 export interface Department {
-  $id: string;
-  code: string;
+  $id: DepartmentId;
   name: string;
   is_academic: boolean;
   is_maintenance: boolean;
@@ -66,7 +81,8 @@ export interface UserProfile {
   name: string;
   display_name?: string;
   enrollment_no: string;
-  student_department_id?: string | null;
+  student_department_id?: AcademicDepartmentId | null;
+  department_id?: DepartmentId | null;
   phone_number?: string;
   role: UserRole;
   profile_status?: ProfileStatus;
@@ -74,8 +90,7 @@ export interface UserProfile {
   enrollment_locked: boolean;
   phone_locked: boolean;
   is_locked?: boolean; // Legacy fallback
-  department_code?: DepartmentCode; // Legacy fallback
-  department_name?: string; // Legacy fallback
+  department_name?: string;
   created_at: string;
   updated_at: string;
   $createdAt?: string;
@@ -100,8 +115,8 @@ export interface Complaint {
   attachment_file_id?: string;
   attachment_url?: string;
   is_own_complaint?: boolean;
+  is_delayed?: boolean;
   // Legacy compatibility fields during migration
-  department_code?: DepartmentCode;
   department_name?: string;
   issue_type?: IssueType;
   official_response?: string;
@@ -135,8 +150,9 @@ export interface ComplaintSupport {
 export interface ComplaintTimeline {
   $id: string;
   complaint_id: string;
-  author_id: string;
+  author_id?: string;
   author_role: UserRole;
+  author_label?: string;
   entry_type: TimelineEntryType;
   content: string;
   old_status?: ComplaintStatus;
@@ -149,6 +165,7 @@ export interface ComplaintTimeline {
 export interface PhoneChangeRequest {
   $id: string;
   student_user_id: string;
+  student_name?: string;
   academic_department_id: string;
   old_phone_number: string;
   requested_phone_number?: string;
@@ -157,6 +174,7 @@ export interface PhoneChangeRequest {
   reviewed_by?: string;
   decision_reason?: string;
   permission_consumed: boolean;
+  requested_at?: string;
   created_at: string;
   updated_at: string;
   $createdAt?: string;
@@ -210,8 +228,7 @@ export interface AdminMetrics {
   total_open: number;
   total_in_progress: number;
   total_resolved: number;
-  department_id?: string;
-  department_code?: DepartmentCode;
+  department_id?: DepartmentId;
 }
 
 export interface PrincipalMetrics {
@@ -228,6 +245,21 @@ export interface PrincipalMetrics {
     resolved: number;
     delayed: number;
   }>;
+}
+
+export interface PrincipalDelayedComplaint {
+  complaint: Complaint;
+  days_delayed: number;
+  warning_count: number;
+  warnings: ComplaintWarning[];
+  is_warning_eligible: boolean;
+}
+
+export interface PrincipalDashboardData {
+  metrics: PrincipalMetrics;
+  delayed_complaints: PrincipalDelayedComplaint[];
+  recent_complaints: Complaint[];
+  recent_warnings: ComplaintWarning[];
 }
 
 export interface ApiResponse<T> {

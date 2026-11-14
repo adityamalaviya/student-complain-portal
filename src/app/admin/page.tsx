@@ -9,21 +9,30 @@ import {
   CircleNotch,
   MagnifyingGlass,
   Lock,
-  Buildings,
-  TerminalWindow,
+  Phone,
+  CheckCircle,
+  XCircle,
+  Clock,
+  WarningCircle,
+  X,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
+import { resolveDepartment, calculateComplaintDelay } from '@/lib/utils';
 import {
   apiGetAdminDashboard,
   apiListAdminComplaints,
   apiUpdateAdminComplaint,
+  apiListPhoneChangeRequests,
+  apiReviewPhoneChange,
   type ListAdminComplaintsParams,
 } from '@/lib/api';
-import type { Complaint, ComplaintStatus, AdminMetrics } from '@/types';
+import type { Complaint, ComplaintStatus, AdminMetrics, PhoneChangeRequest } from '@/types';
 import {
   ComplaintStatusBadge,
   ComplaintPriorityBadge,
+  DepartmentBadge,
   AdminResolutionModal,
+  type AdminResolutionSubmitResult,
   LoadingSkeleton,
   EmptyState,
   ErrorState,
@@ -60,6 +69,18 @@ export default function AdminDashboardPage(): React.ReactElement {
   // Selected complaint for resolution modal
   const [selectedComplaint, setSelectedComplaint] = useState<Complaint | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
+
+  // Academic Admin Phone Change Workflow State
+  const adminDeptAlt = resolveDepartment(metrics?.department_id || profile?.department_id);
+  const isAcademicAdmin = Boolean(adminDeptAlt?.is_academic);
+
+  const [adminSection, setAdminSection] = useState<'complaints' | 'phone_requests'>('complaints');
+  const [phoneRequests, setPhoneRequests] = useState<PhoneChangeRequest[]>([]);
+  const [isPhoneLoading, setIsPhoneLoading] = useState<boolean>(false);
+  const [phoneFilter, setPhoneFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [isReviewSubmitting, setIsReviewSubmitting] = useState<boolean>(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
 
   // Authorization Guard: Admin only
   useEffect(() => {
@@ -121,45 +142,97 @@ export default function AdminDashboardPage(): React.ReactElement {
     }
   }, [isAdmin, fetchAdminData]);
 
+  // Fetch phone change requests for academic admin
+  const fetchPhoneRequests = useCallback(async (): Promise<void> => {
+    if (!profile || !isAdmin || !isAcademicAdmin) return;
+    setIsPhoneLoading(true);
+    try {
+      const res = await apiListPhoneChangeRequests({
+        academic_department_id: (adminDeptAlt?.id || profile.department_id || profile.student_department_id) as string,
+        status: phoneFilter === 'all' ? undefined : phoneFilter,
+      });
+      if (res.success && res.data) {
+        setPhoneRequests(res.data.requests || []);
+      }
+    } catch {
+      // Non-fatal
+    } finally {
+      setIsPhoneLoading(false);
+    }
+  }, [profile, isAdmin, isAcademicAdmin, adminDeptAlt?.id, phoneFilter]);
+
+  const handleQuickReviewPhone = async (
+    requestId: string,
+    decision: 'approved' | 'rejected'
+  ): Promise<void> => {
+    setIsReviewSubmitting(true);
+    setReviewError(null);
+    setReviewSuccess(null);
+    try {
+      const res = await apiReviewPhoneChange({
+        request_id: requestId,
+        decision,
+      });
+      if (res.success) {
+        setReviewSuccess(`Request successfully marked as ${decision}.`);
+        await fetchPhoneRequests();
+      } else {
+        setReviewError(res.error || `Failed to ${decision} request.`);
+      }
+    } catch {
+      setReviewError(`Network error while trying to ${decision} request.`);
+    } finally {
+      setIsReviewSubmitting(false);
+    }
+  };
+
+  const pendingPhoneRequests = useMemo(() => {
+    const adminDeptId = adminDeptAlt?.id || profile?.department_id || profile?.student_department_id;
+    return phoneRequests.filter((r) => {
+      if (r.status !== 'pending') return false;
+      if (!adminDeptId) return true;
+      const reqDeptId = resolveDepartment(r.academic_department_id)?.id || r.academic_department_id;
+      return reqDeptId === adminDeptId;
+    });
+  }, [phoneRequests, adminDeptAlt?.id, profile?.department_id, profile?.student_department_id]);
+
+  useEffect(() => {
+    if (isAdmin && isAcademicAdmin) {
+      void fetchPhoneRequests();
+    }
+  }, [isAdmin, isAcademicAdmin, fetchPhoneRequests]);
+
   // Handle modal submit
   const handleResolutionSubmit = async (
     complaintId: string,
     newStatus: ComplaintStatus,
-    officialResponse: string
-  ): Promise<boolean> => {
+    officialResponse: string,
+    isSubstantive?: boolean
+  ): Promise<AdminResolutionSubmitResult> => {
     try {
       const res = await apiUpdateAdminComplaint(complaintId, {
         status: newStatus,
         official_response: officialResponse,
+        ...(typeof isSubstantive === 'boolean' ? { is_substantive: isSubstantive } : {}),
       });
 
-      if (res.success && res.data) {
-        // Update item in local state
-        setComplaints((prev) =>
-          prev.map((c) =>
-            c.$id === complaintId
-              ? {
-                  ...c,
-                  status: newStatus,
-                  official_response: officialResponse,
-                  resolved_at:
-                    newStatus === 'Resolved' || newStatus === 'resolved'
-                      ? new Date().toISOString()
-                      : undefined,
-                }
-              : c
-          )
-        );
-        // Refresh metrics in background
-        void apiGetAdminDashboard().then((m) => {
-          if (m.success && m.data) setMetrics(m.data.metrics);
-        });
-        return true;
+      if (!res.success || !res.data) {
+        return {
+          success: false,
+          error: res.error || 'Failed to persist official department response.',
+        };
       }
-      return false;
+
+      // Refetch persisted complaints and metrics from Appwrite rather than relying on transient submission state.
+      await fetchAdminData();
+      return { success: true };
     } catch (err: unknown) {
-      console.warn('[handleResolutionSubmit]', err);
-      return false;
+      const msg =
+        err instanceof Error ? err.message : 'Unexpected network error while saving update.';
+      return {
+        success: false,
+        error: msg,
+      };
     }
   };
 
@@ -189,10 +262,12 @@ export default function AdminDashboardPage(): React.ReactElement {
     );
   }
 
-  const adminDeptCode = profile.department_code || 'dept_comp';
+  const adminDept = resolveDepartment(metrics?.department_id || profile.department_id);
+  const adminDeptName = adminDept?.name || profile.department_name || 'Department';
   const openCount = metrics?.total_open ?? 0;
   const inProgressCount = metrics?.total_in_progress ?? 0;
   const resolvedCount = metrics?.total_resolved ?? 0;
+  const pendingPhoneCount = pendingPhoneRequests.length;
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
@@ -210,13 +285,12 @@ export default function AdminDashboardPage(): React.ReactElement {
 
             <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
 
-            <div className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-              {adminDeptCode === '07' ? (
-                <TerminalWindow size={13} weight="bold" className="text-blue-700 dark:text-blue-400" />
-              ) : (
-                <Buildings size={13} weight="bold" className="text-blue-700 dark:text-blue-400" />
-              )}
-              <span>{profile.department_name || 'Department'} Admin ({adminDeptCode})</span>
+            <div className="hidden sm:inline-flex">
+              <DepartmentBadge
+                departmentId={adminDept?.id ?? metrics?.department_id ?? profile.department_id}
+                name={`${adminDeptName} Admin`}
+                size="sm"
+              />
             </div>
           </div>
 
@@ -259,8 +333,45 @@ export default function AdminDashboardPage(): React.ReactElement {
 
       {/* Main Admin Canvas */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 sm:py-10 lg:px-12">
-        {/* Sub-Header: Quiet inline metrics & Linear tabs */}
-        <div className="mb-8">
+        {/* Academic Admin Section Switcher (Strictly for Academic Dept Admins) */}
+        {isAcademicAdmin && (
+          <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
+            <button
+              type="button"
+              onClick={() => setAdminSection('complaints')}
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
+                adminSection === 'complaints'
+                  ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
+                  : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+            >
+              <ShieldCheck size={16} weight="bold" />
+              <span>Maintenance Queue ({openCount + inProgressCount})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminSection('phone_requests')}
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
+                adminSection === 'phone_requests'
+                  ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
+                  : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Phone size={16} weight="bold" />
+              <span>Phone Change Requests</span>
+              {pendingPhoneCount > 0 && (
+                <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-white">
+                  {pendingPhoneCount}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
+
+        {adminSection === 'complaints' ? (
+          <>
+            {/* Sub-Header: Quiet inline metrics & Linear tabs */}
+            <div className="mb-8">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
             <div>
               <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
@@ -379,6 +490,7 @@ export default function AdminDashboardPage(): React.ReactElement {
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">
               {displayedComplaints.map((complaint) => {
                 const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
+                const delayInfo = calculateComplaintDelay(complaint);
                 return (
                   <li
                     key={complaint.$id}
@@ -406,6 +518,12 @@ export default function AdminDashboardPage(): React.ReactElement {
                         <span>{formatTimestamp(complaint.$createdAt || complaint.created_at)}</span>
                         <span>·</span>
                         <ComplaintStatusBadge status={complaint.status} size="sm" />
+                        {delayInfo.is_delayed && (
+                          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                            <Clock size={12} weight="bold" />
+                            <span>Delayed ({delayInfo.days_delayed}d)</span>
+                          </span>
+                        )}
                         {complaint.priority === 'high' && (
                           <ComplaintPriorityBadge priority="high" size="sm" />
                         )}
@@ -466,6 +584,122 @@ export default function AdminDashboardPage(): React.ReactElement {
             </div>
           </div>
         </section>
+          </>
+        ) : (
+          <div className="space-y-6">
+            <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+              <div>
+                <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
+                  Student Phone Change Requests
+                </h1>
+                <p className="mt-1 text-xs text-slate-500 sm:text-sm dark:text-slate-400">
+                  Pending requests scoped to {adminDeptName} for identity verification and administrative review.
+                </p>
+              </div>
+            </div>
+
+            {reviewSuccess && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                {reviewSuccess}
+              </div>
+            )}
+            {reviewError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs font-medium text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+                {reviewError}
+              </div>
+            )}
+
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-6 py-3.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
+                <div className="flex items-center gap-2">
+                  <Phone size={16} className="text-blue-700 dark:text-blue-400" />
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    Pending Requests ({pendingPhoneRequests.length})
+                  </span>
+                </div>
+                <span>Scope: {adminDeptName}</span>
+              </div>
+
+              {isPhoneLoading ? (
+                <div className="p-6">
+                  <LoadingSkeleton count={3} />
+                </div>
+              ) : pendingPhoneRequests.length === 0 ? (
+                <div className="p-8">
+                  <EmptyState
+                    title="No pending requests"
+                    description={`No pending phone change requests currently require action in ${adminDeptName}.`}
+                  />
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {pendingPhoneRequests.map((req) => {
+                    const reqId = (req as { request_id?: string }).request_id || req.$id;
+                    const requestedDate = req.requested_at || req.created_at || req.$createdAt;
+                    return (
+                      <li
+                        key={reqId}
+                        className="flex flex-col justify-between gap-4 px-6 py-5 transition hover:bg-slate-50/60 sm:flex-row sm:items-center dark:hover:bg-slate-800/30"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2.5">
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {req.student_name || req.student_user_id || 'Student'}
+                            </span>
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                              Pending
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                            <span>Requested: {formatTimestamp(requestedDate)}</span>
+                            {req.old_phone_number && (
+                              <>
+                                <span>·</span>
+                                <span>Current: {req.old_phone_number}</span>
+                              </>
+                            )}
+                            {req.requested_phone_number && (
+                              <>
+                                <span>·</span>
+                                <span>New: {req.requested_phone_number}</span>
+                              </>
+                            )}
+                          </div>
+                          {req.reason && (
+                            <p className="text-xs italic text-slate-600 dark:text-slate-400">
+                              Reason: &ldquo;{req.reason}&rdquo;
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isReviewSubmitting}
+                            onClick={() => handleQuickReviewPhone(reqId, 'approved')}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
+                          >
+                            <CheckCircle size={14} weight="bold" />
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isReviewSubmitting}
+                            onClick={() => handleQuickReviewPhone(reqId, 'rejected')}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                          >
+                            <XCircle size={14} weight="bold" />
+                            Reject
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
+        )}
 
         {/* Informational Footnote */}
         <div className="mt-8 text-center text-xs text-slate-500 dark:text-slate-400">

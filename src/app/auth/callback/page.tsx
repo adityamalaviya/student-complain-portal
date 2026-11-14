@@ -46,12 +46,21 @@ export default function AuthCallbackPage(): React.ReactElement {
           if (profileResponse.success && profileResponse.data) {
             const { profile, is_onboarded } = profileResponse.data;
 
+            console.log('[auth-callback] profile.role raw value:', profile?.role);
+
+            // Role check FIRST — before any onboarding check
+            if (profile?.role === 'principal') {
+              console.log('[auth-callback] Principal verified, routing to /principal');
+              router.replace('/principal');
+              return;
+            }
             if (profile?.role === 'department_admin') {
-              console.log('[auth-callback] Admin verified, routing to /admin');
+              console.log('[auth-callback] Department Admin verified, routing to /admin');
               router.replace('/admin');
               return;
             }
 
+            // Then student onboarding check
             if (is_onboarded) {
               console.log('[auth-callback] Student verified, routing to /dashboard');
               router.replace('/dashboard');
