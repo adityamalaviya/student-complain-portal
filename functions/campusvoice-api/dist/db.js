@@ -12,7 +12,11 @@ export function getAppwriteConfig() {
     const departmentsCollectionId = process.env.COLLECTION_DEPARTMENTS || 'departments';
     const complaintsCollectionId = process.env.COLLECTION_COMPLAINTS || 'complaints';
     const supportsCollectionId = process.env.COLLECTION_SUPPORTS || 'complaint_supports';
+    const timelineCollectionId = process.env.COLLECTION_TIMELINE || 'complaint_timeline';
     const departmentAdminsCollectionId = process.env.COLLECTION_DEPARTMENT_ADMINS || 'department_admins';
+    const phoneChangeRequestsCollectionId = process.env.COLLECTION_PHONE_CHANGE_REQUESTS || 'phone_change_requests';
+    const warningsCollectionId = process.env.COLLECTION_WARNINGS || 'complaint_warnings';
+    const auditLogsCollectionId = process.env.COLLECTION_AUDIT_LOGS || 'audit_logs';
     const storageBucketId = process.env.APPWRITE_STORAGE_BUCKET_ID ||
         process.env.NEXT_PUBLIC_APPWRITE_ATTACHMENTS_BUCKET_ID ||
         'complaint-attachments';
@@ -27,7 +31,11 @@ export function getAppwriteConfig() {
         departmentsCollectionId,
         complaintsCollectionId,
         supportsCollectionId,
+        timelineCollectionId,
         departmentAdminsCollectionId,
+        phoneChangeRequestsCollectionId,
+        warningsCollectionId,
+        auditLogsCollectionId,
         storageBucketId,
         adminCivilEmail,
         adminComputerEmail,
