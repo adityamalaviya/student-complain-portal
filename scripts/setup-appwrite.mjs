@@ -189,31 +189,32 @@ async function safeCreateIndex(collId, key, type, attributes, orders = ['ASC']) 
 // ============================================================
 async function provisionDepartments() {
   await safeCreateCollection('departments', 'Departments', []);
-  await safeCreateStringAttribute('departments', 'code', 10, true);
   await safeCreateStringAttribute('departments', 'name', 100, true);
   await safeCreateBooleanAttribute('departments', 'is_academic', false, true);
   await safeCreateBooleanAttribute('departments', 'is_maintenance', false, true);
   await safeCreateBooleanAttribute('departments', 'is_active', false, true);
-  await safeCreateIndex('departments', 'idx_dept_code', 'unique', ['code']);
 
-  // Seed All 6 Institutional Departments (Disjoint codes for academic vs maintenance-only)
-  console.log(`  🌱 Seeding institutional departments...`);
+  // Seed all 6 canonical institutional departments using stable document $id values.
+  // Enrollment codes live strictly in ENROLLMENT_CODE_MAPPINGS (never on department documents).
+  // Note: Appwrite document $id values are immutable; pre-recovery live documents ('06', '07')
+  // and legacy departments.code / idx_dept_code / idx_code require the controlled migration plan.
+  console.log(`  🌱 Seeding canonical institutional departments...`);
   const initialDepts = [
-    { code: '07', name: 'Computer Department', is_academic: true, is_maintenance: true, is_active: true },
-    { code: '06', name: 'Civil Department', is_academic: true, is_maintenance: true, is_active: true },
-    { code: '03', name: 'Electrical Department', is_academic: true, is_maintenance: true, is_active: true },
-    { code: '04', name: 'Mechanical Department', is_academic: true, is_maintenance: true, is_active: true },
-    { code: 'water', name: 'Water Department', is_academic: false, is_maintenance: true, is_active: true },
-    { code: 'sanitation', name: 'Sanitation Department', is_academic: false, is_maintenance: true, is_active: true },
+    { id: 'dept_civil', data: { name: 'Civil', is_academic: true, is_maintenance: true, is_active: true } },
+    { id: 'dept_comp', data: { name: 'Computer', is_academic: true, is_maintenance: true, is_active: true } },
+    { id: 'dept_elec', data: { name: 'Electrical', is_academic: true, is_maintenance: true, is_active: true } },
+    { id: 'dept_mech', data: { name: 'Mechanical', is_academic: true, is_maintenance: true, is_active: true } },
+    { id: 'dept_water', data: { name: 'Water', is_academic: false, is_maintenance: true, is_active: true } },
+    { id: 'dept_sanit', data: { name: 'Sanitation', is_academic: false, is_maintenance: true, is_active: true } },
   ];
 
   for (const dept of initialDepts) {
     try {
-      await withRetry(() => databases.getDocument(DATABASE_ID, 'departments', dept.code));
-      console.log(`    • Department '${dept.code}' (${dept.name}) exists.`);
+      await withRetry(() => databases.getDocument(DATABASE_ID, 'departments', dept.id));
+      console.log(`    • Department '${dept.id}' (${dept.data.name}) exists.`);
     } catch {
-      await withRetry(() => databases.createDocument(DATABASE_ID, 'departments', dept.code, dept, []));
-      console.log(`    ✓ Seeded department '${dept.code}' (${dept.name})`);
+      await withRetry(() => databases.createDocument(DATABASE_ID, 'departments', dept.id, dept.data, []));
+      console.log(`    ✓ Seeded department '${dept.id}' (${dept.data.name})`);
     }
   }
 }
@@ -359,6 +360,7 @@ async function provisionDepartmentAdmins() {
   await safeCreateStringAttribute('department_admins', 'created_at', 64, true);
 
   await safeCreateIndex('department_admins', 'idx_da_user', 'key', ['user_id']);
+  await safeCreateIndex('department_admins', 'idx_da_email', 'key', ['email']);
   await safeCreateIndex('department_admins', 'idx_da_dept_scope', 'key', ['department_id', 'scope']);
 }
 

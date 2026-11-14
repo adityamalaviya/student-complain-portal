@@ -33,7 +33,6 @@ export default function RaiseComplaintPage(): React.ReactElement {
   const [departments, setDepartments] = useState<Department[]>(() =>
     getMaintenanceDepartments().map((d) => ({
       $id: d.id,
-      code: d.code,
       name: d.name,
       is_academic: d.is_academic,
       is_maintenance: d.is_maintenance,
@@ -97,9 +96,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
     );
   }
 
-  const academicDept = resolveDepartment(
-    profile.student_department_id || profile.department_code
-  );
+  const academicDept = resolveDepartment(profile.student_department_id);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0];
@@ -250,7 +247,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
           </div>
 
           <DepartmentBadge
-            code={academicDept?.id || profile.student_department_id || 'dept_comp'}
+            departmentId={academicDept?.id ?? profile.student_department_id}
             name={academicDept?.name || profile.department_name}
             size="sm"
           />
@@ -390,7 +387,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
                 >
                   <option value="">Select a maintenance department...</option>
                   {departments.map((dept) => (
-                    <option key={dept.$id || dept.code} value={dept.$id || dept.code}>
+                    <option key={dept.$id} value={dept.$id}>
                       {dept.name} ({dept.is_academic ? 'Academic & Maintenance' : 'Maintenance Only'})
                     </option>
                   ))}

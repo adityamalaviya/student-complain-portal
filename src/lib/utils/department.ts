@@ -1,18 +1,19 @@
+import type { AcademicDepartmentId, DepartmentId, EnrollmentMapping } from '../../types';
+
 /**
- * CampusVoice — Canonical Department & Enrollment Mapping Utility (Day 1)
- * 
+ * CampusVoice — Canonical Department & Enrollment Mapping Registry
+ *
  * Strict enforcement of:
- * - Six institutional departments: Computer, Civil, Electrical, Mechanical, Water, Sanitation
- * - Academic departments: Computer, Civil, Electrical, Mechanical (dual academic/maintenance)
- * - Maintenance-only departments: Water, Sanitation (cannot enroll students or approve phone changes)
+ * - Six institutional departments: Civil, Computer, Electrical, Mechanical, Water, Sanitation
+ * - Academic departments (4): Civil, Computer, Electrical, Mechanical (dual academic/maintenance)
+ * - Maintenance-only departments (2): Water, Sanitation (never assigned enrollment codes or academic scope)
  * - Enrollment slice: enrollment_no[7:9] (zero-based slice [7:9])
- * - Confirmed mappings: '06' -> Department 1, '07' -> Department 2
- * - Zero guessing of unmapped codes
+ * - Confirmed academic mappings: '06' -> dept_civil, '07' -> dept_comp, '09' -> dept_elec, '19' -> dept_mech
+ * - Zero guessing of unmapped or unconfirmed codes
  */
 
 export interface DepartmentDescriptor {
-  id: string;
-  code: string;
+  id: DepartmentId;
   name: string;
   is_academic: boolean;
   is_maintenance: boolean;
@@ -20,32 +21,33 @@ export interface DepartmentDescriptor {
 }
 
 export const INSTITUTIONAL_DEPARTMENTS: readonly DepartmentDescriptor[] = [
-  { id: 'dept_civil', code: '06', name: 'Civil Department', is_academic: true, is_maintenance: true, is_active: true },
-  { id: 'dept_comp', code: '07', name: 'Computer Department', is_academic: true, is_maintenance: true, is_active: true },
-  { id: 'dept_elec', code: '03', name: 'Electrical Department', is_academic: true, is_maintenance: true, is_active: true },
-  { id: 'dept_mech', code: '04', name: 'Mechanical Department', is_academic: true, is_maintenance: true, is_active: true },
-  { id: 'dept_water', code: '05', name: 'Water Department', is_academic: false, is_maintenance: true, is_active: true },
-  { id: 'dept_sanit', code: '08', name: 'Sanitation Department', is_academic: false, is_maintenance: true, is_active: true },
+  { id: 'dept_civil', name: 'Civil', is_academic: true, is_maintenance: true, is_active: true },
+  { id: 'dept_comp', name: 'Computer', is_academic: true, is_maintenance: true, is_active: true },
+  { id: 'dept_elec', name: 'Electrical', is_academic: true, is_maintenance: true, is_active: true },
+  { id: 'dept_mech', name: 'Mechanical', is_academic: true, is_maintenance: true, is_active: true },
+  { id: 'dept_water', name: 'Water', is_academic: false, is_maintenance: true, is_active: true },
+  { id: 'dept_sanit', name: 'Sanitation', is_academic: false, is_maintenance: true, is_active: true },
 ] as const;
-
-export interface EnrollmentMapping {
-  department_slot: string;
-  department_id: string;
-  department_name: string;
-  confirmed: boolean;
-}
 
 export const ENROLLMENT_CODE_MAPPINGS: Record<string, EnrollmentMapping> = {
   '06': {
-    department_slot: 'Department 1',
+    enrollment_code: '06',
     department_id: 'dept_civil',
-    department_name: 'Civil Department',
     confirmed: true,
   },
   '07': {
-    department_slot: 'Department 2',
+    enrollment_code: '07',
     department_id: 'dept_comp',
-    department_name: 'Computer Department',
+    confirmed: true,
+  },
+  '09': {
+    enrollment_code: '09',
+    department_id: 'dept_elec',
+    confirmed: true,
+  },
+  '19': {
+    enrollment_code: '19',
+    department_id: 'dept_mech',
     confirmed: true,
   },
 };
@@ -53,13 +55,66 @@ export const ENROLLMENT_CODE_MAPPINGS: Record<string, EnrollmentMapping> = {
 export interface EnrollmentExtractionResult {
   isValid: boolean;
   code: string | null;
-  departmentId: string | null;
+  departmentId: AcademicDepartmentId | null;
   departmentName: string | null;
   mapping: EnrollmentMapping | null;
   error: string | null;
 }
 
-export function extractAndMapEnrollment(enrollmentNo: string): EnrollmentExtractionResult {
+/**
+ * Resolves a canonical department descriptor strictly by internal department ID.
+ * Never resolves enrollment codes or water/sanitation aliases.
+ */
+export function resolveDepartment(
+  identifier?: string | null,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): DepartmentDescriptor | null {
+  if (!identifier) {
+    return null;
+  }
+  const trimmed = identifier.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return registry.find((d) => d.id === trimmed) || null;
+}
+
+/**
+ * Resolves a 2-digit enrollment code to a confirmed, active academic department.
+ */
+export function resolveEnrollmentCode(
+  code: string,
+  mappings: Readonly<Record<string, EnrollmentMapping>> = ENROLLMENT_CODE_MAPPINGS,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): { mapping: EnrollmentMapping; department: DepartmentDescriptor } | null {
+  const trimmedCode = code.trim();
+  if (!/^\d{2}$/.test(trimmedCode)) {
+    return null;
+  }
+  if (!Object.prototype.hasOwnProperty.call(mappings, trimmedCode)) {
+    return null;
+  }
+  const mapping = mappings[trimmedCode];
+  if (!mapping || mapping.confirmed !== true || !mapping.department_id) {
+    return null;
+  }
+  const department = registry.find((d) => d.id === mapping.department_id);
+  if (!department || !department.is_academic || !department.is_active) {
+    return null;
+  }
+  return { mapping, department };
+}
+
+/**
+ * Extracts enrollment department code via zero-based slice [7:9] (characters 8-9)
+ * and resolves only confirmed active academic mappings. Unknown/invalid mappings are rejected.
+ */
+export function extractAndMapEnrollment(
+  enrollmentNo: string,
+  mappings: Readonly<Record<string, EnrollmentMapping>> = ENROLLMENT_CODE_MAPPINGS,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): EnrollmentExtractionResult {
   const trimmed = enrollmentNo ? enrollmentNo.trim() : '';
   if (!/^\d{12}$/.test(trimmed)) {
     return {
@@ -68,98 +123,83 @@ export function extractAndMapEnrollment(enrollmentNo: string): EnrollmentExtract
       departmentId: null,
       departmentName: null,
       mapping: null,
-      error: 'Enrollment number must be exactly 12 numeric digits',
+      error: 'Enrollment number must be exactly 12 numeric digits.',
     };
   }
 
   // Zero-based slice [7:9] extracts characters 8 and 9
   const code = trimmed.slice(7, 9);
-  const mapping = ENROLLMENT_CODE_MAPPINGS[code];
+  const resolved = resolveEnrollmentCode(code, mappings, registry);
 
-  if (!mapping) {
+  if (!resolved) {
     return {
       isValid: false,
       code,
       departmentId: null,
       departmentName: null,
       mapping: null,
-      error: `Unmapped enrollment department code '${code}'. Department mappings must never be guessed.`,
+      error: `Unmapped, unconfirmed, or inactive enrollment department code '${code}'. Department mappings must never be guessed.`,
     };
   }
 
   return {
     isValid: true,
     code,
-    departmentId: mapping.department_id,
-    departmentName: mapping.department_name,
-    mapping,
+    departmentId: resolved.mapping.department_id,
+    departmentName: resolved.department.name,
+    mapping: resolved.mapping,
     error: null,
   };
 }
 
-export function isAcademicDepartment(departmentId: string): boolean {
-  const dept = INSTITUTIONAL_DEPARTMENTS.find(
-    (d) => d.id === departmentId || d.code === departmentId || d.name.toLowerCase() === departmentId.toLowerCase()
-  );
-  return dept ? dept.is_academic : false;
+/**
+ * Checks if a department ID belongs to an active academic department.
+ */
+export function isAcademicDepartment(
+  departmentId?: string | null,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): boolean {
+  const dept = resolveDepartment(departmentId, registry);
+  return Boolean(dept && dept.is_academic && dept.is_active);
 }
 
-export function isMaintenanceDepartment(departmentId: string): boolean {
-  const dept = INSTITUTIONAL_DEPARTMENTS.find(
-    (d) => d.id === departmentId || d.code === departmentId || d.name.toLowerCase() === departmentId.toLowerCase()
-  );
-  return dept ? dept.is_maintenance : false;
+/**
+ * Checks if a department ID belongs to an active maintenance department.
+ */
+export function isMaintenanceDepartment(
+  departmentId?: string | null,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): boolean {
+  const dept = resolveDepartment(departmentId, registry);
+  return Boolean(dept && dept.is_maintenance && dept.is_active);
 }
 
-export function canApprovePhoneChange(departmentId: string, scope: string): boolean {
+export function canApprovePhoneChange(
+  departmentId?: string | null,
+  scope?: string | null,
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): boolean {
   if (scope !== 'academic') {
     return false;
   }
-  return isAcademicDepartment(departmentId);
-}
-
-const DEPARTMENT_ALIASES: Record<string, string> = {
-  water: 'dept_water',
-  sanitation: 'dept_sanit',
-};
-
-/**
- * Resolves a department descriptor from canonical ID, department code, or name.
- * Never guesses unmapped enrollment codes.
- */
-export function resolveDepartment(identifier?: string | null): DepartmentDescriptor | null {
-  if (!identifier) {
-    return null;
-  }
-  const trimmed = identifier.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const lower = trimmed.toLowerCase();
-  const aliasedId = DEPARTMENT_ALIASES[lower];
-
-  return (
-    INSTITUTIONAL_DEPARTMENTS.find(
-      (d) =>
-        d.id === trimmed ||
-        d.id === aliasedId ||
-        d.code === trimmed ||
-        d.name.toLowerCase() === lower
-    ) || null
-  );
+  return isAcademicDepartment(departmentId, registry);
 }
 
 /**
- * Returns the 4 academic departments (Computer, Civil, Electrical, Mechanical).
+ * Returns the 4 active academic departments (Civil, Computer, Electrical, Mechanical).
  */
-export function getAcademicDepartments(): readonly DepartmentDescriptor[] {
-  return INSTITUTIONAL_DEPARTMENTS.filter((d) => d.is_academic && d.is_active);
+export function getAcademicDepartments(
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): readonly DepartmentDescriptor[] {
+  return registry.filter((d) => d.is_academic && d.is_active);
 }
 
 /**
- * Returns all 6 maintenance departments (including Water and Sanitation).
+ * Returns all active maintenance departments (including Water and Sanitation).
  */
-export function getMaintenanceDepartments(): readonly DepartmentDescriptor[] {
-  return INSTITUTIONAL_DEPARTMENTS.filter((d) => d.is_maintenance && d.is_active);
+export function getMaintenanceDepartments(
+  registry: readonly DepartmentDescriptor[] = INSTITUTIONAL_DEPARTMENTS
+): readonly DepartmentDescriptor[] {
+  return registry.filter((d) => d.is_maintenance && d.is_active);
 }
 

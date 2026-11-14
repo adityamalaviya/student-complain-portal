@@ -8,7 +8,11 @@ import type {
   Complaint,
   ComplaintAttachmentData,
   ComplaintStatus,
+  ComplaintTimeline,
   AdminMetrics,
+  PhoneChangeRequest,
+  ComplaintWarning,
+  PrincipalDashboardData,
 } from '../../types';
 import type {
   OnboardingInput,
@@ -133,8 +137,12 @@ export async function apiCreateComplaint(
 
 export async function apiGetComplaint(
   complaintId: string
-): Promise<ApiResponse<{ complaint: Complaint; has_supported: boolean }>> {
-  return executeFunction<{ complaint: Complaint; has_supported: boolean }>('get-complaint', {
+): Promise<ApiResponse<{ complaint: Complaint; timeline: ComplaintTimeline[]; has_supported: boolean }>> {
+  return executeFunction<{
+    complaint: Complaint;
+    timeline: ComplaintTimeline[];
+    has_supported: boolean;
+  }>('get-complaint', {
     complaint_id: complaintId,
   });
 }
@@ -164,6 +172,17 @@ export async function apiSupportComplaint(
   );
 }
 
+export async function apiRemoveSupport(
+  complaintId: string
+): Promise<ApiResponse<{ support_count: number; has_supported: boolean }>> {
+  return executeFunction<{ support_count: number; has_supported: boolean }>(
+    'remove-support',
+    {
+      complaint_id: complaintId,
+    }
+  );
+}
+
 export async function apiGetSupportState(
   complaintId: string
 ): Promise<ApiResponse<{ support_count: number; has_supported: boolean }>> {
@@ -171,6 +190,36 @@ export async function apiGetSupportState(
     'get-support-state',
     {
       complaint_id: complaintId,
+    }
+  );
+}
+
+// ----------------------------------------------------
+// Clarification Operations (Day 1)
+// ----------------------------------------------------
+
+export async function apiRequestClarification(
+  complaintId: string,
+  question: string
+): Promise<ApiResponse<{ timeline_entry: ComplaintTimeline }>> {
+  return executeFunction<{ timeline_entry: ComplaintTimeline }>(
+    'request-clarification',
+    {
+      complaint_id: complaintId,
+      question,
+    }
+  );
+}
+
+export async function apiReplyClarification(
+  complaintId: string,
+  reply: string
+): Promise<ApiResponse<{ timeline_entry: ComplaintTimeline }>> {
+  return executeFunction<{ timeline_entry: ComplaintTimeline }>(
+    'reply-clarification',
+    {
+      complaint_id: complaintId,
+      reply,
     }
   );
 }
@@ -201,10 +250,129 @@ export async function apiListAdminComplaints(
 export async function apiUpdateAdminComplaint(
   complaintId: string,
   input: AdminResolutionInput
-): Promise<ApiResponse<{ complaint: Complaint }>> {
-  return executeFunction<{ complaint: Complaint }>('update-admin-complaint', {
+): Promise<
+  ApiResponse<{
+    complaint: Complaint;
+    timeline?: ComplaintTimeline[];
+    timeline_entries?: ComplaintTimeline[];
+  }>
+> {
+  return executeFunction<{
+    complaint: Complaint;
+    timeline?: ComplaintTimeline[];
+    timeline_entries?: ComplaintTimeline[];
+  }>('update-admin-complaint', {
     complaint_id: complaintId,
     status: input.status,
     official_response: input.official_response,
+    ...(typeof input.is_substantive === 'boolean'
+      ? { is_substantive: input.is_substantive }
+      : {}),
+    ...(input.entry_type ? { entry_type: input.entry_type } : {}),
+  });
+}
+
+// ----------------------------------------------------
+// Phone Change Workflow Operations (Day 2)
+// ----------------------------------------------------
+
+export interface RequestPhoneChangeInput {
+  reason: string;
+  requested_phone_number?: string;
+}
+
+export async function apiRequestPhoneChange(
+  input: RequestPhoneChangeInput
+): Promise<ApiResponse<{ request: PhoneChangeRequest }>> {
+  return executeFunction<{ request: PhoneChangeRequest }>('request-phone-change', {
+    reason: input.reason,
+    ...(input.requested_phone_number
+      ? { requested_phone_number: input.requested_phone_number }
+      : {}),
+  });
+}
+
+export interface ReviewPhoneChangeInput {
+  request_id: string;
+  decision: 'approved' | 'rejected';
+  decision_reason?: string;
+}
+
+export async function apiReviewPhoneChange(
+  input: ReviewPhoneChangeInput
+): Promise<ApiResponse<{ request: PhoneChangeRequest }>> {
+  return executeFunction<{ request: PhoneChangeRequest }>('review-phone-change', {
+    request_id: input.request_id,
+    decision: input.decision,
+    ...(input.decision_reason ? { decision_reason: input.decision_reason } : {}),
+  });
+}
+
+export interface CompletePhoneChangeInput {
+  request_id: string;
+  new_phone_number: string;
+}
+
+export async function apiCompletePhoneChange(
+  input: CompletePhoneChangeInput
+): Promise<ApiResponse<{ message: string; phone_number: string }>> {
+  return executeFunction<{ message: string; phone_number: string }>(
+    'complete-phone-change',
+    {
+      request_id: input.request_id,
+      new_phone_number: input.new_phone_number,
+    }
+  );
+}
+
+export interface ListPhoneChangeRequestsParams {
+  academic_department_id?: string;
+  status?: string;
+}
+
+export async function apiListPhoneChangeRequests(
+  params: ListPhoneChangeRequestsParams = {}
+): Promise<ApiResponse<{ requests: PhoneChangeRequest[]; total: number }>> {
+  return executeFunction<{ requests: PhoneChangeRequest[]; total: number }>(
+    'list-phone-change-requests',
+    params as Record<string, unknown>
+  );
+}
+
+// ----------------------------------------------------
+// Principal Dashboard & Governance Operations (Day 2)
+// ----------------------------------------------------
+
+export async function apiGetPrincipalDashboard(): Promise<
+  ApiResponse<PrincipalDashboardData>
+> {
+  return executeFunction<PrincipalDashboardData>('get-principal-dashboard');
+}
+
+export interface IssueWarningInput {
+  complaint_id: string;
+  warning_reason: string;
+}
+
+export async function apiIssueWarning(
+  input: IssueWarningInput
+): Promise<ApiResponse<{ warning: ComplaintWarning }>> {
+  return executeFunction<{ warning: ComplaintWarning }>('issue-warning', {
+    complaint_id: input.complaint_id,
+    warning_reason: input.warning_reason,
+  });
+}
+
+export interface RespondToWarningInput {
+  warning_id: string;
+  admin_response: string;
+}
+
+export async function apiRespondToWarning(
+  input: RespondToWarningInput
+): Promise<ApiResponse<{ warning: ComplaintWarning }>> {
+  return executeFunction<{ warning: ComplaintWarning }>('respond-to-warning', {
+    warning_id: input.warning_id,
+    admin_response: input.admin_response,
   });
 }

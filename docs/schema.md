@@ -17,21 +17,27 @@
 - Do not introduce FastAPI, another backend service, or a Super Admin role.
 
 ### Departments and jurisdiction
-Six departments exist:
-1. Computer
-2. Civil
-3. Electrical
-4. Mechanical
-5. Water
-6. Sanitation
-
-Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
+Six departments exist with canonical internal document IDs independent of enrollment codes:
+1. `dept_civil` (`Civil`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+2. `dept_comp` (`Computer`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+3. `dept_elec` (`Electrical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+4. `dept_mech` (`Mechanical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+5. `dept_water` (`Water`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
+6. `dept_sanit` (`Sanitation`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
 
 Keep separate identifiers:
-- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
-- `maintenance_department_id`: the department responsible for resolving a complaint.
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction (restricted to the 4 active academic departments).
+- `maintenance_department_id`: the department responsible for resolving a complaint (any of the 6 active maintenance departments).
 
-Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Confirmed mappings in `ENROLLMENT_CODE_MAPPINGS` are:
+- `06` → `dept_civil` (Civil)
+- `07` → `dept_comp` (Computer)
+- `09` → `dept_elec` (Electrical)
+- `19` → `dept_mech` (Mechanical)
+
+Water (`dept_water`) and Sanitation (`dept_sanit`) NEVER appear in enrollment-code mappings and have no enrollment codes. Codes `03`, `04`, `05`, `08` and aliases `water`, `sanitation` are rejected. Unknown, unconfirmed, or inactive mappings are rejected without guessing or fallback assignment.
+
+**Live Appwrite Migration Status:** Pending. Do not assume local provisioning script updates migrate live Appwrite documents.
 
 ### Roles and permissions
 Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
@@ -77,16 +83,23 @@ Authenticate and authorize every protected backend operation. Derive identity, r
 ## 2. Collections
 
 ### `departments`
-Suggested attributes:
-- `$id`
-- `code` (unique string; only confirmed mappings enabled)
-- `name`
+Canonical document `$id` values (independent of enrollment codes):
+- `dept_civil` (`Civil`, `is_academic: true`, `is_maintenance: true`, `is_active: true`)
+- `dept_comp` (`Computer`, `is_academic: true`, `is_maintenance: true`, `is_active: true`)
+- `dept_elec` (`Electrical`, `is_academic: true`, `is_maintenance: true`, `is_active: true`)
+- `dept_mech` (`Mechanical`, `is_academic: true`, `is_maintenance: true`, `is_active: true`)
+- `dept_water` (`Water`, `is_academic: false`, `is_maintenance: true`, `is_active: true`)
+- `dept_sanit` (`Sanitation`, `is_academic: false`, `is_maintenance: true`, `is_active: true`)
+
+Attributes:
+- `$id` (canonical internal ID — primary key)
+- `name` (string 100, required)
 - `is_academic` (boolean)
 - `is_maintenance` (boolean)
 - `is_active` (boolean)
 - timestamps
 
-Computer/Civil/Electrical/Mechanical: both flags true. Water/Sanitation: academic false, maintenance true.
+`departments.code` and `idx_dept_code` / `idx_code` are removed from the target schema. Enrollment mappings live strictly in `ENROLLMENT_CODE_MAPPINGS`, never as a required attribute on `departments` documents. Water and Sanitation must never have enrollment codes or placeholder `code` attributes.
 
 ### `profiles`
 - `user_id` (unique)
@@ -141,8 +154,9 @@ Must allow a student to support again after revocation while preventing duplicat
 - `entry_type` (`status_change`, `progress_update`, `clarification_request`, `clarification_reply`, `admin_response`)
 - `content`
 - `old_status` / `new_status` where relevant
-- `is_substantive` where applicable
 - `created_at`
+
+Note: Substantive progress updates are recorded using `entry_type: 'progress_update'` rather than requiring a separate `is_substantive` attribute on Appwrite documents. Resolution timestamps (`resolved_at`) and latest `official_response` summaries are derived from persisted `complaint_timeline` entries (`status_change` with `new_status: 'Resolved'` and `admin_response`/`progress_update`) without storing `official_response` or `resolved_at` directly on `complaints`.
 
 ### `phone_change_requests`
 - `student_user_id`
@@ -195,10 +209,11 @@ Do not store unnecessary secrets or sensitive payloads in audit details. Applica
 ## 3. Required indexes
 Validate actual Appwrite index limits and supported compound index behavior before provisioning. Candidate indexes:
 - `profiles.user_id` unique
-- `profiles.enrollment_no` unique
-- `departments.code` unique
+- `profiles.enrollment_no` key/unique
+- `profiles.student_department_id` key
 - `complaints.student_department_id + created_at`
 - `complaints.maintenance_department_id + status`
+- `complaints.attachment_file_id` key
 - `complaint_supports.complaint_id + user_id`
 - `complaint_timeline.complaint_id + created_at`
 - `phone_change_requests.student_user_id + status`
@@ -206,8 +221,22 @@ Validate actual Appwrite index limits and supported compound index behavior befo
 - assignment lookup by `user_id + scope + is_active`
 - audit lookup by `actor_id`, `target_resource_id`, and `created_at`
 
+Note: `departments.code` unique index (`idx_code` / `idx_dept_code`) is obsolete and must not be recreated; canonical department lookup uses `$id` directly.
+
 ## 4. Permissions
 Sensitive collections must not be directly readable/writable by browser clients. Route all reads/writes through authenticated Appwrite Cloud Functions. Attachments remain private. Confirm exact Appwrite collection/document permission semantics against the deployed project before migration.
 
-## 5. Migration cautions
-Existing `department_code`, `issue_type`, `official_response`, status values, support_count, and attachment settings do not map cleanly to the new model. Do not blindly rename or drop fields. Build a reviewed migration plan with backups, mapping confirmation, dry-run counts, rollback strategy, and explicit approval.
+## 5. Migration-Impact Report & Safe Migration Procedure (Pending Live Execution)
+### Existing Live `$id` & Schema Conflicts
+1. **Immutable Document `$id` Conflict:** Pre-recovery Appwrite provisioning created `departments` documents using enrollment codes as document `$id` values (`'06'` for Civil, `'07'` for Computer; and if Day 1 was run, potentially `'03'`, `'04'`, `'water'`, `'sanitation'`). Appwrite document `$id` values are immutable and cannot be renamed in-place to `dept_civil`..`dept_sanit`.
+2. **Required `departments.code` Attribute & Unique Index Conflict:** Live `departments` was provisioned with `code` as a `required: true` string attribute and unique index `idx_code` (or `idx_dept_code`). Creating the 6 canonical documents (`dept_civil`, `dept_comp`, `dept_elec`, `dept_mech`, `dept_water`, `dept_sanit`) without `code` will fail schema validation until `code` is made optional or retired, and inserting placeholder `code` values is prohibited.
+3. **Legacy References in `profiles` and `complaints`:** Pre-recovery records store `department_code` (`'06'`, `'07'`) rather than `student_department_id` / `maintenance_department_id`.
+4. **Admin Authorization Gap:** Only `ADMIN_ALLOWLIST_06` (`dept_civil`) and `ADMIN_ALLOWLIST_07` (`dept_comp`) exist in legacy env allowlists; `dept_elec`, `dept_mech`, `dept_water`, and `dept_sanit` admins depend on provisioning DB records in `department_admins`.
+
+### Safe Migration Procedure (Approved Execution Only)
+1. **Export & Backup:** Export all live documents from `departments`, `profiles`, `complaints`, `complaint_supports`, and storage metadata before any modification.
+2. **Non-Destructive Attribute Relaxation:** Add missing schema attributes (`is_academic`, `is_maintenance`, `is_active`, `student_department_id`, `maintenance_department_id`, etc.) and update `departments.code` on live Appwrite from `required: true` to `required: false` (do not delete live attributes or documents during transition).
+3. **Seed Canonical Department Documents:** Create the 6 canonical documents (`$id` = `dept_civil`, `dept_comp`, `dept_elec`, `dept_mech`, `dept_water`, `dept_sanit`) with `{ name, is_academic, is_maintenance, is_active }` and NO `code` attribute values.
+4. **Dry-Run & Backfill:** Map legacy `department_code = '06'` → `dept_civil` and `'07'` → `dept_comp` across `profiles.student_department_id` and `complaints` (`student_department_id` / reviewed `maintenance_department_id`), flagging any unexpected values without guessing.
+5. **Provision `department_admins`:** Populate DB-backed `department_admins` assignments with canonical `department_id` and explicit `scope` (`academic` or `maintenance`, barring `dept_water`/`dept_sanit` from `academic`).
+6. **Deploy & Verify Before Cleanup:** Deploy updated Functions and frontend, verify end-to-end reads/writes, and only after rollback window confirmation retire legacy `$id = '06'`/`'07'` documents, obsolete `idx_code`/`idx_dept_code` index, and `departments.code` attribute.

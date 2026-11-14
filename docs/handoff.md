@@ -18,21 +18,19 @@
 - Do not introduce FastAPI, another backend service, or a Super Admin role.
 
 ### Departments and jurisdiction
-Six departments exist:
-1. Computer
-2. Civil
-3. Electrical
-4. Mechanical
-5. Water
-6. Sanitation
-
-Computer, Civil, Electrical, and Mechanical are academic and maintenance departments. Water and Sanitation are maintenance-only.
+Six departments exist with canonical internal IDs independent of enrollment codes:
+1. `dept_civil` (`Civil`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+2. `dept_comp` (`Computer`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+3. `dept_elec` (`Electrical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+4. `dept_mech` (`Mechanical`) — Academic & Maintenance (`is_academic: true`, `is_maintenance: true`)
+5. `dept_water` (`Water`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
+6. `dept_sanit` (`Sanitation`) — Maintenance-only (`is_academic: false`, `is_maintenance: true`)
 
 Keep separate identifiers:
-- `student_department_id`: the student's academic department and peer-visibility jurisdiction.
-- `maintenance_department_id`: the department responsible for resolving a complaint.
+- `student_department_id`: the student's academic department and peer-visibility jurisdiction (restricted to the 4 active academic departments).
+- `maintenance_department_id`: the department responsible for resolving a complaint (any of the 6 active maintenance departments).
 
-Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Known code mappings are `06` → Department 1 and `07` → Department 2. Official names/mappings for those codes and all remaining codes must be confirmed against institutional records before configuration. Never infer or invent mappings. Unmapped codes are rejected or routed to a controlled pending-verification state without assigning a department.
+Enrollment department code is extracted only from characters 8–9 using `enrollment_no[7:9]` (zero-based slice `[7:9]`). Confirmed mappings in `ENROLLMENT_CODE_MAPPINGS` are `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, and `19` → `dept_mech`. Water and Sanitation have zero enrollment codes and must never appear in enrollment-code mappings. Disallowed codes (`03`, `04`, `05`, `08`), aliases (`water`, `sanitation`), and unmapped/inactive codes are rejected without guessing. Appwrite live schema/document migration remains pending.
 
 ### Roles and permissions
 Exactly three main roles: Student, Department Admin, Principal. Selected existing accounts may receive explicit additional system-management permission grants; grants must be server-enforced, auditable, and revocable. No Super Admin role.
@@ -224,3 +222,20 @@ These are audit-report findings based on the inspected repository snapshot; reru
 ### D. Day 4 Dependencies
 - Day 4 Workstream: Complaint timeline immutability (`complaint_timeline`), Maintenance Admin status/progress/clarification flows, and support baseline/removal/re-support lifecycle.
 - Dependencies: Review Day 3 verification evidence and approve transition to Day 4.
+
+---
+
+## 10. Step 5 Recovery Handoff: Canonical Department Registry (Completed Locally — Migration Pending)
+**Date:** 11 November 2026
+**Status:** CANONICAL DEPARTMENT REGISTRY IMPLEMENTED & VERIFIED LOCALLY — LIVE APPWRITE MIGRATION PENDING
+**Scope Achieved:**
+- Established exact parity between frontend (`src/lib/utils/department.ts`) and backend (`functions/campusvoice-api/src/departments.ts`) registries with the 6 canonical internal IDs (`dept_civil`, `dept_comp`, `dept_elec`, `dept_mech`, `dept_water`, `dept_sanit`), completely independent of enrollment codes.
+- Configured confirmed enrollment mappings in `ENROLLMENT_CODE_MAPPINGS`: `06` → `dept_civil`, `07` → `dept_comp`, `09` → `dept_elec`, `19` → `dept_mech`.
+- Removed invented codes (`03`, `04`, `05`, `08`), Water/Sanitation enrollment-code aliases (`water`, `sanitation`), hardcoded `06`/`07` onboarding preview mappings, unsafe `dept_comp` fallbacks, and code-based `DepartmentBadge` assumptions.
+- Enforced Water and Sanitation as maintenance-only (`is_academic: false`, `is_maintenance: true`) with zero enrollment codes, rejected as student academic departments and academic admin scopes while selectable as active maintenance departments.
+- Updated `src/types/models.ts`, `functions/campusvoice-api/src/types.ts`, and `src/lib/schemas/index.ts` with `DepartmentId`, `AcademicDepartmentId`, `MaintenanceDepartmentId`, and `EnrollmentMapping`, removing required `code` from `Department` and `DepartmentSchema`.
+- Updated `scripts/setup-appwrite.mjs` to seed canonical `$id` values without `departments.code` or `idx_dept_code` (not executed against live Appwrite).
+
+### Pending Live Migration & Unresolved Authorization Dependencies
+- **Live Appwrite Migration Pending:** Existing live `departments` documents have immutable `$id` values (`'06'`, `'07'`) and required `departments.code` / unique index (`idx_code` / `idx_dept_code`). Safe migration steps are documented in `docs/schema.md` Section 5.
+- **Unresolved Admin Authorization Dependency:** Legacy env allowlists exist only for `ADMIN_ALLOWLIST_06` (`dept_civil`) and `ADMIN_ALLOWLIST_07` (`dept_comp`). Administrators for `dept_elec`, `dept_mech`, `dept_water`, and `dept_sanit` require verified DB records in `department_admins` (not invented in env allowlists).

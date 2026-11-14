@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { getCurrentUser, signInWithGoogle, signOut, type AppwriteUser } from '../appwrite';
 import { apiGetProfile } from '../api';
+import { isAcademicDepartment } from '../utils';
 import type { UserProfile } from '../../types';
 
 interface AuthContextValue {
@@ -99,7 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         ((profile.name_locked || profile.is_locked) &&
           (profile.enrollment_locked || profile.is_locked) &&
           Boolean(profile.enrollment_no) &&
-          Boolean(profile.student_department_id || profile.department_code) &&
+          Boolean(profile.student_department_id && isAcademicDepartment(profile.student_department_id)) &&
           Boolean(profile.phone_locked) &&
           Boolean(profile.phone_number)))
   );

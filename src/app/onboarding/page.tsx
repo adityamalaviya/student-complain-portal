@@ -11,17 +11,24 @@ import {
   Lock,
   ArrowRight,
   TerminalWindow,
+  Lightning,
+  Gear,
   CircleNotch,
   Phone,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
 import { apiCompleteOnboarding } from '@/lib/api';
 import { StrictOnboardingSchema, PhoneNumberSchema } from '@/lib/schemas';
-import { extractAndMapEnrollment } from '@/lib/utils';
+import {
+  ENROLLMENT_CODE_MAPPINGS,
+  extractAndMapEnrollment,
+  resolveDepartment,
+  resolveEnrollmentCode,
+} from '@/lib/utils';
 
 export default function OnboardingPage(): React.ReactElement {
   const router = useRouter();
-  const { user, loading, isOnboarded, isAdmin, isPrincipal, setProfileState } = useAuth();
+  const { user, loading, isOnboarded, isAdmin, isPrincipal, setProfileState, refreshProfile } = useAuth();
 
   const [name, setName] = useState<string>('');
   const [enrollmentNo, setEnrollmentNo] = useState<string>('');
@@ -29,6 +36,7 @@ export default function OnboardingPage(): React.ReactElement {
   const nameInitialized = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [redirecting, setRedirecting] = useState<boolean>(false);
 
   useEffect(() => {
     if (user?.name && !nameInitialized.current) {
@@ -38,6 +46,7 @@ export default function OnboardingPage(): React.ReactElement {
   }, [user]);
 
   useEffect(() => {
+    if (redirecting) return;
     if (!loading) {
       if (!user) {
         router.push('/sign-in');
@@ -49,28 +58,32 @@ export default function OnboardingPage(): React.ReactElement {
         router.push('/dashboard');
       }
     }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router, redirecting]);
 
   const cleanEnrollment = enrollmentNo.trim();
   const hasMinDigits = cleanEnrollment.length >= 9;
   const deptCode = hasMinDigits ? cleanEnrollment.slice(7, 9) : null;
+  const previewMatch = deptCode ? resolveEnrollmentCode(deptCode) : null;
   const enrollmentCheck = extractAndMapEnrollment(cleanEnrollment);
-
-  // Live preview of confirmed academic mapping once 9+ digits are entered
-  const previewMapping =
-    deptCode === '06'
-      ? { id: 'dept_civil', code: '06', name: 'Civil Department' }
-      : deptCode === '07'
-      ? { id: 'dept_comp', code: '07', name: 'Computer Department' }
-      : null;
+  const confirmedMappingLabels = Object.values(ENROLLMENT_CODE_MAPPINGS)
+    .filter((m) => m.confirmed)
+    .map((m) => {
+      const dept = resolveDepartment(m.department_id);
+      return dept ? `${m.enrollment_code} (${dept.name})` : null;
+    })
+    .filter((label): label is string => Boolean(label))
+    .join(', ');
 
   const cleanPhone = phoneNumber.trim();
   const phoneValidation = PhoneNumberSchema.safeParse(cleanPhone);
   const hasPhoneInput = cleanPhone.length > 0;
   const phoneStartsInvalid = hasPhoneInput && !/^[6-9]/.test(cleanPhone);
 
+  const isNameFormatValid = /^[a-zA-Z\s.'-]+$/.test(name.trim());
+  const isNameValid = name.trim().length >= 2 && isNameFormatValid;
+
   const isFormValid =
-    name.trim().length >= 2 &&
+    isNameValid &&
     cleanEnrollment.length === 12 &&
     enrollmentCheck.isValid &&
     phoneValidation.success;
@@ -97,8 +110,14 @@ export default function OnboardingPage(): React.ReactElement {
       const response = await apiCompleteOnboarding(validation.data);
 
       if (response.success && response.data) {
+        setRedirecting(true);
         setProfileState(response.data.profile);
-        router.push('/dashboard');
+        router.replace('/dashboard');
+      } else if (response.code === 'PROFILE_ALREADY_LOCKED') {
+        // Profile is already completed and locked; refresh profile state and navigate directly to dashboard
+        setRedirecting(true);
+        await refreshProfile();
+        router.replace('/dashboard');
       } else {
         setSubmitError(response.error || 'Failed to complete profile registration.');
       }
@@ -225,9 +244,15 @@ export default function OnboardingPage(): React.ReactElement {
                 placeholder="e.g. Rahul Sharma"
                 className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
               />
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Synced from your Google Account; verify spelling matches college records.
-              </p>
+              {name.trim().length > 0 && !isNameFormatValid ? (
+                <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                  Name contains invalid characters. Use letters, spaces, dots, hyphens, and apostrophes only.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Synced from your Google Account; verify spelling matches college records.
+                </p>
+              )}
             </div>
 
             {/* Field 2: Enrollment Number */}
@@ -279,12 +304,16 @@ export default function OnboardingPage(): React.ReactElement {
                 Academic Department Jurisdiction
               </label>
 
-              {previewMapping ? (
+              {previewMatch ? (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 transition-all dark:border-emerald-900/50 dark:bg-emerald-950/30">
                   <div className="flex items-start gap-3">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">
-                      {previewMapping.id === 'dept_comp' ? (
+                      {previewMatch.department.id === 'dept_comp' ? (
                         <TerminalWindow size={22} weight="fill" />
+                      ) : previewMatch.department.id === 'dept_elec' ? (
+                        <Lightning size={22} weight="fill" />
+                      ) : previewMatch.department.id === 'dept_mech' ? (
+                        <Gear size={22} weight="fill" />
                       ) : (
                         <Buildings size={22} weight="fill" />
                       )}
@@ -292,7 +321,7 @@ export default function OnboardingPage(): React.ReactElement {
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                          {previewMapping.name}
+                          {previewMatch.department.name}
                         </h2>
                         <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">
                           <CheckCircle size={12} weight="fill" />
@@ -302,7 +331,7 @@ export default function OnboardingPage(): React.ReactElement {
                       <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
                         Code{' '}
                         <span className="rounded border border-slate-200 bg-white px-1 py-0.5 font-mono font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
-                          {previewMapping.code}
+                          {previewMatch.mapping.enrollment_code}
                         </span>{' '}
                         detected at characters 8–9 • Academic Peer Feed Scope
                       </p>
@@ -322,7 +351,7 @@ export default function OnboardingPage(): React.ReactElement {
                         Unmapped Department Code: {deptCode}
                       </h2>
                       <p className="mt-1 text-xs text-amber-900 dark:text-amber-300">
-                        Department code <span className="font-mono font-bold">{deptCode}</span> is not yet confirmed in institutional enrollment records. Only confirmed academic department codes (<span className="font-mono font-bold">06</span> Civil Department, <span className="font-mono font-bold">07</span> Computer Department) can be auto-assigned.
+                        Department code <span className="font-mono font-bold">{deptCode}</span> is not confirmed in institutional enrollment records. Only confirmed academic department codes (<span className="font-mono font-bold">{confirmedMappingLabels}</span>) can be assigned.
                       </p>
                     </div>
                   </div>

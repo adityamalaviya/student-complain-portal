@@ -13,7 +13,7 @@ Reusable UI components matching the approved Minimalist Institutional Design Sys
 - `LoadingSkeleton.tsx`: Card skeleton loaders for responsive feed loading.
 - `EmptyState.tsx`: Minimal empty feed illustration and call-to-action button.
 - `ErrorState.tsx`: Minimal error alert box with retry button.
-- `AdminResolutionModal.tsx`: Accessible dialog for department administrators to update investigation status and post official remarks.
+- `AdminResolutionModal.tsx`: Accessible dialog for department administrators to update investigation status (including Pending progress notes and optional substantive progress updates), submit official remarks persisted in `complaint_timeline`, guard against duplicate submissions, and surface server errors while preserving unsaved input.
 
 ## Design System Rules
 - Tailwind CSS exclusively, dark mode support on every component.

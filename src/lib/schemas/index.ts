@@ -71,8 +71,32 @@ export type StrictOnboardingInput = z.infer<typeof StrictOnboardingSchema>;
 // Department Schemas
 // ==========================================
 
+export const AcademicDepartmentIdSchema = z.enum([
+  'dept_civil',
+  'dept_comp',
+  'dept_elec',
+  'dept_mech',
+]);
+
+export const MaintenanceDepartmentIdSchema = z.enum([
+  'dept_civil',
+  'dept_comp',
+  'dept_elec',
+  'dept_mech',
+  'dept_water',
+  'dept_sanit',
+]);
+
+export const DepartmentIdSchema = MaintenanceDepartmentIdSchema;
+
+export const EnrollmentMappingSchema = z.object({
+  enrollment_code: z.string().trim().regex(/^\d{2}$/),
+  department_id: AcademicDepartmentIdSchema,
+  confirmed: z.boolean(),
+});
+
 export const DepartmentSchema = z.object({
-  code: z.string().trim().min(1).max(10),
+  id: DepartmentIdSchema.optional(),
   name: z.string().trim().min(2).max(100),
   is_academic: z.boolean(),
   is_maintenance: z.boolean(),
@@ -245,6 +269,13 @@ export const AdminAssignmentSchema = z
         path: ['scope'],
       });
     }
+    if (val.scope === 'maintenance' && !isMaintenanceDepartment(val.department_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Department ID must be a valid active maintenance department',
+        path: ['department_id'],
+      });
+    }
   });
 
 export type AdminAssignmentInput = z.infer<typeof AdminAssignmentSchema>;
@@ -271,6 +302,40 @@ export const AdminResolutionSchema = z.object({
     .trim()
     .min(5, 'Official response must be at least 5 characters')
     .max(1000, 'Official response cannot exceed 1000 characters'),
+  is_substantive: z.boolean().optional(),
+  entry_type: z.enum(['admin_response', 'progress_update']).optional(),
 });
 
 export type AdminResolutionInput = z.infer<typeof AdminResolutionSchema>;
+
+// ==========================================
+// Clarification & Support Operations (Day 1)
+// ==========================================
+
+export const ClarificationRequestSchema = z.object({
+  complaint_id: z.string().trim().min(1, 'Complaint ID is required'),
+  question: z
+    .string()
+    .trim()
+    .min(5, 'Clarification request must be at least 5 characters')
+    .max(2000, 'Clarification request cannot exceed 2000 characters'),
+});
+
+export type ClarificationRequestInput = z.infer<typeof ClarificationRequestSchema>;
+
+export const ClarificationReplySchema = z.object({
+  complaint_id: z.string().trim().min(1, 'Complaint ID is required'),
+  reply: z
+    .string()
+    .trim()
+    .min(1, 'Reply must be at least 1 character')
+    .max(2000, 'Reply cannot exceed 2000 characters'),
+});
+
+export type ClarificationReplyInput = z.infer<typeof ClarificationReplySchema>;
+
+export const SupportComplaintSchema = z.object({
+  complaint_id: z.string().trim().min(1, 'Complaint ID is required'),
+});
+
+export type SupportComplaintInput = z.infer<typeof SupportComplaintSchema>;

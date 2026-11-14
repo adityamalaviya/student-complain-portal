@@ -9,10 +9,10 @@ import {
   CheckCircle,
 } from '@phosphor-icons/react';
 import { resolveDepartment } from '@/lib/utils';
-import type { DepartmentCode } from '@/types';
+import type { DepartmentId } from '@/types';
 
 interface DepartmentBadgeProps {
-  code: DepartmentCode;
+  departmentId?: DepartmentId | string | null;
   name?: string;
   showVerified?: boolean;
   size?: 'sm' | 'md';
@@ -37,12 +37,12 @@ function renderDepartmentIcon(deptId: string | undefined, iconSize: number): Rea
 }
 
 export function DepartmentBadge({
-  code,
+  departmentId,
   name,
   showVerified = false,
   size = 'md',
 }: DepartmentBadgeProps): React.ReactElement {
-  const resolved = resolveDepartment(code);
+  const resolved = resolveDepartment(departmentId);
   const displayName = name || resolved?.name || 'Institutional Department';
 
   const paddingClass = size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-2.5 py-1 text-xs';
