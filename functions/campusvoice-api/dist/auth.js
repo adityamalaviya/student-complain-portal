@@ -1,7 +1,7 @@
 import { Client, Account, Query } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from './db.js';
-import { readBooleanField, readStringField, resolveDepartment } from './departments.js';
-export async function verifyCaller(context, payload) {
+import { readBooleanField, readStringField, resolveDepartment, } from './departments.js';
+export async function verifyCaller(context, payload, deps) {
     const { req, log, error } = context;
     const config = getAppwriteConfig();
     // 1. Extract potential auth tokens / user headers
@@ -11,19 +11,22 @@ export async function verifyCaller(context, payload) {
         req.headers['x-appwrite-user-jwt'] ||
         req.headers['x-appwrite-jwt'] ||
         (typeof payload?.jwt === 'string' ? payload.jwt : '');
-    const userIdHeader = req.headers['x-appwrite-user-id'] || '';
+    const userIdHeader = (req.headers['x-appwrite-user-id'] || '').trim();
     let user = null;
     // 2. Try JWT verification if present
     if (jwtHeader) {
         try {
-            const userClient = new Client();
-            userClient.setEndpoint(config.endpoint);
-            if (config.projectId) {
-                userClient.setProject(config.projectId);
-            }
-            userClient.setJWT(jwtHeader);
-            const account = new Account(userClient);
-            const accountData = await account.get();
+            const accountData = deps?.verifyJwt
+                ? await deps.verifyJwt(jwtHeader)
+                : await (() => {
+                    const userClient = new Client();
+                    userClient.setEndpoint(config.endpoint);
+                    if (config.projectId) {
+                        userClient.setProject(config.projectId);
+                    }
+                    userClient.setJWT(jwtHeader);
+                    return new Account(userClient).get();
+                })();
             user = {
                 $id: accountData.$id,
                 email: accountData.email || '',
@@ -36,9 +39,9 @@ export async function verifyCaller(context, payload) {
         }
     }
     // 3. Fallback to Appwrite Execution User ID (when invoked within Appwrite platform)
-    if (!user && userIdHeader && config.apiKey) {
+    if (!user && userIdHeader && (deps?.users || config.apiKey)) {
         try {
-            const { users } = getServerClient();
+            const users = deps?.users ?? getServerClient().users;
             const userData = await users.get(userIdHeader);
             user = {
                 $id: userData.$id,
@@ -58,92 +61,119 @@ export async function verifyCaller(context, payload) {
             statusCode: 401,
         };
     }
-    const normalizedEmail = user.email.trim().toLowerCase();
+    if (!deps?.databases && !config.apiKey) {
+        error('[auth] Server database configuration missing; cannot verify caller authorization.');
+        return {
+            caller: null,
+            error: 'Authorization verification unavailable.',
+            statusCode: 500,
+        };
+    }
     let role = 'student';
-    let department_code = null;
+    let department_id = null;
     let department_name = null;
-    let admin_assignments;
-    // 4. Resolve database-backed assignments & principal role when server API key is configured
-    let hasDbAdminRecords = false;
-    if (config.apiKey) {
-        const { databases } = getServerClient();
-        try {
-            const adminRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('user_id', user.$id), Query.limit(20)]);
-            if (adminRes.total > 0) {
-                hasDbAdminRecords = true;
-                const activeAssignments = [];
-                for (const doc of adminRes.documents) {
-                    const isActive = readBooleanField(doc, 'is_active') ?? true;
-                    const rawScope = readStringField(doc, 'scope');
-                    const scope = rawScope === 'academic' ? 'academic' : 'maintenance';
-                    const rawDeptId = readStringField(doc, 'department_id');
-                    const dept = resolveDepartment(rawDeptId);
-                    if (isActive && dept) {
-                        activeAssignments.push({
-                            $id: doc.$id,
-                            user_id: readStringField(doc, 'user_id') || user.$id,
-                            email: readStringField(doc, 'email') || user.email,
-                            department_id: dept.id,
-                            scope,
-                            is_active: true,
-                            assigned_by: readStringField(doc, 'assigned_by'),
-                            created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-                        });
-                    }
-                }
-                if (activeAssignments.length > 0) {
-                    role = 'department_admin';
-                    admin_assignments = activeAssignments;
-                    const primary = activeAssignments.find((a) => a.scope === 'maintenance') || activeAssignments[0];
-                    const primaryDept = resolveDepartment(primary.department_id);
-                    if (primaryDept) {
-                        department_code = primaryDept.code;
-                        department_name = primaryDept.name;
-                    }
-                }
-            }
-        }
-        catch {
-            // department_admins collection may not exist prior to live migration
-        }
-        if (role === 'student') {
+    const admin_assignments = [];
+    const databases = deps?.databases ?? getServerClient().databases;
+    // 4. Authoritative database-backed Department Admin assignment verification (fail closed on DB errors)
+    try {
+        const adminRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('user_id', user.$id), Query.limit(100)]);
+        let candidateDocs = adminRes.documents;
+        const normalizedCallerEmail = (user.email || '').trim().toLowerCase();
+        // Fallback: If user_id is not yet linked, query active assignment by verified email
+        if (candidateDocs.length === 0 && normalizedCallerEmail) {
             try {
-                const profileRes = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', user.$id), Query.limit(1)]);
-                const profileDoc = profileRes.documents[0];
-                if (profileDoc) {
-                    const profileRole = readStringField(profileDoc, 'role');
-                    if (profileRole === 'principal') {
-                        role = 'principal';
-                    }
-                    else if (profileRole === 'department_admin') {
-                        const profileDept = resolveDepartment(readStringField(profileDoc, 'department_code') ||
-                            readStringField(profileDoc, 'department_id'));
-                        if (profileDept) {
-                            role = 'department_admin';
-                            department_code = profileDept.code;
-                            department_name = profileDept.name;
-                        }
-                    }
+                const emailRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('email', normalizedCallerEmail), Query.limit(100)]);
+                if (emailRes.total > 0) {
+                    candidateDocs = emailRes.documents;
                 }
             }
-            catch {
-                // Ignore profile lookup failure here; downstream handlers validate profile
+            catch (emailQueryErr) {
+                log(`[auth] Notice: email query on department_admins skipped or index missing: ${String(emailQueryErr)}`);
+            }
+        }
+        for (const doc of candidateDocs) {
+            const docUserId = readStringField(doc, 'user_id').trim();
+            const docEmail = readStringField(doc, 'email').trim().toLowerCase();
+            // Must match either user_id or verified email
+            if (docUserId !== user.$id && docEmail !== normalizedCallerEmail) {
+                continue;
+            }
+            // Require explicit boolean true; missing, false, or non-boolean values never grant access.
+            if (readBooleanField(doc, 'is_active') !== true) {
+                continue;
+            }
+            const rawScope = readStringField(doc, 'scope').trim();
+            if (rawScope !== 'academic' && rawScope !== 'maintenance') {
+                continue;
+            }
+            const scope = rawScope;
+            const dept = resolveDepartment(readStringField(doc, 'department_id'));
+            if (!dept || !dept.is_active) {
+                continue;
+            }
+            if (scope === 'academic' && !dept.is_academic) {
+                continue;
+            }
+            if (scope === 'maintenance' && !dept.is_maintenance) {
+                continue;
+            }
+            admin_assignments.push({
+                $id: doc.$id,
+                user_id: user.$id,
+                email: readStringField(doc, 'email') || user.email,
+                department_id: dept.id,
+                scope,
+                is_active: true,
+                assigned_by: readStringField(doc, 'assigned_by'),
+                created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+            });
+            // Synchronize OAuth user ID to department_admins record if not yet linked
+            if (docUserId !== user.$id) {
+                try {
+                    await databases.updateDocument(config.databaseId, config.departmentAdminsCollectionId, doc.$id, { user_id: user.$id });
+                    log(`[auth] Linked department_admins record ${doc.$id} to user ID ${user.$id}`);
+                }
+                catch (linkErr) {
+                    log(`[auth] Notice: Could not sync user ID to department_admins record: ${String(linkErr)}`);
+                }
+            }
+        }
+        if (admin_assignments.length > 0) {
+            role = 'department_admin';
+            const primary = admin_assignments.find((a) => a.scope === 'maintenance') || admin_assignments[0];
+            const primaryDept = resolveDepartment(primary.department_id);
+            if (primaryDept) {
+                department_id = primaryDept.id;
+                department_name = primaryDept.name;
             }
         }
     }
-    // 5. Legacy env allowlist fallback during migration (only if no explicit DB admin record exists)
-    if (!hasDbAdminRecords && role === 'student') {
-        if (config.adminComputerEmail && normalizedEmail === config.adminComputerEmail) {
-            role = 'department_admin';
-            department_code = '07';
-            department_name = 'Computer Department';
-            log(`[auth] Recognized caller ${user.$id} (${normalizedEmail}) as Computer Department Admin`);
+    catch (adminErr) {
+        error(`[auth] Failed to query department_admins for ${user.$id}: ${String(adminErr)}`);
+        return {
+            caller: null,
+            error: 'Unable to verify administrator authorization.',
+            statusCode: 500,
+        };
+    }
+    // 5. Verify Principal role from profiles when caller has no active admin assignment (never elevate department_admin)
+    if (role === 'student') {
+        try {
+            const profileRes = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', user.$id), Query.limit(1)]);
+            const profileDoc = profileRes.documents[0];
+            if (profileDoc &&
+                readStringField(profileDoc, 'user_id') === user.$id &&
+                readStringField(profileDoc, 'role') === 'principal') {
+                role = 'principal';
+            }
         }
-        else if (config.adminCivilEmail && normalizedEmail === config.adminCivilEmail) {
-            role = 'department_admin';
-            department_code = '06';
-            department_name = 'Civil Department';
-            log(`[auth] Recognized caller ${user.$id} (${normalizedEmail}) as Civil Department Admin`);
+        catch (profileErr) {
+            error(`[auth] Failed to query profiles for ${user.$id}: ${String(profileErr)}`);
+            return {
+                caller: null,
+                error: 'Unable to verify caller role.',
+                statusCode: 500,
+            };
         }
     }
     return {
@@ -152,8 +182,8 @@ export async function verifyCaller(context, payload) {
             email: user.email,
             name: user.name,
             role,
-            ...(admin_assignments ? { admin_assignments } : {}),
-            department_code,
+            admin_assignments,
+            department_id,
             department_name,
         },
     };
