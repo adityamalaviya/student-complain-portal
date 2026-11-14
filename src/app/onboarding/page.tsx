@@ -53,7 +53,7 @@ export default function OnboardingPage(): React.ReactElement {
       } else if (isAdmin) {
         router.push('/admin');
       } else if (isPrincipal) {
-        router.push('/dashboard');
+        router.replace('/principal');
       } else if (isOnboarded) {
         router.push('/dashboard');
       }

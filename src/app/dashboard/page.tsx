@@ -48,7 +48,7 @@ function statusMatchesFilter(
 
 export default function StudentDashboardPage(): React.ReactElement {
   const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin, signOutUser, refreshProfile } = useAuth();
+  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal, signOutUser, refreshProfile } = useAuth();
 
   const [feedType, setFeedType] = useState<FeedType>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -62,6 +62,10 @@ export default function StudentDashboardPage(): React.ReactElement {
 
   // Guard: Redirect if not student or not authenticated
   useEffect(() => {
+    if (isPrincipal) {
+      router.replace('/principal');
+      return;
+    }
     if (!loading) {
       if (!user) {
         router.push('/sign-in');
@@ -71,7 +75,7 @@ export default function StudentDashboardPage(): React.ReactElement {
         router.push('/onboarding');
       }
     }
-  }, [loading, user, isOnboarded, isAdmin, router]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
 
   // Fetch academic-department-scoped complaints from backend API
   const fetchComplaints = useCallback(async (): Promise<void> => {
