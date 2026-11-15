@@ -489,20 +489,99 @@ export async function handleGetProfile(
         is_active: true,
       };
 
+      const newProfileData = {
+        $id: caller.id,
+        user_id: caller.id,
+        auth_user_id: caller.id,
+        email: caller.email,
+        role: 'department_admin' as const,
+        department_id: assignment.department_id,
+        department_name: assignment.department_name,
+        academic_department_id: assignment.academic_department_id || assignment.department_id,
+        maintenance_department_id: assignment.maintenance_department_id || assignment.department_id,
+        is_active: true,
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        is_locked: true,
+        created_at: new Date().toISOString(),
+      };
+
+      console.log('[get-profile] creating admin profile for:', caller.id);
+
+      let adminProfile: unknown = null;
+      try {
+        adminProfile = await databases.createDocument(
+          config.databaseId,
+          config.profilesCollectionId,
+          caller.id,
+          newProfileData
+        );
+        console.log('[get-profile] admin profile created successfully');
+      } catch (createErr) {
+        log(`[profile] Notice: admin profile creation failed: ${String(createErr)}`);
+        let createdOnRetry = false;
+        try {
+          const { $id: _omittedId, ...dataWithoutId } = newProfileData;
+          adminProfile = await databases.createDocument(
+            config.databaseId,
+            config.profilesCollectionId,
+            caller.id,
+            dataWithoutId
+          );
+          createdOnRetry = true;
+          console.log('[get-profile] admin profile created successfully');
+        } catch {
+          // creation failed or document already exists
+        }
+
+        if (!createdOnRetry) {
+          try {
+            if (typeof (databases as any).getDocument === 'function') {
+              adminProfile = await (databases as any).getDocument(
+                config.databaseId,
+                config.profilesCollectionId,
+                caller.id
+              );
+            } else {
+              const fetchRes = await databases.listDocuments(
+                config.databaseId,
+                config.profilesCollectionId,
+                [Query.equal('user_id', caller.id), Query.limit(1)]
+              );
+              if (fetchRes.total > 0 && fetchRes.documents[0]) {
+                adminProfile = fetchRes.documents[0];
+              }
+            }
+          } catch (fetchErr) {
+            log(`[profile] Notice: getDocument failed, falling back to listDocuments: ${String(fetchErr)}`);
+            try {
+              const fetchRes = await databases.listDocuments(
+                config.databaseId,
+                config.profilesCollectionId,
+                [Query.equal('user_id', caller.id), Query.limit(1)]
+              );
+              if (fetchRes.total > 0 && fetchRes.documents[0]) {
+                adminProfile = fetchRes.documents[0];
+              }
+            } catch {
+              // ignore fallback fetch error
+            }
+          }
+        }
+      }
+
+      const returnedProfile = {
+        ...(typeof adminProfile === 'object' && adminProfile !== null ? adminProfile : newProfileData),
+        $id: (adminProfile as any)?.$id || caller.id,
+        role: 'department_admin',
+      };
+
       return res.json(
         {
           success: true,
           data: {
-            profile: {
-              user_id: caller.id,
-              email: caller.email,
-              role: 'department_admin',
-              department_id: assignment.department_id,
-              department_name: assignment.department_name,
-              academic_department_id: assignment.academic_department_id,
-              maintenance_department_id: assignment.maintenance_department_id,
-              is_active: true,
-            },
+            profile: returnedProfile,
             is_onboarded: true,
           },
         },
