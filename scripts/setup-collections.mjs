@@ -385,11 +385,11 @@ async function resolveDepartmentAdminsCollectionId() {
     // Not found under 'department_admins'
   }
 
-  // Check if known existing collection ID '6af876910029effa1c9c' exists
+  // Check if known existing collection ID 'department_admins' exists
   try {
-    await withRetry(() => databases.getCollection(DATABASE_ID, '6af876910029effa1c9c'));
-    console.log(`ℹ️ Detected existing department_admins collection under ID '6af876910029effa1c9c'`);
-    return '6af876910029effa1c9c';
+    await withRetry(() => databases.getCollection(DATABASE_ID, 'department_admins'));
+    console.log(`ℹ️ Detected existing department_admins collection under ID 'department_admins'`);
+    return 'department_admins';
   } catch {
     // Neither exists
   }

@@ -104,7 +104,7 @@ export async function handleGetProfile(
     );
 
     // 1. Check if user has an active assignment in department_admin_assignments (or equivalent collection)
-    const adminColId = config.departmentAdminsCollectionId || '6af876910029effa1c9c';
+    const adminColId = config.departmentAdminsCollectionId || 'department_admins';
     let hasActiveAdminAssignment = false;
     let adminAssignmentDeptId: DepartmentId | null = null;
     let adminAssignmentDeptName: string = '';

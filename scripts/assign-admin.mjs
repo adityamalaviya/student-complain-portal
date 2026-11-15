@@ -117,10 +117,10 @@ async function resolveDepartmentAdminsCollection(databases, databaseId) {
     return 'department_admins';
   } catch {}
 
-  // 2. Try known cloud ID '6af876910029effa1c9c'
+  // 2. Try known cloud ID 'department_admins'
   try {
-    await databases.getCollection(databaseId, '6af876910029effa1c9c');
-    return '6af876910029effa1c9c';
+    await databases.getCollection(databaseId, 'department_admins');
+    return 'department_admins';
   } catch {}
 
   return 'department_admins';

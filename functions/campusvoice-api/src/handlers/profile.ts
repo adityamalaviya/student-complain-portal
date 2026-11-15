@@ -102,7 +102,7 @@ export async function handleGetProfile(
     // - If not found: query where email === caller.email AND is_active === true
     const adminColIds = Array.from(
       new Set(
-        [config.departmentAdminsCollectionId, '6af876910029effa1c9c', 'department_admins'].filter(
+        [config.departmentAdminsCollectionId, 'department_admins'].filter(
           Boolean
         ) as string[]
       )
