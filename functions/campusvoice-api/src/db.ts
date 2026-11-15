@@ -37,7 +37,9 @@ export function getAppwriteConfig(): {
   const supportsCollectionId = process.env.COLLECTION_SUPPORTS || 'complaint_supports';
   const timelineCollectionId = process.env.COLLECTION_TIMELINE || 'complaint_timeline';
   const departmentAdminsCollectionId =
-    process.env.COLLECTION_DEPARTMENT_ADMINS || 'department_admins';
+    process.env.COLLECTION_DEPARTMENT_ADMINS ||
+    process.env.DEPARTMENT_ADMINS ||
+    'department_admins';
   const phoneChangeRequestsCollectionId =
     process.env.COLLECTION_PHONE_CHANGE_REQUESTS || 'phone_change_requests';
   const warningsCollectionId =

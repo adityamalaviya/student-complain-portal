@@ -44,7 +44,7 @@ export async function handleGetProfile(context, caller, deps) {
         const databases = deps?.databases ?? getServerClient().databases;
         const listResult = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', caller.id), Query.limit(1)]);
         // 1. Check if user has an active assignment in department_admin_assignments (or equivalent collection)
-        const adminColId = config.departmentAdminsCollectionId || 'department_admins';
+        const adminColId = config.departmentAdminsCollectionId || '6af876910029effa1c9c';
         let hasActiveAdminAssignment = false;
         let adminAssignmentDeptId = null;
         let adminAssignmentDeptName = '';
