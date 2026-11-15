@@ -28,7 +28,10 @@ export function getAppwriteConfig(): {
     process.env.APPWRITE_PROJECT_ID ||
     '';
 
-  const apiKey = process.env.APPWRITE_API_KEY || '';
+  const apiKey =
+    process.env.APPWRITE_FUNCTION_API_KEY ||
+    process.env.APPWRITE_API_KEY ||
+    '';
 
   const databaseId = process.env.APPWRITE_DATABASE_ID || 'campusvoice';
   const profilesCollectionId = process.env.COLLECTION_PROFILES || 'profiles';
