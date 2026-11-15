@@ -134,7 +134,15 @@ export async function verifyCaller(context, payload, deps) {
             if (readBooleanField(doc, 'is_active') !== true) {
                 continue;
             }
-            const rawScope = readStringField(doc, 'scope').trim();
+            let rawScope = readStringField(doc, 'scope').trim();
+            if (!rawScope) {
+                if (readStringField(doc, 'maintenance_department_id')) {
+                    rawScope = 'maintenance';
+                }
+                else if (readStringField(doc, 'academic_department_id')) {
+                    rawScope = 'academic';
+                }
+            }
             if (rawScope !== 'academic' && rawScope !== 'maintenance') {
                 continue;
             }

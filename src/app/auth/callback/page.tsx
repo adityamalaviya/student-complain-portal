@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, createSession } from '@/lib/appwrite';
+import { getCurrentUser, createSession, signOut } from '@/lib/appwrite';
 import { apiGetProfile } from '@/lib/api';
 
 export default function AuthCallbackPage(): React.ReactElement {
@@ -14,29 +14,54 @@ export default function AuthCallbackPage(): React.ReactElement {
 
     async function handleCallback(): Promise<void> {
       try {
-        // 1. Extract userId and secret from URL search parameters if redirected from createOAuth2Token
         const params = new URLSearchParams(window.location.search);
         const userId = params.get('userId');
         const secret = params.get('secret');
 
+        // 1. Check if user already has an active session
+        let user = await getCurrentUser();
+        if (isCancelled) return;
+
+        // 2. If token parameters are present and either no session exists or a different user is logged in
         if (userId && secret) {
-          try {
-            await createSession(userId, secret);
-          } catch (sessionErr) {
-            console.warn('[auth-callback] Session creation from token parameters error:', sessionErr);
+          if (!user || user.$id !== userId) {
+            try {
+              if (user && user.$id !== userId) {
+                // Different user session active; clean up old session before creating new one
+                await signOut();
+              }
+              await createSession(userId, secret);
+              user = await getCurrentUser();
+            } catch (sessionErr: unknown) {
+              const errStr = String(sessionErr);
+              const isAlreadyExists =
+                errStr.includes('user_session_already_exists') ||
+                (typeof sessionErr === 'object' &&
+                  sessionErr !== null &&
+                  'type' in sessionErr &&
+                  (sessionErr as { type: string }).type === 'user_session_already_exists');
+
+              if (isAlreadyExists) {
+                console.log('[auth-callback] Active session already exists, reusing existing session.');
+                user = await getCurrentUser();
+              } else {
+                console.warn('[auth-callback] Session creation from token parameters error:', sessionErr);
+              }
+            }
+          } else {
+            console.log('[auth-callback] Active session already exists for user:', user.$id);
           }
         }
 
-        // 2. Retrieve authenticated user session
-        const user = await getCurrentUser();
         if (isCancelled) return;
 
+        // 3. If no active session could be verified, route back to sign-in with error
         if (!user) {
           router.replace('/sign-in?error=oauth_failed');
           return;
         }
 
-        // 3. Attempt to fetch existing profile from Appwrite Cloud Function
+        // 4. Attempt to fetch existing profile from Appwrite Cloud Function
         try {
           const profileResponse = await apiGetProfile();
           if (isCancelled) return;

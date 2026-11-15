@@ -249,59 +249,171 @@ export async function handleGetProfile(context, caller, deps) {
                 code: 'FORBIDDEN',
             }, 403);
         }
-        if ((caller.role === 'department_admin' || hasActiveAdminAssignment) &&
-            (caller.department_id || adminAssignmentDeptId)) {
-            const targetDeptId = adminAssignmentDeptId || caller.department_id;
-            log(`[profile] Auto-provisioning admin profile for ${caller.email}`);
-            const now = new Date().toISOString();
-            const dept = targetDeptId ? resolveDepartment(targetDeptId) : null;
-            const dbAdminPayload = {
+        console.log('[get-profile] no profile document, checking department_admins for:', caller.id, caller.email);
+        const adminColIds = Array.from(new Set([config.departmentAdminsCollectionId, '6af876910029effa1c9c', 'department_admins'].filter(Boolean)));
+        let activeAdminDoc = null;
+        for (const colId of adminColIds) {
+            try {
+                // a) Query where user_id === caller.id AND is_active === true
+                let userResult;
+                try {
+                    userResult = await databases.listDocuments(config.databaseId, colId, [
+                        Query.equal('user_id', caller.id),
+                        Query.equal('is_active', true),
+                        Query.limit(1),
+                    ]);
+                }
+                catch {
+                    userResult = await databases.listDocuments(config.databaseId, colId, [
+                        Query.equal('user_id', caller.id),
+                        Query.limit(20),
+                    ]);
+                    userResult = {
+                        ...userResult,
+                        documents: userResult.documents.filter((d) => readBooleanField(d, 'is_active') === true),
+                    };
+                    userResult.total = userResult.documents.length;
+                }
+                if (userResult.total > 0 && userResult.documents[0]) {
+                    activeAdminDoc = userResult.documents[0];
+                    break;
+                }
+                // b) If no result: query where email === caller.email AND is_active === true
+                if (caller.email) {
+                    const emailVariants = Array.from(new Set([caller.email, caller.email.trim().toLowerCase(), caller.email.trim()])).filter(Boolean);
+                    for (const emailVal of emailVariants) {
+                        let emailResult;
+                        try {
+                            emailResult = await databases.listDocuments(config.databaseId, colId, [
+                                Query.equal('email', emailVal),
+                                Query.equal('is_active', true),
+                                Query.limit(1),
+                            ]);
+                        }
+                        catch {
+                            emailResult = await databases.listDocuments(config.databaseId, colId, [
+                                Query.equal('email', emailVal),
+                                Query.limit(20),
+                            ]);
+                            emailResult = {
+                                ...emailResult,
+                                documents: emailResult.documents.filter((d) => readBooleanField(d, 'is_active') === true),
+                            };
+                            emailResult.total = emailResult.documents.length;
+                        }
+                        if (emailResult.total > 0 && emailResult.documents[0]) {
+                            activeAdminDoc = emailResult.documents[0];
+                            break;
+                        }
+                    }
+                    if (activeAdminDoc) {
+                        break;
+                    }
+                }
+            }
+            catch (err) {
+                log(`[profile] Notice: query on ${colId} failed: ${String(err)}`);
+            }
+        }
+        if (activeAdminDoc) {
+            const assignmentDeptId = typeof activeAdminDoc.department_id === 'string' && activeAdminDoc.department_id.trim()
+                ? activeAdminDoc.department_id.trim()
+                : readStringField(activeAdminDoc, 'department_id').trim() || null;
+            const resolvedDept = assignmentDeptId ? resolveDepartment(assignmentDeptId) : null;
+            const assignmentDeptName = typeof activeAdminDoc.department_name === 'string' && activeAdminDoc.department_name.trim()
+                ? activeAdminDoc.department_name.trim()
+                : readStringField(activeAdminDoc, 'department_name').trim() ||
+                    (resolvedDept ? resolvedDept.name : null);
+            const assignmentAcademicDeptId = typeof activeAdminDoc.academic_department_id === 'string' &&
+                activeAdminDoc.academic_department_id.trim()
+                ? activeAdminDoc.academic_department_id.trim()
+                : readStringField(activeAdminDoc, 'academic_department_id').trim() ||
+                    (resolvedDept && resolvedDept.is_academic ? resolvedDept.id : null);
+            const assignmentMaintenanceDeptId = typeof activeAdminDoc.maintenance_department_id === 'string' &&
+                activeAdminDoc.maintenance_department_id.trim()
+                ? activeAdminDoc.maintenance_department_id.trim()
+                : readStringField(activeAdminDoc, 'maintenance_department_id').trim() ||
+                    (resolvedDept && resolvedDept.is_maintenance ? resolvedDept.id : null);
+            const assignment = {
+                department_id: assignmentDeptId,
+                department_name: assignmentDeptName,
+                academic_department_id: assignmentAcademicDeptId,
+                maintenance_department_id: assignmentMaintenanceDeptId,
+                is_active: true,
+            };
+            const newProfileData = {
+                $id: caller.id,
                 user_id: caller.id,
                 auth_user_id: caller.id,
                 email: caller.email,
-                name: caller.name || 'Department Administrator',
-                display_name: caller.name || 'Department Administrator',
-                enrollment_no: '',
-                student_department_id: null,
-                phone_number: '',
                 role: 'department_admin',
+                department_id: assignment.department_id,
+                department_name: assignment.department_name,
+                academic_department_id: assignment.academic_department_id || assignment.department_id,
+                maintenance_department_id: assignment.maintenance_department_id || assignment.department_id,
+                is_active: true,
                 name_locked: true,
                 enrollment_locked: true,
                 phone_locked: true,
-                profile_status: 'complete',
-                created_at: now,
-                updated_at: now,
+                is_locked: true,
+                created_at: new Date().toISOString(),
             };
+            console.log('[get-profile] creating admin profile for:', caller.id);
+            let adminProfile = null;
             try {
-                const createdDoc = await databases.createDocument(config.databaseId, config.profilesCollectionId, ID.unique(), dbAdminPayload, []);
-                const adminProfile = buildProfileResponse(createdDoc.$id, {
-                    ...dbAdminPayload,
-                    department_id: dept?.id ?? targetDeptId ?? undefined,
-                    department_name: dept?.name ?? adminAssignmentDeptName ?? caller.department_name ?? '',
-                });
-                return res.json({
-                    success: true,
-                    data: {
-                        profile: adminProfile,
-                        is_onboarded: true,
-                    },
-                }, 200);
+                adminProfile = await databases.createDocument(config.databaseId, config.profilesCollectionId, caller.id, newProfileData);
+                console.log('[get-profile] admin profile created successfully');
             }
-            catch (adminCreateErr) {
-                log(`[profile] Could not auto-create admin doc in DB, returning computed admin profile: ${String(adminCreateErr)}`);
-                const computedProfile = buildProfileResponse(undefined, {
-                    ...dbAdminPayload,
-                    department_id: dept?.id ?? targetDeptId ?? undefined,
-                    department_name: dept?.name ?? adminAssignmentDeptName ?? caller.department_name ?? '',
-                });
-                return res.json({
-                    success: true,
-                    data: {
-                        profile: computedProfile,
-                        is_onboarded: true,
-                    },
-                }, 200);
+            catch (createErr) {
+                log(`[profile] Notice: admin profile creation failed: ${String(createErr)}`);
+                let createdOnRetry = false;
+                try {
+                    const { $id: _omittedId, ...dataWithoutId } = newProfileData;
+                    adminProfile = await databases.createDocument(config.databaseId, config.profilesCollectionId, caller.id, dataWithoutId);
+                    createdOnRetry = true;
+                    console.log('[get-profile] admin profile created successfully');
+                }
+                catch {
+                    // creation failed or document already exists
+                }
+                if (!createdOnRetry) {
+                    try {
+                        if (typeof databases.getDocument === 'function') {
+                            adminProfile = await databases.getDocument(config.databaseId, config.profilesCollectionId, caller.id);
+                        }
+                        else {
+                            const fetchRes = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', caller.id), Query.limit(1)]);
+                            if (fetchRes.total > 0 && fetchRes.documents[0]) {
+                                adminProfile = fetchRes.documents[0];
+                            }
+                        }
+                    }
+                    catch (fetchErr) {
+                        log(`[profile] Notice: getDocument failed, falling back to listDocuments: ${String(fetchErr)}`);
+                        try {
+                            const fetchRes = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', caller.id), Query.limit(1)]);
+                            if (fetchRes.total > 0 && fetchRes.documents[0]) {
+                                adminProfile = fetchRes.documents[0];
+                            }
+                        }
+                        catch {
+                            // ignore fallback fetch error
+                        }
+                    }
+                }
             }
+            const returnedProfile = {
+                ...(typeof adminProfile === 'object' && adminProfile !== null ? adminProfile : newProfileData),
+                $id: adminProfile?.$id || caller.id,
+                role: 'department_admin',
+            };
+            return res.json({
+                success: true,
+                data: {
+                    profile: returnedProfile,
+                    is_onboarded: true,
+                },
+            }, 200);
         }
         return res.json({
             success: true,

@@ -3,15 +3,23 @@ import { account } from './client';
 
 export type AppwriteUser = Models.User<Models.Preferences>;
 
-export function signInWithGoogle(
+export async function signInWithGoogle(
   redirectSuccessUrl?: string,
   redirectFailureUrl?: string
-): void {
+): Promise<void> {
   if (typeof window === 'undefined') return;
 
   const origin = window.location.origin;
   const successUrl = redirectSuccessUrl || `${origin}/auth/callback`;
   const failureUrl = redirectFailureUrl || `${origin}/sign-in?error=oauth_failed`;
+
+  // Session Cleanup: If a session is already active, explicitly delete it
+  // before starting a new OAuth flow to avoid "user_session_already_exists"
+  try {
+    await account.deleteSession('current');
+  } catch {
+    // If no session exists, deleteSession fails harmlessly
+  }
 
   account.createOAuth2Token(OAuthProvider.Google, successUrl, failureUrl);
 }
