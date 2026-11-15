@@ -187,11 +187,14 @@ export async function handleGetProfile(
 
     if (listResult.total > 0 && listResult.documents[0]) {
       const doc = listResult.documents[0];
+      const storedProfile = doc;
       const rawDocRole = readStringField(doc, 'role');
-      if (
-        (caller.role === 'principal' && rawDocRole !== 'principal') ||
-        (caller.role === 'student' && rawDocRole === 'principal')
-      ) {
+      if (!storedProfile.role && rawDocRole) {
+        (storedProfile as any).role = rawDocRole;
+      }
+      const storedRole = (storedProfile?.role || rawDocRole || undefined) as UserRole | undefined;
+
+      if (caller.role === 'principal' && rawDocRole !== 'principal') {
         return res.json(
           {
             success: false,
@@ -205,21 +208,39 @@ export async function handleGetProfile(
       // Check principal role via flag or record
       const isPrincipal =
         caller.role === 'principal' ||
+        storedRole === 'principal' ||
         rawDocRole === 'principal' ||
         readBooleanField(doc, 'is_principal') === true;
 
-      // 2 & 3. Derive role entirely from server-side trusted records (admin assignment / principal / student)
-      let effectiveRole: UserRole = resolveUserRole(caller.role);
+      // 2 & 3. Derive role with strict preservation of stored admin roles:
+      // effectiveRole = storedProfile.role || derivedRole
+      // If stored profile document has role: 'department_admin' OR role: 'principal' — NEVER overwrite it with 'student'.
+      // Only set role: 'student' if stored role is null, undefined, or already 'student'.
+      let derivedRole: UserRole = resolveUserRole(caller.role);
       if (isPrincipal) {
-        effectiveRole = 'principal';
+        derivedRole = 'principal';
       } else if (hasActiveAdminAssignment || caller.role === 'department_admin') {
-        effectiveRole = 'department_admin';
+        derivedRole = 'department_admin';
       } else {
+        derivedRole = 'student';
+      }
+
+      let effectiveRole: UserRole;
+      if (storedProfile?.role === 'department_admin' || storedProfile?.role === 'principal') {
+        effectiveRole = storedProfile.role;
+      } else if (rawDocRole === 'department_admin' || rawDocRole === 'principal') {
+        effectiveRole = rawDocRole as UserRole;
+      } else if (derivedRole === 'department_admin' || derivedRole === 'principal') {
+        effectiveRole = derivedRole;
+      } else {
+        // Only set role: 'student' if stored role is null, undefined, or already 'student'
         effectiveRole = 'student';
       }
 
+      console.log('[get-profile] stored role:', storedProfile?.role);
+      console.log('[get-profile] effective role:', effectiveRole);
+
       const isCallerAdmin = effectiveRole === 'department_admin';
-      const isStaleAdminRole = effectiveRole === 'student' && rawDocRole === 'department_admin';
 
       const legacyLocked = readBooleanField(doc, 'is_locked');
       const rawNameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
@@ -247,11 +268,14 @@ export async function handleGetProfile(
         resolvedStudentDept.is_active
           ? (resolvedStudentDept.id as AcademicDepartmentId)
           : null;
+
+      const rawDocDeptId = readStringField(doc, 'department_id');
+      const resolvedStoredDept = resolveDepartment(rawDocDeptId) || resolveDepartment(rawStudentDeptId);
       const effectiveDeptId: DepartmentId | null = isCallerAdmin
-        ? (adminAssignmentDeptId ?? callerDept?.id ?? caller.department_id ?? null)
+        ? (adminAssignmentDeptId ?? callerDept?.id ?? caller.department_id ?? resolvedStoredDept?.id ?? (rawDocDeptId ? (rawDocDeptId as DepartmentId) : null))
         : effectiveStudentDeptId;
       const effectiveDeptName = isCallerAdmin
-        ? (adminAssignmentDeptName || callerDept?.name || caller.department_name || '')
+        ? (adminAssignmentDeptName || callerDept?.name || caller.department_name || resolvedStoredDept?.name || readStringField(doc, 'department_name') || '')
         : effectiveStudentDeptId && resolvedStudentDept
         ? resolvedStudentDept.name
         : '';
@@ -265,12 +289,9 @@ export async function handleGetProfile(
           PHONE_NUMBER_REGEX.test(phoneNumber)
       );
 
-      const nameLocked =
-        isStaleAdminRole && !hasValidStudentOnboarding ? false : rawNameLocked;
-      const enrollmentLocked =
-        isStaleAdminRole && !hasValidStudentOnboarding ? false : rawEnrollmentLocked;
-      const phoneLocked =
-        isStaleAdminRole && !hasValidStudentOnboarding ? false : rawPhoneLocked;
+      const nameLocked = rawNameLocked;
+      const enrollmentLocked = rawEnrollmentLocked;
+      const phoneLocked = rawPhoneLocked;
 
       const isOnboarded =
         effectiveRole === 'department_admin' || effectiveRole === 'principal'
@@ -278,8 +299,14 @@ export async function handleGetProfile(
           : hasValidStudentOnboarding;
 
       const rawStatus = readStringField(doc, 'profile_status');
+      // Incomplete onboarding applies only to students, not admins.
+      // If profile_status is 'incomplete', the code must NOT reset role to student.
       const profileStatus: ProfileStatus =
-        rawStatus === 'pending_verification' || rawStatus === 'rejected'
+        effectiveRole === 'department_admin' || effectiveRole === 'principal'
+          ? rawStatus === 'pending_verification' || rawStatus === 'rejected'
+            ? rawStatus
+            : 'complete'
+          : rawStatus === 'pending_verification' || rawStatus === 'rejected'
           ? rawStatus
           : isOnboarded
           ? 'complete'
@@ -320,29 +347,6 @@ export async function handleGetProfile(
           log(`[profile] Synchronized existing document ${doc.$id} to department_admin`);
         } catch (syncErr) {
           log(`[profile] Notice: Could not sync admin role to existing doc: ${String(syncErr)}`);
-        }
-      } else if (isStaleAdminRole) {
-        try {
-          await databases.updateDocument(
-            config.databaseId,
-            config.profilesCollectionId,
-            doc.$id,
-            {
-              role: 'student',
-              ...(!hasValidStudentOnboarding
-                ? {
-                    name_locked: false,
-                    enrollment_locked: false,
-                    phone_locked: false,
-                    profile_status: 'incomplete',
-                  }
-                : {}),
-              updated_at: new Date().toISOString(),
-            }
-          );
-          log(`[profile] Downgraded stale department_admin role on profile ${doc.$id} to student`);
-        } catch (syncErr) {
-          log(`[profile] Notice: Could not sync revoked admin role on profile: ${String(syncErr)}`);
         }
       }
 
