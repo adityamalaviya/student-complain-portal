@@ -113,11 +113,43 @@ export async function verifyCaller(
 
   // 4. Authoritative database-backed Department Admin assignment verification (fail closed on DB errors)
   try {
-    const adminRes = await databases.listDocuments(
-      config.databaseId,
-      config.departmentAdminsCollectionId,
-      [Query.equal('user_id', user.$id), Query.limit(100)]
-    );
+    let adminColId = config.departmentAdminsCollectionId;
+    let adminRes;
+    try {
+      adminRes = await databases.listDocuments(
+        config.databaseId,
+        adminColId,
+        [Query.equal('user_id', user.$id), Query.limit(100)]
+      );
+    } catch (initialErr: any) {
+      const errStr = String(initialErr?.message || initialErr);
+      const isNotFound = errStr.includes('could not be found') || initialErr?.code === 404;
+
+      if (adminColId === 'department_admins' && isNotFound) {
+        log(`[auth] Notice: 'department_admins' collection not found; attempting fallback to '6af876910029effa1c9c'`);
+        adminColId = '6af876910029effa1c9c';
+        try {
+          adminRes = await databases.listDocuments(
+            config.databaseId,
+            adminColId,
+            [Query.equal('user_id', user.$id), Query.limit(100)]
+          );
+        } catch (fallbackErr: any) {
+          const fallbackStr = String(fallbackErr?.message || fallbackErr);
+          if (fallbackStr.includes('could not be found') || fallbackErr?.code === 404) {
+            log(`[auth] Notice: No department_admins collection found; proceeding with empty admin assignments`);
+            adminRes = { total: 0, documents: [] };
+          } else {
+            throw fallbackErr;
+          }
+        }
+      } else if (isNotFound) {
+        log(`[auth] Notice: Collection '${adminColId}' not found; proceeding with empty admin assignments`);
+        adminRes = { total: 0, documents: [] };
+      } else {
+        throw initialErr;
+      }
+    }
 
     let candidateDocs = adminRes.documents;
     const normalizedCallerEmail = (user.email || '').trim().toLowerCase();
@@ -127,7 +159,7 @@ export async function verifyCaller(
       try {
         const emailRes = await databases.listDocuments(
           config.databaseId,
-          config.departmentAdminsCollectionId,
+          adminColId,
           [Query.equal('email', normalizedCallerEmail), Query.limit(100)]
         );
         if (emailRes.total > 0) {
@@ -182,7 +214,7 @@ export async function verifyCaller(
         try {
           await databases.updateDocument(
             config.databaseId,
-            config.departmentAdminsCollectionId,
+            adminColId,
             doc.$id,
             { user_id: user.$id }
           );
