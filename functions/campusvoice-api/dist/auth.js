@@ -84,24 +84,7 @@ export async function verifyCaller(context, payload, deps) {
         catch (initialErr) {
             const errStr = String(initialErr?.message || initialErr);
             const isNotFound = errStr.includes('could not be found') || initialErr?.code === 404;
-            if (adminColId === 'department_admins' && isNotFound) {
-                log(`[auth] Notice: 'department_admins' collection not found; attempting fallback to '6af876910029effa1c9c'`);
-                adminColId = '6af876910029effa1c9c';
-                try {
-                    adminRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('user_id', user.$id), Query.limit(100)]);
-                }
-                catch (fallbackErr) {
-                    const fallbackStr = String(fallbackErr?.message || fallbackErr);
-                    if (fallbackStr.includes('could not be found') || fallbackErr?.code === 404) {
-                        log(`[auth] Notice: No department_admins collection found; proceeding with empty admin assignments`);
-                        adminRes = { total: 0, documents: [] };
-                    }
-                    else {
-                        throw fallbackErr;
-                    }
-                }
-            }
-            else if (isNotFound) {
+            if (isNotFound) {
                 log(`[auth] Notice: Collection '${adminColId}' not found; proceeding with empty admin assignments`);
                 adminRes = { total: 0, documents: [] };
             }

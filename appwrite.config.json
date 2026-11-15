@@ -674,7 +674,7 @@
             ]
         },
         {
-            "$id": "6af876910029effa1c9c",
+            "$id": "department_admins",
             "$permissions": [
                 "read(\"any\")"
             ],

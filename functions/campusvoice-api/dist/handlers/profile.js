@@ -42,219 +42,13 @@ export async function handleGetProfile(context, caller, deps) {
     try {
         const config = getAppwriteConfig();
         const databases = deps?.databases ?? getServerClient().databases;
-        const listResult = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', caller.id), Query.limit(1)]);
-        // 1. Check if user has an active assignment in department_admin_assignments (or equivalent collection)
-        const adminColId = config.departmentAdminsCollectionId || '6af876910029effa1c9c';
-        let hasActiveAdminAssignment = false;
-        let adminAssignmentDeptId = null;
-        let adminAssignmentDeptName = '';
-        try {
-            const adminRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('user_id', caller.id), Query.limit(100)]);
-            let candidateDocs = adminRes.documents;
-            if (candidateDocs.length === 0 && caller.email) {
-                try {
-                    const emailRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('email', caller.email.trim().toLowerCase()), Query.limit(100)]);
-                    if (emailRes.total > 0) {
-                        candidateDocs = emailRes.documents;
-                    }
-                }
-                catch {
-                    // ignore email query fallback error
-                }
-            }
-            for (const aDoc of candidateDocs) {
-                if (readBooleanField(aDoc, 'is_active') === true) {
-                    hasActiveAdminAssignment = true;
-                    const dept = resolveDepartment(readStringField(aDoc, 'department_id'));
-                    if (dept) {
-                        adminAssignmentDeptId = dept.id;
-                        adminAssignmentDeptName = dept.name;
-                    }
-                    break;
-                }
-            }
-        }
-        catch (adminErr) {
-            log(`[profile] Notice: query on ${adminColId} failed: ${String(adminErr)}`);
-            if (adminColId !== 'department_admin_assignments') {
-                try {
-                    const fallbackRes = await databases.listDocuments(config.databaseId, 'department_admin_assignments', [Query.equal('user_id', caller.id), Query.limit(100)]);
-                    for (const aDoc of fallbackRes.documents) {
-                        if (readBooleanField(aDoc, 'is_active') === true) {
-                            hasActiveAdminAssignment = true;
-                            const dept = resolveDepartment(readStringField(aDoc, 'department_id'));
-                            if (dept) {
-                                adminAssignmentDeptId = dept.id;
-                                adminAssignmentDeptName = dept.name;
-                            }
-                            break;
-                        }
-                    }
-                }
-                catch {
-                    // ignore fallback error
-                }
-            }
-        }
-        if (!hasActiveAdminAssignment &&
-            Array.isArray(caller.admin_assignments) &&
-            caller.admin_assignments.length > 0) {
-            const active = caller.admin_assignments.find((a) => a.is_active === true);
-            if (active) {
-                hasActiveAdminAssignment = true;
-                const dept = resolveDepartment(active.department_id);
-                if (dept) {
-                    adminAssignmentDeptId = dept.id;
-                    adminAssignmentDeptName = dept.name;
-                }
-            }
-        }
-        if (listResult.total > 0 && listResult.documents[0]) {
-            const doc = listResult.documents[0];
-            const rawDocRole = readStringField(doc, 'role');
-            if ((caller.role === 'principal' && rawDocRole !== 'principal') ||
-                (caller.role === 'student' && rawDocRole === 'principal')) {
-                return res.json({
-                    success: false,
-                    error: 'Forbidden: Role mismatch.',
-                    code: 'FORBIDDEN',
-                }, 403);
-            }
-            // Check principal role via flag or record
-            const isPrincipal = caller.role === 'principal' ||
-                rawDocRole === 'principal' ||
-                readBooleanField(doc, 'is_principal') === true;
-            // 2 & 3. Derive role entirely from server-side trusted records (admin assignment / principal / student)
-            let effectiveRole = resolveUserRole(caller.role);
-            if (isPrincipal) {
-                effectiveRole = 'principal';
-            }
-            else if (hasActiveAdminAssignment || caller.role === 'department_admin') {
-                effectiveRole = 'department_admin';
-            }
-            else {
-                effectiveRole = 'student';
-            }
-            const isCallerAdmin = effectiveRole === 'department_admin';
-            const isStaleAdminRole = effectiveRole === 'student' && rawDocRole === 'department_admin';
-            const legacyLocked = readBooleanField(doc, 'is_locked');
-            const rawNameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
-            const rawEnrollmentLocked = readBooleanField(doc, 'enrollment_locked') ?? Boolean(legacyLocked);
-            const phoneNumber = readStringField(doc, 'phone_number').trim();
-            const rawPhoneLocked = readBooleanField(doc, 'phone_locked') ??
-                Boolean(legacyLocked && PHONE_NUMBER_REGEX.test(phoneNumber));
-            const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
-            const rawStudentDeptId = readStringField(doc, 'student_department_id');
-            const rawLegacyDeptCode = readStringField(doc, 'department_code');
-            const resolvedStudentDept = resolveDepartment(rawStudentDeptId) ||
-                (!rawStudentDeptId && enrollmentNo.length === 12
-                    ? resolveLegacyDepartmentCode(rawLegacyDeptCode)
-                    : null);
-            const callerDept = caller.department_id ? resolveDepartment(caller.department_id) : null;
-            const effectiveStudentDeptId = effectiveRole === 'student' &&
-                resolvedStudentDept &&
-                resolvedStudentDept.is_academic &&
-                resolvedStudentDept.is_active
-                ? resolvedStudentDept.id
-                : null;
-            const effectiveDeptId = isCallerAdmin
-                ? (adminAssignmentDeptId ?? callerDept?.id ?? caller.department_id ?? null)
-                : effectiveStudentDeptId;
-            const effectiveDeptName = isCallerAdmin
-                ? (adminAssignmentDeptName || callerDept?.name || caller.department_name || '')
-                : effectiveStudentDeptId && resolvedStudentDept
-                    ? resolvedStudentDept.name
-                    : '';
-            const hasValidStudentOnboarding = Boolean(rawNameLocked &&
-                rawEnrollmentLocked &&
-                rawPhoneLocked &&
-                enrollmentNo.length === 12 &&
-                effectiveStudentDeptId &&
-                PHONE_NUMBER_REGEX.test(phoneNumber));
-            const nameLocked = isStaleAdminRole && !hasValidStudentOnboarding ? false : rawNameLocked;
-            const enrollmentLocked = isStaleAdminRole && !hasValidStudentOnboarding ? false : rawEnrollmentLocked;
-            const phoneLocked = isStaleAdminRole && !hasValidStudentOnboarding ? false : rawPhoneLocked;
-            const isOnboarded = effectiveRole === 'department_admin' || effectiveRole === 'principal'
-                ? true
-                : hasValidStudentOnboarding;
-            const rawStatus = readStringField(doc, 'profile_status');
-            const profileStatus = rawStatus === 'pending_verification' || rawStatus === 'rejected'
-                ? rawStatus
-                : isOnboarded
-                    ? 'complete'
-                    : 'incomplete';
-            const profile = buildProfileResponse(doc.$id, {
-                user_id: readStringField(doc, 'user_id') || readStringField(doc, 'auth_user_id') || caller.id,
-                auth_user_id: readStringField(doc, 'auth_user_id') || caller.id,
-                email: readStringField(doc, 'email') || caller.email,
-                name: readStringField(doc, 'name') || readStringField(doc, 'display_name') || caller.name,
-                display_name: readStringField(doc, 'display_name') || readStringField(doc, 'name') || caller.name,
-                enrollment_no: enrollmentNo,
-                student_department_id: effectiveStudentDeptId,
-                department_id: effectiveDeptId,
-                phone_number: phoneNumber,
-                role: effectiveRole,
-                profile_status: profileStatus,
-                name_locked: nameLocked,
-                enrollment_locked: enrollmentLocked,
-                phone_locked: phoneLocked,
-                department_name: effectiveDeptName,
-                created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-                updated_at: readStringField(doc, 'updated_at') || doc.$updatedAt,
-            });
-            if (isCallerAdmin && rawDocRole !== 'department_admin' && rawDocRole !== 'principal') {
-                try {
-                    await databases.updateDocument(config.databaseId, config.profilesCollectionId, doc.$id, {
-                        role: 'department_admin',
-                        updated_at: new Date().toISOString(),
-                    });
-                    log(`[profile] Synchronized existing document ${doc.$id} to department_admin`);
-                }
-                catch (syncErr) {
-                    log(`[profile] Notice: Could not sync admin role to existing doc: ${String(syncErr)}`);
-                }
-            }
-            else if (isStaleAdminRole) {
-                try {
-                    await databases.updateDocument(config.databaseId, config.profilesCollectionId, doc.$id, {
-                        role: 'student',
-                        ...(!hasValidStudentOnboarding
-                            ? {
-                                name_locked: false,
-                                enrollment_locked: false,
-                                phone_locked: false,
-                                profile_status: 'incomplete',
-                            }
-                            : {}),
-                        updated_at: new Date().toISOString(),
-                    });
-                    log(`[profile] Downgraded stale department_admin role on profile ${doc.$id} to student`);
-                }
-                catch (syncErr) {
-                    log(`[profile] Notice: Could not sync revoked admin role on profile: ${String(syncErr)}`);
-                }
-            }
-            return res.json({
-                success: true,
-                data: {
-                    profile,
-                    is_onboarded: isOnboarded,
-                },
-            }, 200);
-        }
-        if (caller.role === 'principal') {
-            return res.json({
-                success: false,
-                error: 'Forbidden: Principal profile is required.',
-                code: 'FORBIDDEN',
-            }, 403);
-        }
-        console.log('[get-profile] no profile document, checking department_admins for:', caller.id, caller.email);
-        const adminColIds = Array.from(new Set([config.departmentAdminsCollectionId, '6af876910029effa1c9c', 'department_admins'].filter(Boolean)));
-        let activeAdminDoc = null;
+        // 1. After authenticating caller, ALWAYS query department_admins:
+        // - Query where user_id === caller.id AND is_active === true
+        // - If not found: query where email === caller.email AND is_active === true
+        const adminColIds = Array.from(new Set([config.departmentAdminsCollectionId, 'department_admins'].filter(Boolean)));
+        let adminAssignment = null;
         for (const colId of adminColIds) {
             try {
-                // a) Query where user_id === caller.id AND is_active === true
                 let userResult;
                 try {
                     userResult = await databases.listDocuments(config.databaseId, colId, [
@@ -275,10 +69,9 @@ export async function handleGetProfile(context, caller, deps) {
                     userResult.total = userResult.documents.length;
                 }
                 if (userResult.total > 0 && userResult.documents[0]) {
-                    activeAdminDoc = userResult.documents[0];
+                    adminAssignment = userResult.documents[0];
                     break;
                 }
-                // b) If no result: query where email === caller.email AND is_active === true
                 if (caller.email) {
                     const emailVariants = Array.from(new Set([caller.email, caller.email.trim().toLowerCase(), caller.email.trim()])).filter(Boolean);
                     for (const emailVal of emailVariants) {
@@ -302,11 +95,11 @@ export async function handleGetProfile(context, caller, deps) {
                             emailResult.total = emailResult.documents.length;
                         }
                         if (emailResult.total > 0 && emailResult.documents[0]) {
-                            activeAdminDoc = emailResult.documents[0];
+                            adminAssignment = emailResult.documents[0];
                             break;
                         }
                     }
-                    if (activeAdminDoc) {
+                    if (adminAssignment) {
                         break;
                     }
                 }
@@ -315,32 +108,156 @@ export async function handleGetProfile(context, caller, deps) {
                 log(`[profile] Notice: query on ${colId} failed: ${String(err)}`);
             }
         }
-        if (activeAdminDoc) {
-            const assignmentDeptId = typeof activeAdminDoc.department_id === 'string' && activeAdminDoc.department_id.trim()
-                ? activeAdminDoc.department_id.trim()
-                : readStringField(activeAdminDoc, 'department_id').trim() || null;
-            const resolvedDept = assignmentDeptId ? resolveDepartment(assignmentDeptId) : null;
-            const assignmentDeptName = typeof activeAdminDoc.department_name === 'string' && activeAdminDoc.department_name.trim()
-                ? activeAdminDoc.department_name.trim()
-                : readStringField(activeAdminDoc, 'department_name').trim() ||
-                    (resolvedDept ? resolvedDept.name : null);
-            const assignmentAcademicDeptId = typeof activeAdminDoc.academic_department_id === 'string' &&
-                activeAdminDoc.academic_department_id.trim()
-                ? activeAdminDoc.academic_department_id.trim()
-                : readStringField(activeAdminDoc, 'academic_department_id').trim() ||
-                    (resolvedDept && resolvedDept.is_academic ? resolvedDept.id : null);
-            const assignmentMaintenanceDeptId = typeof activeAdminDoc.maintenance_department_id === 'string' &&
-                activeAdminDoc.maintenance_department_id.trim()
-                ? activeAdminDoc.maintenance_department_id.trim()
-                : readStringField(activeAdminDoc, 'maintenance_department_id').trim() ||
-                    (resolvedDept && resolvedDept.is_maintenance ? resolvedDept.id : null);
-            const assignment = {
-                department_id: assignmentDeptId,
-                department_name: assignmentDeptName,
-                academic_department_id: assignmentAcademicDeptId,
-                maintenance_department_id: assignmentMaintenanceDeptId,
-                is_active: true,
-            };
+        if (!adminAssignment &&
+            Array.isArray(caller.admin_assignments) &&
+            caller.admin_assignments.length > 0) {
+            const active = caller.admin_assignments.find((a) => a.is_active === true);
+            if (active) {
+                adminAssignment = active;
+            }
+        }
+        const rawAssignmentDeptId = adminAssignment
+            ? typeof adminAssignment.department_id === 'string' && adminAssignment.department_id.trim()
+                ? adminAssignment.department_id.trim()
+                : readStringField(adminAssignment, 'department_id').trim() || null
+            : null;
+        const resolvedDept = rawAssignmentDeptId ? resolveDepartment(rawAssignmentDeptId) : null;
+        const assignmentDeptId = resolvedDept
+            ? resolvedDept.id
+            : rawAssignmentDeptId;
+        const assignmentDeptName = adminAssignment
+            ? typeof adminAssignment.department_name === 'string' && adminAssignment.department_name.trim()
+                ? adminAssignment.department_name.trim()
+                : readStringField(adminAssignment, 'department_name').trim() ||
+                    (resolvedDept ? resolvedDept.name : null)
+            : null;
+        const assignmentAcademicDeptId = adminAssignment
+            ? typeof adminAssignment.academic_department_id === 'string' &&
+                adminAssignment.academic_department_id.trim()
+                ? adminAssignment.academic_department_id.trim()
+                : readStringField(adminAssignment, 'academic_department_id').trim() ||
+                    (resolvedDept && resolvedDept.is_academic ? resolvedDept.id : null)
+            : null;
+        const assignmentMaintenanceDeptId = adminAssignment
+            ? typeof adminAssignment.maintenance_department_id === 'string' &&
+                adminAssignment.maintenance_department_id.trim()
+                ? adminAssignment.maintenance_department_id.trim()
+                : readStringField(adminAssignment, 'maintenance_department_id').trim() ||
+                    (resolvedDept && resolvedDept.is_maintenance ? resolvedDept.id : null)
+            : null;
+        const assignment = {
+            department_id: assignmentDeptId,
+            department_name: assignmentDeptName,
+            academic_department_id: assignmentAcademicDeptId,
+            maintenance_department_id: assignmentMaintenanceDeptId,
+            is_active: true,
+        };
+        // 2. Derive role:
+        const effectiveRole = adminAssignment ? 'department_admin' : 'student';
+        // 6. Add these logs:
+        console.log('[get-profile] caller email:', caller.email);
+        console.log('[get-profile] admin assignment found:', !!adminAssignment);
+        console.log('[get-profile] effective role:', effectiveRole);
+        const listResult = await databases.listDocuments(config.databaseId, config.profilesCollectionId, [Query.equal('user_id', caller.id), Query.limit(1)]);
+        // 3. If profile document exists:
+        if (listResult.total > 0 && listResult.documents[0]) {
+            const doc = listResult.documents[0];
+            const isCallerAdmin = effectiveRole === 'department_admin';
+            // Update its role field to effectiveRole
+            if (readStringField(doc, 'role') !== effectiveRole) {
+                try {
+                    await databases.updateDocument(config.databaseId, config.profilesCollectionId, doc.$id, {
+                        role: effectiveRole,
+                        updated_at: new Date().toISOString(),
+                    });
+                    log(`[profile] Updated profile ${doc.$id} role to ${effectiveRole}`);
+                }
+                catch (syncErr) {
+                    log(`[profile] Notice: Could not sync effectiveRole to profile doc: ${String(syncErr)}`);
+                }
+            }
+            const legacyLocked = readBooleanField(doc, 'is_locked');
+            const rawNameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
+            const rawEnrollmentLocked = readBooleanField(doc, 'enrollment_locked') ?? Boolean(legacyLocked);
+            const phoneNumber = readStringField(doc, 'phone_number').trim();
+            const rawPhoneLocked = readBooleanField(doc, 'phone_locked') ??
+                Boolean(legacyLocked && PHONE_NUMBER_REGEX.test(phoneNumber));
+            const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
+            const rawStudentDeptId = readStringField(doc, 'student_department_id');
+            const rawLegacyDeptCode = readStringField(doc, 'department_code');
+            const resolvedStudentDept = resolveDepartment(rawStudentDeptId) ||
+                (!rawStudentDeptId && enrollmentNo.length === 12
+                    ? resolveLegacyDepartmentCode(rawLegacyDeptCode)
+                    : null);
+            const callerDept = caller.department_id ? resolveDepartment(caller.department_id) : null;
+            const effectiveStudentDeptId = effectiveRole === 'student' &&
+                resolvedStudentDept &&
+                resolvedStudentDept.is_academic &&
+                resolvedStudentDept.is_active
+                ? resolvedStudentDept.id
+                : null;
+            const rawDocDeptId = readStringField(doc, 'department_id');
+            const resolvedStoredDept = resolveDepartment(rawDocDeptId) || resolveDepartment(rawStudentDeptId);
+            const effectiveDeptId = isCallerAdmin
+                ? (assignment.department_id ?? callerDept?.id ?? caller.department_id ?? resolvedStoredDept?.id ?? (rawDocDeptId ? rawDocDeptId : null))
+                : effectiveStudentDeptId;
+            const effectiveDeptName = isCallerAdmin
+                ? (assignment.department_name || callerDept?.name || caller.department_name || resolvedStoredDept?.name || readStringField(doc, 'department_name') || '')
+                : effectiveStudentDeptId && resolvedStudentDept
+                    ? resolvedStudentDept.name
+                    : '';
+            const hasValidStudentOnboarding = Boolean(rawNameLocked &&
+                rawEnrollmentLocked &&
+                rawPhoneLocked &&
+                enrollmentNo.length === 12 &&
+                effectiveStudentDeptId &&
+                PHONE_NUMBER_REGEX.test(phoneNumber));
+            const nameLocked = isCallerAdmin ? true : rawNameLocked;
+            const enrollmentLocked = isCallerAdmin ? true : rawEnrollmentLocked;
+            const phoneLocked = isCallerAdmin ? true : rawPhoneLocked;
+            // is_onboarded: true for admin, check fields for student
+            const isOnboarded = isCallerAdmin ? true : hasValidStudentOnboarding;
+            const rawStatus = readStringField(doc, 'profile_status');
+            const profileStatus = isCallerAdmin
+                ? rawStatus === 'pending_verification' || rawStatus === 'rejected'
+                    ? rawStatus
+                    : 'complete'
+                : rawStatus === 'pending_verification' || rawStatus === 'rejected'
+                    ? rawStatus
+                    : isOnboarded
+                        ? 'complete'
+                        : 'incomplete';
+            const profile = buildProfileResponse(doc.$id, {
+                user_id: readStringField(doc, 'user_id') || readStringField(doc, 'auth_user_id') || caller.id,
+                auth_user_id: readStringField(doc, 'auth_user_id') || caller.id,
+                email: readStringField(doc, 'email') || caller.email,
+                name: readStringField(doc, 'name') || readStringField(doc, 'display_name') || caller.name,
+                display_name: readStringField(doc, 'display_name') || readStringField(doc, 'name') || caller.name,
+                enrollment_no: enrollmentNo,
+                student_department_id: effectiveStudentDeptId,
+                department_id: effectiveDeptId,
+                phone_number: phoneNumber,
+                role: effectiveRole,
+                profile_status: profileStatus,
+                name_locked: nameLocked,
+                enrollment_locked: enrollmentLocked,
+                phone_locked: phoneLocked,
+                department_name: effectiveDeptName,
+                created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+                updated_at: readStringField(doc, 'updated_at') || doc.$updatedAt,
+            });
+            return res.json({
+                success: true,
+                data: {
+                    profile,
+                    is_onboarded: isOnboarded,
+                },
+            }, 200);
+        }
+        // 4. If NO profile document exists:
+        // - For admin: create profile document with role: 'department_admin' and is_onboarded: true
+        // - For student: return { profile: null, is_onboarded: false } so frontend redirects to onboarding
+        if (effectiveRole === 'department_admin') {
             const newProfileData = {
                 $id: caller.id,
                 user_id: caller.id,
@@ -349,13 +266,13 @@ export async function handleGetProfile(context, caller, deps) {
                 role: 'department_admin',
                 department_id: assignment.department_id,
                 department_name: assignment.department_name,
-                academic_department_id: assignment.academic_department_id || assignment.department_id,
-                maintenance_department_id: assignment.maintenance_department_id || assignment.department_id,
+                academic_department_id: assignment.academic_department_id,
+                maintenance_department_id: assignment.maintenance_department_id,
                 is_active: true,
+                is_locked: true,
                 name_locked: true,
                 enrollment_locked: true,
                 phone_locked: true,
-                is_locked: true,
                 created_at: new Date().toISOString(),
             };
             console.log('[get-profile] creating admin profile for:', caller.id);
