@@ -385,15 +385,6 @@ async function resolveDepartmentAdminsCollectionId() {
     // Not found under 'department_admins'
   }
 
-  // Check if known existing collection ID 'department_admins' exists
-  try {
-    await withRetry(() => databases.getCollection(DATABASE_ID, 'department_admins'));
-    console.log(`ℹ️ Detected existing department_admins collection under ID 'department_admins'`);
-    return 'department_admins';
-  } catch {
-    // Neither exists
-  }
-
   return 'department_admins';
 }
 
