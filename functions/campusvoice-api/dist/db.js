@@ -6,14 +6,18 @@ export function getAppwriteConfig() {
     const projectId = process.env.APPWRITE_FUNCTION_PROJECT_ID ||
         process.env.APPWRITE_PROJECT_ID ||
         '';
-    const apiKey = process.env.APPWRITE_API_KEY || '';
+    const apiKey = process.env.APPWRITE_FUNCTION_API_KEY ||
+        process.env.APPWRITE_API_KEY ||
+        '';
     const databaseId = process.env.APPWRITE_DATABASE_ID || 'campusvoice';
     const profilesCollectionId = process.env.COLLECTION_PROFILES || 'profiles';
     const departmentsCollectionId = process.env.COLLECTION_DEPARTMENTS || 'departments';
     const complaintsCollectionId = process.env.COLLECTION_COMPLAINTS || 'complaints';
     const supportsCollectionId = process.env.COLLECTION_SUPPORTS || 'complaint_supports';
     const timelineCollectionId = process.env.COLLECTION_TIMELINE || 'complaint_timeline';
-    const departmentAdminsCollectionId = process.env.COLLECTION_DEPARTMENT_ADMINS || 'department_admins';
+    const departmentAdminsCollectionId = process.env.COLLECTION_DEPARTMENT_ADMINS ||
+        process.env.DEPARTMENT_ADMINS ||
+        'department_admins';
     const phoneChangeRequestsCollectionId = process.env.COLLECTION_PHONE_CHANGE_REQUESTS || 'phone_change_requests';
     const warningsCollectionId = process.env.COLLECTION_WARNINGS || 'complaint_warnings';
     const auditLogsCollectionId = process.env.COLLECTION_AUDIT_LOGS || 'audit_logs';

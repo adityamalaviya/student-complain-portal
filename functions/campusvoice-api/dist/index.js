@@ -66,6 +66,10 @@ export default async function main(context, deps) {
             }, resolvedStatus);
         }
         const caller = authResult.caller;
+        console.log('[index] step 1: parsing request body');
+        console.log('[index] step 2: extracting action');
+        console.log('[index] action value:', action);
+        console.log('[index] step 3: routing to handler');
         log(`[campusvoice-api] Routing action '${action}' for caller '${caller.id}'`);
         switch (action) {
             case 'get-profile':
@@ -119,11 +123,13 @@ export default async function main(context, deps) {
         }
     }
     catch (err) {
-        context.error(`[campusvoice-api] Top-level unhandled exception: ${String(err)}`);
+        console.error('[index] UNCAUGHT ERROR:', err);
+        console.error('[index] Error message:', err?.message);
+        console.error('[index] Error stack:', err?.stack);
         return res.json({
             success: false,
-            error: 'An internal server error occurred.',
-            code: 'INTERNAL_ERROR',
+            error: 'Internal server error',
+            code: 'UNCAUGHT_ERROR',
         }, 500);
     }
 }
