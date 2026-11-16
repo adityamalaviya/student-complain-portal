@@ -32,7 +32,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     setLoading(true);
     setError(null);
     try {
-      const currentUser = await getCurrentUser();
+      let currentUser = await getCurrentUser();
+
+      if (!currentUser) {
+        // Session may not be persisted yet — wait and retry once
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        currentUser = await getCurrentUser();
+      }
+
       setUser(currentUser);
 
       if (currentUser) {
