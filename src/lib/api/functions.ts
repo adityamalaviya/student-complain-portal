@@ -131,6 +131,7 @@ export async function apiCreateComplaint(
     location: input.location,
     description: input.description,
     priority: input.priority,
+    ...(input.department_name ? { department_name: input.department_name } : {}),
     ...(input.attachment_file_id ? { attachment_file_id: input.attachment_file_id } : {}),
   });
 }

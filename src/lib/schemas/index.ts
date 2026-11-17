@@ -134,6 +134,7 @@ export const ComplaintCreateSchema = z.object({
     .min(10, 'Description must be at least 10 characters')
     .max(2000, 'Description cannot exceed 2000 characters'),
   priority: z.enum(['low', 'medium', 'high']),
+  department_name: z.string().trim().optional(),
   attachment_file_id: z
     .string()
     .trim()
