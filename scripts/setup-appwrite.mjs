@@ -262,6 +262,7 @@ async function provisionComplaints() {
   await safeCreateStringAttribute('complaints', 'status', 32, false, 'Pending');
   await safeCreateIntegerAttribute('complaints', 'support_count', false, 1, null, 1);
   await safeCreateStringAttribute('complaints', 'last_meaningful_update_at', 64, false);
+  await safeCreateStringAttribute('complaints', 'department_name', 100, false);
   await safeCreateStringAttribute('complaints', 'attachment_file_id', 255, false);
   await safeCreateStringAttribute('complaints', 'created_at', 64, false);
   await safeCreateStringAttribute('complaints', 'updated_at', 64, false);

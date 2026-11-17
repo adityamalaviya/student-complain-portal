@@ -701,6 +701,14 @@ export async function handleCreateComplaint(context, caller, data, deps) {
         }
         // 5. Construct document with server-derived student identity and separated jurisdictions
         const now = new Date().toISOString();
+        const effectiveDepartmentName = (typeof data.department_name === 'string' && data.department_name.trim().length > 0
+            ? data.department_name.trim()
+            : null) ||
+            profile.department_name ||
+            maintenanceDept.name;
+        const enrollmentDeptCode = typeof profile.enrollment_no === 'string' && profile.enrollment_no.length === 12
+            ? profile.enrollment_no.slice(7, 9)
+            : undefined;
         const complaintData = {
             student_user_id: profile.user_id,
             student_name: profile.name,
@@ -714,6 +722,8 @@ export async function handleCreateComplaint(context, caller, data, deps) {
             status: 'Pending',
             support_count: 1,
             last_meaningful_update_at: now,
+            department_name: effectiveDepartmentName,
+            ...(enrollmentDeptCode ? { department_code: enrollmentDeptCode } : {}),
             ...(attachmentFileId ? { attachment_file_id: attachmentFileId } : {}),
             created_at: now,
             updated_at: now,

@@ -143,12 +143,15 @@ export default function RaiseComplaintPage(): React.ReactElement {
     setErrorMessage(null);
     setSuccessMessage(null);
 
+    const departmentName = academicDept?.name || profile.department_name;
+
     const baseValidation = ComplaintCreateSchema.safeParse({
       title,
       maintenance_department_id: maintenanceDeptId,
       location,
       description,
       priority,
+      ...(departmentName ? { department_name: departmentName } : {}),
     });
 
     if (!baseValidation.success) {
@@ -186,6 +189,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
       const finalValidation = ComplaintCreateSchema.safeParse({
         ...baseValidation.data,
         ...(uploadedFileId ? { attachment_file_id: uploadedFileId } : {}),
+        ...(departmentName ? { department_name: departmentName } : {}),
       });
 
       if (!finalValidation.success) {
@@ -197,7 +201,10 @@ export default function RaiseComplaintPage(): React.ReactElement {
         return;
       }
 
-      const res = await apiCreateComplaint(finalValidation.data);
+      const res = await apiCreateComplaint({
+        ...finalValidation.data,
+        ...(departmentName ? { department_name: departmentName } : {}),
+      });
 
       if (res.success && res.data) {
         setSuccessMessage('Complaint filed successfully. Redirecting to your department feed...');

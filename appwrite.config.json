@@ -438,7 +438,7 @@
                 {
                     "key": "department_code",
                     "type": "string",
-                    "required": true,
+                    "required": false,
                     "array": false,
                     "size": 10,
                     "default": null,
@@ -560,6 +560,33 @@
                     "size": 64,
                     "default": null,
                     "encrypt": false
+                },
+                {
+                    "key": "student_department_id",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 50,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "maintenance_department_id",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 50,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "last_meaningful_update_at",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
                 }
             ],
             "indexes": [
@@ -602,6 +629,28 @@
                     "status": "available",
                     "columns": [
                         "status"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "key": "idx_cmpl_student_dept",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "student_department_id"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "key": "idx_cmpl_maint_dept",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "maintenance_department_id"
                     ],
                     "orders": [
                         "ASC"
