@@ -1,5 +1,53 @@
 import dns from 'node:dns';
+import fs from 'node:fs';
 import { Client, Databases, Storage, ID, Permission, Role } from 'node-appwrite';
+
+// Load .env.local: try dotenv first, fallback to native Node process.loadEnvFile / fs parser
+function loadEnvFile(filePath = '.env.local') {
+  if (typeof process.loadEnvFile === 'function') {
+    try {
+      if (fs.existsSync(filePath)) {
+        process.loadEnvFile(filePath);
+        return;
+      }
+    } catch {
+      // Fallback to manual line parser below
+    }
+  }
+
+  try {
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx !== -1) {
+          const key = trimmed.slice(0, eqIdx).trim();
+          let val = trimmed.slice(eqIdx + 1).trim();
+          if (
+            (val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))
+          ) {
+            val = val.slice(1, -1);
+          }
+          if (process.env[key] === undefined) {
+            process.env[key] = val;
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+}
+
+try {
+  const { config } = await import('dotenv');
+  config({ path: '.env.local' });
+} catch {
+  loadEnvFile('.env.local');
+}
 
 // Ensure IPv4 first on Node.js / Windows to prevent UND_ERR_CONNECT_TIMEOUT on dual-stack hosts
 try {

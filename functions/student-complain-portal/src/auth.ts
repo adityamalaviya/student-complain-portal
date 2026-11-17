@@ -151,12 +151,28 @@ export async function verifyCaller(
               activeAdminColId = colId;
               break;
             }
-          } catch (emailQueryErr) {
-            log(`[auth] Notice: email query on ${colId} skipped: ${String(emailQueryErr)}`);
+          } catch (emailQueryErr: any) {
+            const errStr = String(emailQueryErr?.message || emailQueryErr);
+            const isNotFound =
+              errStr.includes('not found') ||
+              errStr.includes('could not be found') ||
+              emailQueryErr?.code === 404;
+            if (!isNotFound) {
+              throw emailQueryErr;
+            }
+            log(`[auth] Notice: email query on ${colId} skipped: ${errStr}`);
           }
         }
       } catch (colErr: any) {
-        log(`[auth] Notice: query on collection '${colId}' failed or not found: ${String(colErr?.message || colErr)}`);
+        const errStr = String(colErr?.message || colErr);
+        const isNotFound =
+          errStr.includes('not found') ||
+          errStr.includes('could not be found') ||
+          colErr?.code === 404;
+        if (!isNotFound) {
+          throw colErr;
+        }
+        log(`[auth] Notice: query on collection '${colId}' failed or not found: ${errStr}`);
       }
     }
 
