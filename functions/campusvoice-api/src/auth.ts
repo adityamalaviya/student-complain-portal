@@ -164,39 +164,70 @@ export async function verifyCaller(
       if (readBooleanField(doc, 'is_active') !== true) {
         continue;
       }
-      let rawScope = readStringField(doc, 'scope').trim();
-      if (!rawScope) {
-        if (readStringField(doc, 'maintenance_department_id')) {
-          rawScope = 'maintenance';
-        } else if (readStringField(doc, 'academic_department_id')) {
-          rawScope = 'academic';
+      const rawScope = readStringField(doc, 'scope').trim().toLowerCase();
+      const docDeptId = readStringField(doc, 'department_id').trim();
+      const academicDeptId = readStringField(doc, 'academic_department_id').trim();
+      const maintDeptId = readStringField(doc, 'maintenance_department_id').trim();
+
+      const scopesToAdd: AdminScope[] = [];
+
+      if (rawScope === 'academic') {
+        scopesToAdd.push('academic');
+      } else if (rawScope === 'maintenance') {
+        scopesToAdd.push('maintenance');
+      } else if (rawScope === 'both' || rawScope === 'all') {
+        scopesToAdd.push('maintenance', 'academic');
+      } else {
+        // Fallback when scope is null, empty, or unspecified
+        if (maintDeptId) {
+          scopesToAdd.push('maintenance');
+        }
+        if (academicDeptId) {
+          scopesToAdd.push('academic');
+        }
+        if (scopesToAdd.length === 0 && docDeptId) {
+          const dept = resolveDepartment(docDeptId);
+          if (dept?.is_maintenance) {
+            scopesToAdd.push('maintenance');
+          }
+          if (dept?.is_academic) {
+            scopesToAdd.push('academic');
+          }
         }
       }
-      if (rawScope !== 'academic' && rawScope !== 'maintenance') {
-        continue;
-      }
-      const scope: AdminScope = rawScope;
-      const dept = resolveDepartment(readStringField(doc, 'department_id'));
-      if (!dept || !dept.is_active) {
-        continue;
-      }
-      if (scope === 'academic' && !dept.is_academic) {
-        continue;
-      }
-      if (scope === 'maintenance' && !dept.is_maintenance) {
-        continue;
-      }
 
-      admin_assignments.push({
-        $id: doc.$id,
-        user_id: user.$id,
-        email: readStringField(doc, 'email') || user.email,
-        department_id: dept.id,
-        scope,
-        is_active: true,
-        assigned_by: readStringField(doc, 'assigned_by'),
-        created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-      });
+      for (const scope of scopesToAdd) {
+        const targetDeptId =
+          scope === 'maintenance'
+            ? maintDeptId || docDeptId
+            : academicDeptId || docDeptId;
+        const dept = resolveDepartment(targetDeptId);
+        if (!dept || !dept.is_active) {
+          continue;
+        }
+        if (scope === 'academic' && !dept.is_academic) {
+          continue;
+        }
+        if (scope === 'maintenance' && !dept.is_maintenance) {
+          continue;
+        }
+
+        const exists = admin_assignments.some(
+          (a) => a.department_id === dept.id && a.scope === scope
+        );
+        if (!exists) {
+          admin_assignments.push({
+            $id: doc.$id,
+            user_id: user.$id,
+            email: readStringField(doc, 'email') || user.email,
+            department_id: dept.id,
+            scope,
+            is_active: true,
+            assigned_by: readStringField(doc, 'assigned_by'),
+            created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+          });
+        }
+      }
 
       // Synchronize OAuth user ID to department_admins record if not yet linked
       if (docUserId !== user.$id) {

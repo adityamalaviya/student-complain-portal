@@ -76,13 +76,28 @@ export async function verifyCaller(context, payload, deps) {
     const databases = deps?.databases ?? getServerClient().databases;
     // 4. Authoritative database-backed Department Admin assignment verification (fail closed on DB errors)
     try {
-        const adminRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('user_id', user.$id), Query.limit(100)]);
+        let adminColId = config.departmentAdminsCollectionId;
+        let adminRes;
+        try {
+            adminRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('user_id', user.$id), Query.limit(100)]);
+        }
+        catch (initialErr) {
+            const errStr = String(initialErr?.message || initialErr);
+            const isNotFound = errStr.includes('could not be found') || initialErr?.code === 404;
+            if (isNotFound) {
+                log(`[auth] Notice: Collection '${adminColId}' not found; proceeding with empty admin assignments`);
+                adminRes = { total: 0, documents: [] };
+            }
+            else {
+                throw initialErr;
+            }
+        }
         let candidateDocs = adminRes.documents;
         const normalizedCallerEmail = (user.email || '').trim().toLowerCase();
         // Fallback: If user_id is not yet linked, query active assignment by verified email
         if (candidateDocs.length === 0 && normalizedCallerEmail) {
             try {
-                const emailRes = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('email', normalizedCallerEmail), Query.limit(100)]);
+                const emailRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('email', normalizedCallerEmail), Query.limit(100)]);
                 if (emailRes.total > 0) {
                     candidateDocs = emailRes.documents;
                 }
@@ -102,35 +117,70 @@ export async function verifyCaller(context, payload, deps) {
             if (readBooleanField(doc, 'is_active') !== true) {
                 continue;
             }
-            const rawScope = readStringField(doc, 'scope').trim();
-            if (rawScope !== 'academic' && rawScope !== 'maintenance') {
-                continue;
+            const rawScope = readStringField(doc, 'scope').trim().toLowerCase();
+            const docDeptId = readStringField(doc, 'department_id').trim();
+            const academicDeptId = readStringField(doc, 'academic_department_id').trim();
+            const maintDeptId = readStringField(doc, 'maintenance_department_id').trim();
+            const scopesToAdd = [];
+            if (rawScope === 'academic') {
+                scopesToAdd.push('academic');
             }
-            const scope = rawScope;
-            const dept = resolveDepartment(readStringField(doc, 'department_id'));
-            if (!dept || !dept.is_active) {
-                continue;
+            else if (rawScope === 'maintenance') {
+                scopesToAdd.push('maintenance');
             }
-            if (scope === 'academic' && !dept.is_academic) {
-                continue;
+            else if (rawScope === 'both' || rawScope === 'all') {
+                scopesToAdd.push('maintenance', 'academic');
             }
-            if (scope === 'maintenance' && !dept.is_maintenance) {
-                continue;
+            else {
+                // Fallback when scope is null, empty, or unspecified
+                if (maintDeptId) {
+                    scopesToAdd.push('maintenance');
+                }
+                if (academicDeptId) {
+                    scopesToAdd.push('academic');
+                }
+                if (scopesToAdd.length === 0 && docDeptId) {
+                    const dept = resolveDepartment(docDeptId);
+                    if (dept?.is_maintenance) {
+                        scopesToAdd.push('maintenance');
+                    }
+                    if (dept?.is_academic) {
+                        scopesToAdd.push('academic');
+                    }
+                }
             }
-            admin_assignments.push({
-                $id: doc.$id,
-                user_id: user.$id,
-                email: readStringField(doc, 'email') || user.email,
-                department_id: dept.id,
-                scope,
-                is_active: true,
-                assigned_by: readStringField(doc, 'assigned_by'),
-                created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-            });
+            for (const scope of scopesToAdd) {
+                const targetDeptId = scope === 'maintenance'
+                    ? maintDeptId || docDeptId
+                    : academicDeptId || docDeptId;
+                const dept = resolveDepartment(targetDeptId);
+                if (!dept || !dept.is_active) {
+                    continue;
+                }
+                if (scope === 'academic' && !dept.is_academic) {
+                    continue;
+                }
+                if (scope === 'maintenance' && !dept.is_maintenance) {
+                    continue;
+                }
+                const exists = admin_assignments.some((a) => a.department_id === dept.id && a.scope === scope);
+                if (!exists) {
+                    admin_assignments.push({
+                        $id: doc.$id,
+                        user_id: user.$id,
+                        email: readStringField(doc, 'email') || user.email,
+                        department_id: dept.id,
+                        scope,
+                        is_active: true,
+                        assigned_by: readStringField(doc, 'assigned_by'),
+                        created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+                    });
+                }
+            }
             // Synchronize OAuth user ID to department_admins record if not yet linked
             if (docUserId !== user.$id) {
                 try {
-                    await databases.updateDocument(config.databaseId, config.departmentAdminsCollectionId, doc.$id, { user_id: user.$id });
+                    await databases.updateDocument(config.databaseId, adminColId, doc.$id, { user_id: user.$id });
                     log(`[auth] Linked department_admins record ${doc.$id} to user ID ${user.$id}`);
                 }
                 catch (linkErr) {
