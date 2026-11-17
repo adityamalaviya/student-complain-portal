@@ -145,6 +145,7 @@ export interface PhoneChangeRequest {
   reviewed_by?: string;
   decision_reason?: string;
   permission_consumed: boolean;
+  requested_at?: string;
   created_at: string;
   updated_at: string;
 }

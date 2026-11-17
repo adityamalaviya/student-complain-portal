@@ -102,18 +102,17 @@ export default function PrincipalDashboardPage(): React.ReactElement {
     }
   }, [loading, user, isPrincipal, fetchDashboardData]);
 
-  const recentComplaints = dashboardData?.recent_complaints || [];
-
   const filteredComplaints = useMemo(() => {
+    const list = dashboardData?.recent_complaints || [];
     if (departmentFilter === 'all') {
-      return recentComplaints;
+      return list;
     }
-    return recentComplaints.filter((c) => {
+    return list.filter((c) => {
       const maintId = resolveDepartment(c.maintenance_department_id)?.id || c.maintenance_department_id;
       const studentDeptId = resolveDepartment(c.student_department_id)?.id || c.student_department_id;
       return maintId === departmentFilter || studentDeptId === departmentFilter;
     });
-  }, [recentComplaints, departmentFilter]);
+  }, [dashboardData?.recent_complaints, departmentFilter]);
 
   if (loading || !user || !isPrincipal) {
     return (

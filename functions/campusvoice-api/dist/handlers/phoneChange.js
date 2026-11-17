@@ -35,6 +35,9 @@ async function getCallerProfile(databases, userId, databaseId, profilesCollectio
     };
 }
 function toPhoneChangeModel(doc) {
+    const reqAt = readStringField(doc, 'requested_at') ||
+        readStringField(doc, 'created_at') ||
+        doc.$createdAt;
     return {
         $id: doc.$id,
         student_user_id: readStringField(doc, 'student_user_id'),
@@ -46,8 +49,12 @@ function toPhoneChangeModel(doc) {
         reviewed_by: readStringField(doc, 'reviewed_by') || undefined,
         decision_reason: readStringField(doc, 'decision_reason') || undefined,
         permission_consumed: Boolean(readBooleanField(doc, 'permission_consumed')),
-        created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-        updated_at: readStringField(doc, 'updated_at') || doc.$updatedAt,
+        requested_at: reqAt,
+        created_at: reqAt,
+        updated_at: readStringField(doc, 'reviewed_at') ||
+            readStringField(doc, 'completed_at') ||
+            readStringField(doc, 'updated_at') ||
+            doc.$updatedAt,
     };
 }
 // ----------------------------------------------------
@@ -135,8 +142,7 @@ export async function handleRequestPhoneChange(context, caller, data, deps) {
             reviewed_by: '',
             decision_reason: '',
             permission_consumed: false,
-            created_at: now,
-            updated_at: now,
+            requested_at: now,
         }, [] // Strictly empty permissions ($permissions = [])
         );
         await appendAuditLog(databases, config.databaseId, config.auditLogsCollectionId, {
@@ -405,7 +411,7 @@ export async function handleListPhoneChangeRequests(context, caller, data, deps)
     const config = getAppwriteConfig();
     const databases = deps?.databases ?? getServerClient().databases;
     try {
-        const queries = [Query.orderDesc('created_at'), Query.limit(100)];
+        const queries = [Query.orderDesc('$createdAt'), Query.limit(100)];
         if (caller.role === 'student') {
             // Students only see their own requests
             queries.push(Query.equal('student_user_id', caller.id));

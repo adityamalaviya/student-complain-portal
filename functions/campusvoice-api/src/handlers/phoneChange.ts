@@ -63,6 +63,10 @@ async function getCallerProfile(
 }
 
 function toPhoneChangeModel(doc: Models.Document): PhoneChangeRequest {
+  const reqAt =
+    readStringField(doc, 'requested_at') ||
+    readStringField(doc, 'created_at') ||
+    doc.$createdAt;
   return {
     $id: doc.$id,
     student_user_id: readStringField(doc, 'student_user_id'),
@@ -74,8 +78,13 @@ function toPhoneChangeModel(doc: Models.Document): PhoneChangeRequest {
     reviewed_by: readStringField(doc, 'reviewed_by') || undefined,
     decision_reason: readStringField(doc, 'decision_reason') || undefined,
     permission_consumed: Boolean(readBooleanField(doc, 'permission_consumed')),
-    created_at: readStringField(doc, 'created_at') || doc.$createdAt,
-    updated_at: readStringField(doc, 'updated_at') || doc.$updatedAt,
+    requested_at: reqAt,
+    created_at: reqAt,
+    updated_at:
+      readStringField(doc, 'reviewed_at') ||
+      readStringField(doc, 'completed_at') ||
+      readStringField(doc, 'updated_at') ||
+      doc.$updatedAt,
   };
 }
 
@@ -214,8 +223,7 @@ export async function handleRequestPhoneChange(
         reviewed_by: '',
         decision_reason: '',
         permission_consumed: false,
-        created_at: now,
-        updated_at: now,
+        requested_at: now,
       },
       [] // Strictly empty permissions ($permissions = [])
     );
@@ -638,7 +646,7 @@ export async function handleListPhoneChangeRequests(
   const databases = deps?.databases ?? getServerClient().databases;
 
   try {
-    const queries: string[] = [Query.orderDesc('created_at'), Query.limit(100)];
+    const queries: string[] = [Query.orderDesc('$createdAt'), Query.limit(100)];
 
     if (caller.role === 'student') {
       // Students only see their own requests

@@ -52,7 +52,7 @@ export async function handleGetPrincipalDashboard(context, caller, deps) {
     }
     try {
         // 1. Query complaints across all departments (up to 500)
-        const complaintsResult = await databases.listDocuments(config.databaseId, config.complaintsCollectionId, [Query.orderDesc('created_at'), Query.limit(500)]);
+        const complaintsResult = await databases.listDocuments(config.databaseId, config.complaintsCollectionId, [Query.orderDesc('$createdAt'), Query.limit(500)]);
         // 2. Query all warnings
         let allWarnings = [];
         try {

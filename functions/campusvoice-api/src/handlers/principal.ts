@@ -88,7 +88,7 @@ export async function handleGetPrincipalDashboard(
     const complaintsResult = await databases.listDocuments(
       config.databaseId,
       config.complaintsCollectionId,
-      [Query.orderDesc('created_at'), Query.limit(500)]
+      [Query.orderDesc('$createdAt'), Query.limit(500)]
     );
 
     // 2. Query all warnings
