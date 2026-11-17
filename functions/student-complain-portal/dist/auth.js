@@ -76,34 +76,35 @@ export async function verifyCaller(context, payload, deps) {
     const databases = deps?.databases ?? getServerClient().databases;
     // 4. Authoritative database-backed Department Admin assignment verification (fail closed on DB errors)
     try {
-        let adminColId = config.departmentAdminsCollectionId;
-        let adminRes;
-        try {
-            adminRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('user_id', user.$id), Query.limit(100)]);
-        }
-        catch (initialErr) {
-            const errStr = String(initialErr?.message || initialErr);
-            const isNotFound = errStr.includes('could not be found') || initialErr?.code === 404;
-            if (isNotFound) {
-                log(`[auth] Notice: Collection '${adminColId}' not found; proceeding with empty admin assignments`);
-                adminRes = { total: 0, documents: [] };
-            }
-            else {
-                throw initialErr;
-            }
-        }
-        let candidateDocs = adminRes.documents;
+        const adminColIds = Array.from(new Set([config.departmentAdminsCollectionId, 'department_admins'].filter(Boolean)));
+        let candidateDocs = [];
+        let activeAdminColId = config.departmentAdminsCollectionId;
         const normalizedCallerEmail = (user.email || '').trim().toLowerCase();
-        // Fallback: If user_id is not yet linked, query active assignment by verified email
-        if (candidateDocs.length === 0 && normalizedCallerEmail) {
+        for (const colId of adminColIds) {
             try {
-                const emailRes = await databases.listDocuments(config.databaseId, adminColId, [Query.equal('email', normalizedCallerEmail), Query.limit(100)]);
-                if (emailRes.total > 0) {
-                    candidateDocs = emailRes.documents;
+                const userRes = await databases.listDocuments(config.databaseId, colId, [Query.equal('user_id', user.$id), Query.limit(100)]);
+                if (userRes.total > 0 && userRes.documents.length > 0) {
+                    candidateDocs = userRes.documents;
+                    activeAdminColId = colId;
+                    break;
+                }
+                // Fallback: If user_id is not yet linked, query active assignment by verified email
+                if (normalizedCallerEmail) {
+                    try {
+                        const emailRes = await databases.listDocuments(config.databaseId, colId, [Query.equal('email', normalizedCallerEmail), Query.limit(100)]);
+                        if (emailRes.total > 0 && emailRes.documents.length > 0) {
+                            candidateDocs = emailRes.documents;
+                            activeAdminColId = colId;
+                            break;
+                        }
+                    }
+                    catch (emailQueryErr) {
+                        log(`[auth] Notice: email query on ${colId} skipped: ${String(emailQueryErr)}`);
+                    }
                 }
             }
-            catch (emailQueryErr) {
-                log(`[auth] Notice: email query on department_admins skipped or index missing: ${String(emailQueryErr)}`);
+            catch (colErr) {
+                log(`[auth] Notice: query on collection '${colId}' failed or not found: ${String(colErr?.message || colErr)}`);
             }
         }
         for (const doc of candidateDocs) {
@@ -180,7 +181,7 @@ export async function verifyCaller(context, payload, deps) {
             // Synchronize OAuth user ID to department_admins record if not yet linked
             if (docUserId !== user.$id) {
                 try {
-                    await databases.updateDocument(config.databaseId, adminColId, doc.$id, { user_id: user.$id });
+                    await databases.updateDocument(config.databaseId, activeAdminColId, doc.$id, { user_id: user.$id });
                     log(`[auth] Linked department_admins record ${doc.$id} to user ID ${user.$id}`);
                 }
                 catch (linkErr) {

@@ -492,7 +492,7 @@ function resolveAuthorizedMaintenanceDeptIds(caller) {
         if (assignment &&
             assignment.is_active === true &&
             assignment.scope === 'maintenance' &&
-            assignment.user_id === caller.id) {
+            (assignment.user_id === caller.id || !assignment.user_id)) {
             const dept = resolveDepartment(assignment.department_id);
             if (dept && dept.is_maintenance && dept.is_active) {
                 ids.add(dept.id);
