@@ -165,6 +165,22 @@ export default function AdminDashboardPage(): React.ReactElement {
     requestId: string,
     decision: 'approved' | 'rejected'
   ): Promise<void> => {
+    let decisionReason: string | undefined = undefined;
+    if (decision === 'rejected') {
+      const promptReason = window.prompt(
+        'Please provide a reason for rejecting this phone change request (min 5 characters):'
+      );
+      if (promptReason === null) {
+        return; // User cancelled
+      }
+      const trimmed = promptReason.trim();
+      if (trimmed.length < 5) {
+        setReviewError('A decision reason of at least 5 characters is required when rejecting a request.');
+        return;
+      }
+      decisionReason = trimmed;
+    }
+
     setIsReviewSubmitting(true);
     setReviewError(null);
     setReviewSuccess(null);
@@ -172,6 +188,7 @@ export default function AdminDashboardPage(): React.ReactElement {
       const res = await apiReviewPhoneChange({
         request_id: requestId,
         decision,
+        ...(decisionReason ? { decision_reason: decisionReason } : {}),
       });
       if (res.success) {
         setReviewSuccess(`Request successfully marked as ${decision}.`);
