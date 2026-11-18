@@ -78,8 +78,8 @@
       - Water/Sanitation maintenance admin receives 403 `FORBIDDEN`.
       - Principal sees all requests across departments.
 
-- [ ] **Step 1: Inspect `phoneChange.ts` for schema, error code, and failure-safety invariants**
-- [ ] **Step 2: Ensure dual-directory parity between `campusvoice-api` and `student-complain-portal`**
+- [x] **Step 1: Inspect `phoneChange.ts` for schema, error code, and failure-safety invariants**
+- [x] **Step 2: Ensure dual-directory parity between `campusvoice-api` and `student-complain-portal`**
 
 ---
 
@@ -121,9 +121,9 @@
      - Water & Sanitation maintenance admin receives 403 `FORBIDDEN`.
      - Principal sees requests across all academic departments.
 
-- [ ] **Step 1: Write automated tests in `functions/campusvoice-api/src/__tests__/complaints.test.ts`**
-- [ ] **Step 2: Mirror to `functions/student-complain-portal/src/__tests__/complaints.test.ts`**
-- [ ] **Step 3: Run backend test runner**
+- [x] **Step 1: Write automated tests in `functions/campusvoice-api/src/__tests__/complaints.test.ts`**
+- [x] **Step 2: Mirror to `functions/student-complain-portal/src/__tests__/complaints.test.ts`**
+- [x] **Step 3: Run backend test runner**
   ```bash
   npm --prefix functions/campusvoice-api run build
   npm --prefix functions/campusvoice-api test
@@ -156,9 +156,9 @@
   - Returns `delayed_complaints` with `days_delayed`, `warning_count`, `warnings`, and `is_warning_eligible`.
   - Verifies Principal cannot change complaint status (tested against `handleUpdateAdminComplaint` returning 403 `FORBIDDEN`).
 
-- [ ] **Step 1: Verify `handleGetPrincipalDashboard` and add automated tests in `complaints.test.ts`**
-- [ ] **Step 2: Mirror test and handler to `functions/student-complain-portal`**
-- [ ] **Step 3: Build and run tests**
+- [x] **Step 1: Verify `handleGetPrincipalDashboard` and add automated tests in `complaints.test.ts`**
+- [x] **Step 2: Mirror test and handler to `functions/student-complain-portal`**
+- [x] **Step 3: Build and run tests**
   ```bash
   npm --prefix functions/campusvoice-api run build
   npm --prefix functions/campusvoice-api test
@@ -187,8 +187,8 @@
   - Preserve all existing 6-department breakdown cards and recent complaints table.
   - Comply with Tailwind design tokens, dark mode variants, and `@phosphor-icons/react` exclusively.
 
-- [ ] **Step 1: Update `src/app/principal/page.tsx` to render Delayed Complaints section**
-- [ ] **Step 2: Run typecheck and lint**
+- [x] **Step 1: Update `src/app/principal/page.tsx` to render Delayed Complaints section**
+- [x] **Step 2: Run typecheck and lint**
   ```bash
   npm run typecheck
   npm run lint
@@ -217,8 +217,8 @@
     - Error and success feedback banners.
   - Strict compliance with tokens and `@phosphor-icons/react`.
 
-- [ ] **Step 1: Verify `PhoneChangeModal.tsx` and `src/app/admin/page.tsx`**
-- [ ] **Step 2: Run typecheck and lint**
+- [x] **Step 1: Verify `PhoneChangeModal.tsx` and `src/app/admin/page.tsx`**
+- [x] **Step 2: Run typecheck and lint**
   ```bash
   npm run typecheck
   npm run lint
@@ -239,19 +239,19 @@
   - `git diff --no-index functions/campusvoice-api/dist functions/student-complain-portal/dist` returns 0.
   - All unit test suites pass in both directories.
 
-- [ ] **Step 1: Build both function folders**
+- [x] **Step 1: Build both function folders**
   ```bash
   npm --prefix functions/campusvoice-api run build
   npm --prefix functions/student-complain-portal run build
   ```
-- [ ] **Step 2: Verify zero diff between both directories**
+- [x] **Step 2: Verify zero diff between both directories**
   ```bash
   git diff --no-index functions/campusvoice-api/src functions/student-complain-portal/src
   git diff --no-index functions/campusvoice-api/dist functions/student-complain-portal/dist
   ```
   Expected: Exited with code 0 (zero differences).
 
-- [ ] **Step 3: Run test suite in both directories**
+- [x] **Step 3: Run test suite in both directories**
   ```bash
   npm --prefix functions/campusvoice-api test
   npm --prefix functions/student-complain-portal test
@@ -274,8 +274,8 @@
   3. `Day 5: Phone Change Workflow - One-time permission consumption and failure-safety (failed save preserves permission and old phone)`
   4. `Day 5: Principal Governance - Cross-department visibility across all 6 departments and status mutation prohibition`
 
-- [ ] **Step 1: Add Day 5 test cases to `tests/phase5.test.mjs` without altering existing tests**
-- [ ] **Step 2: Run root test runner**
+- [x] **Step 1: Add Day 5 test cases to `tests/phase5.test.mjs` without altering existing tests**
+- [x] **Step 2: Run root test runner**
   ```bash
   npm test
   ```
@@ -292,7 +292,7 @@
 - Consumes: Day 5 completion evidence and test results
 - Produces: Updated `docs/handoff.md` and module `antigravity.md` reflecting completed Day 5 exit criteria.
 
-- [ ] **Step 1: Update `docs/handoff.md` with Day 5 completion section:**
+- [x] **Step 1: Update `docs/handoff.md` with Day 5 completion section:**
   - Date: 19 November 2026
   - Status: DAY 5 COMPLETE — PHONE-CHANGE WORKFLOW & PRINCIPAL FOUNDATION VERIFIED
   - Scope Achieved:
@@ -306,8 +306,8 @@
     8. Frontend UI verification for student modal, admin review, and principal delayed complaints oversight.
     9. Dual-directory parity verified (`0 diff`).
     10. Full test output evidence captured.
-- [ ] **Step 2: Run full workspace verification (typecheck, lint, root tests)**
-- [ ] **Step 3: Commit Day 5 work**
+- [x] **Step 2: Run full workspace verification (typecheck, lint, root tests)**
+- [x] **Step 3: Commit Day 5 work**
   ```bash
   git add .
   git commit -m "AG-055: feat(day5): implement and verify phone-change workflow and principal governance foundation"

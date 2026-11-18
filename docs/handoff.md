@@ -355,3 +355,63 @@ These are audit-report findings based on the inspected repository snapshot; reru
 - **Day 5 Workstream:** Phone-change request workflow (`phone_change_requests`), academic Department Admin review and one-time permission grant, failure safety, Water/Sanitation admin restriction, and Principal cross-department dashboard foundations.
 - **Dependencies:** Day 4 verification complete and approved. Ready to proceed with Day 5 implementation.
 
+---
+
+## 13. Day 5 Execution & Verification Handoff (Completed)
+
+**Date:** 19 November 2026  
+**Status:** DAY 5 COMPLETE — PHONE-CHANGE WORKFLOW & PRINCIPAL FOUNDATION VERIFIED  
+**Scope Achieved:** Complete verification of Day 5 Phone-Change Request Workflow (`phone_change_requests`), Academic Department Admin Review Scope, Water/Sanitation Admin Approval Prohibition, Failure-Safe One-Time Permission Consumption, Principal 6-Department Dashboard Metrics Breakdown, Delayed Grievance Oversight Table, and Dual-Directory Synchronization.
+
+### A. Summary of Scope Implemented & Verified
+1. **Student Phone-Change Request Submission (`handleRequestPhoneChange`):**
+   - Verified student caller role (`role === 'student'`).
+   - Validates profile completeness (`phone_number` and `student_department_id`).
+   - Validates reason (10–1000 characters) and requested phone number format (`/^[6-9]\d{9}$/`).
+   - Enforces single active request constraint: blocks duplicate requests if an unconsumed or pending request exists (HTTP 409 `ACTIVE_REQUEST_EXISTS`).
+   - Records structured append-only audit event (`action: 'request_phone_change'`).
+2. **Academic Admin Review Scope & Water/Sanitation Restriction (`handleReviewPhoneChange`):**
+   - Strictly validates decision (`approved` | `rejected`) and enforces minimum 5-character reason on rejection.
+   - Restricts review authority exclusively to the student's academic Department Administrator (`dept_civil`, `dept_comp`, `dept_elec`, `dept_mech`) or the Principal.
+   - Water (`dept_water`) and Sanitation (`dept_sanit`) administrators are maintenance-only and are strictly forbidden from reviewing academic phone changes (HTTP 403 `FORBIDDEN`).
+   - Cross-department academic admins are forbidden (HTTP 403 `FORBIDDEN`).
+   - Records structured append-only audit event (`action: 'review_phone_change'`).
+3. **Failure-Safe One-Time Permission Consumption (`handleCompletePhoneChange`):**
+   - Enforces student ownership; non-matching callers receive generic HTTP 404 `NOT_FOUND` (Oracle Elimination / IDOR prevention).
+   - Validates one-time permission state (`status === 'approved'` and `permission_consumed === false`).
+   - **Failure-Safety Proof:** Executes profile phone update first. If database persistence fails, the permission remains unconsumed (`permission_consumed: false`), the request remains `status: 'approved'`, and the previous phone number remains active in profile!
+   - Upon successful profile write, updates request status to `completed` and `permission_consumed: true`.
+   - Records structured audit log with PII masking (`new_phone_masked: 912****789`).
+4. **Principal Governance Foundation & Dashboard (`handleGetPrincipalDashboard`):**
+   - Restricts access strictly to verified Principal (`role === 'principal'`).
+   - Computes real-time institutional metrics across all 6 canonical departments (`dept_comp`, `dept_civil`, `dept_elec`, `dept_mech`, `dept_water`, `dept_sanit`).
+   - Categorizes delayed grievances (> 5 days elapsed) using authoritative `isDelayed`.
+   - Prohibits Principal from mutating complaint status via `handleUpdateAdminComplaint` (HTTP 403 `FORBIDDEN`).
+5. **Frontend UI Quality & Accessibility:**
+   - `src/app/principal/page.tsx`: Enhanced with a dedicated "Delayed Institutional Grievances (>5 Days)" oversight table with short IDs, maintenance badges, delay elapsed badges, and click-through navigation.
+   - `src/app/admin/page.tsx`: Verified Academic Admin Phone Requests tab with prompt for required decision reason on rejection (hidden for maintenance-only admins).
+   - `src/components/PhoneChangeModal.tsx`: Verified student modal flow from submission to completion.
+6. **Dual Function Folder Parity:**
+   - 100% byte-for-byte parity across `functions/campusvoice-api` and `functions/student-complain-portal` (`git diff --no-index` confirmed 0 diff across both `src/` and `dist/`).
+
+### B. Modified Files
+1. `functions/campusvoice-api/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+2. `functions/student-complain-portal/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+3. `src/app/principal/page.tsx`
+4. `src/app/admin/page.tsx`
+5. `tests/phase5.test.mjs`
+6. `docs/superpowers/plans/2026-11-19-day5-phone-change-and-principal-foundation.md`
+7. `docs/handoff.md`
+
+### C. Test Verification Evidence
+- **CampusVoice API Test Suite:** `npm --prefix functions/campusvoice-api test` → **45 / 45 passed** (0 failed, 0 skipped).
+- **Student Complain Portal Test Suite:** `npm --prefix functions/student-complain-portal test` → **45 / 45 passed** (0 failed, 0 skipped).
+- **Root Workspace Test Suite:** `npm test` (`node scripts/run-tests.mjs`) → **48 / 48 passed** (0 failed, 0 skipped).
+- **TypeScript Strict Compilation:** `npm run typecheck` (`tsc --noEmit`) → Exited with code 0 (zero errors).
+- **ESLint Compliance:** `npm run lint` (`next lint`) → Exited with code 0 (✔ No ESLint warnings or errors).
+- **Dual Function Directory Parity:** `git diff --no-index functions/campusvoice-api/src functions/student-complain-portal/src` and `dist` → 0 diff.
+
+### D. Next Dependencies
+- **Day 6 Workstream:** Five-day delay milestone logic refinement, manual warning issuance & responses (`complaint_warnings`), dynamic admin assignment & permission management, and system-wide append-only audit log viewer.
+- **Dependencies:** Day 5 verification complete and approved. Ready to proceed with Day 6 planning and implementation.
+
