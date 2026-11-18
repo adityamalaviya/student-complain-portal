@@ -5,6 +5,8 @@ import main from '../index.js';
 import { verifyCaller } from '../auth.js';
 import { handleGetProfile } from '../handlers/profile.js';
 import { handleCreateComplaint, handleGetAdminDashboard, handleGetComplaint, handleGetComplaintAttachment, handleGetSupportState, handleListAdminComplaints, handleListComplaints, handleSupportComplaint, handleRemoveSupport, handleUpdateAdminComplaint, handleRequestClarification, handleReplyClarification, } from '../handlers/complaints.js';
+import { handleRequestPhoneChange, handleReviewPhoneChange, handleCompletePhoneChange, handleListPhoneChangeRequests, } from '../handlers/phoneChange.js';
+import { handleGetPrincipalDashboard } from '../handlers/principal.js';
 function makeAdminAssignment(userId, departmentId, scope = 'maintenance', isActive = true) {
     return {
         $id: `da_${userId}`,
@@ -3954,4 +3956,479 @@ test('Day 4: Creator baseline support removal blocked and complete support toggl
     const data5 = resuppCtx.getResponse().body.data;
     assert.equal(data5.has_supported, true);
     assert.equal(data5.support_count, 2);
+});
+test('Day 5: handleRequestPhoneChange - Student request submission, validation, conflict guard, and audit log', async () => {
+    const { databases, collections } = createComplaintInMemoryDb({
+        profiles: [
+            {
+                $id: 'prof_comp_student_1',
+                user_id: 'usr_comp_student_1',
+                name: 'Aarav Patel',
+                enrollment_no: '246510307001',
+                student_department_id: 'dept_comp',
+                phone_number: '9876543210',
+                role: 'student',
+                name_locked: true,
+                enrollment_locked: true,
+                phone_locked: true,
+                profile_status: 'complete',
+                $permissions: [],
+            },
+            {
+                $id: 'prof_inc_student_1',
+                user_id: 'usr_inc_student_1',
+                name: 'Incomplete Student',
+                enrollment_no: '246510307002',
+                student_department_id: 'dept_comp',
+                phone_number: '',
+                role: 'student',
+                $permissions: [],
+            },
+        ],
+        phone_change_requests: [],
+        audit_logs: [],
+    });
+    const studentCaller = {
+        id: 'usr_comp_student_1',
+        email: 'aarav@college.edu',
+        name: 'Aarav Patel',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    const adminCaller = {
+        id: 'admin_comp_1',
+        email: 'admin.comp@college.edu',
+        name: 'Computer Admin',
+        role: 'department_admin',
+        department_id: 'dept_comp',
+        department_name: 'Computer Engineering',
+        admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+    };
+    // 1. Non-student caller blocked
+    const nonStudentCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(nonStudentCtx.context, adminCaller, { reason: 'Admin trying to change phone.' }, { databases });
+    assert.equal(nonStudentCtx.getResponse().statusCode, 403);
+    assert.equal(nonStudentCtx.getResponse().body.code, 'FORBIDDEN');
+    // 2. Incomplete profile caller blocked
+    const incCaller = {
+        id: 'usr_inc_student_1',
+        email: 'inc@college.edu',
+        name: 'Incomplete',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    const incCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(incCtx.context, incCaller, { reason: 'Lost my registered phone device.' }, { databases });
+    assert.equal(incCtx.getResponse().statusCode, 400);
+    assert.equal(incCtx.getResponse().body.code, 'PROFILE_INCOMPLETE');
+    // 3. Invalid reason (< 10 chars)
+    const shortReasonCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(shortReasonCtx.context, studentCaller, { reason: 'Lost sim' }, { databases });
+    assert.equal(shortReasonCtx.getResponse().statusCode, 400);
+    assert.equal(shortReasonCtx.getResponse().body.code, 'INVALID_REASON');
+    // 4. Invalid requested phone format (not 10 digits starting with 6-9)
+    const badPhoneCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(badPhoneCtx.context, studentCaller, { reason: 'Lost my primary SIM card.', requested_phone_number: '12345' }, { databases });
+    assert.equal(badPhoneCtx.getResponse().statusCode, 400);
+    assert.equal(badPhoneCtx.getResponse().body.code, 'INVALID_PHONE_NUMBER');
+    // 5. Requested phone equals current phone
+    const samePhoneCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(samePhoneCtx.context, studentCaller, { reason: 'Lost my primary SIM card.', requested_phone_number: '9876543210' }, { databases });
+    assert.equal(samePhoneCtx.getResponse().statusCode, 400);
+    assert.equal(samePhoneCtx.getResponse().body.code, 'SAME_PHONE_NUMBER');
+    // 6. Valid request creation with audit log
+    const validCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(validCtx.context, studentCaller, { reason: 'SIM card was damaged; changing to alternate personal number.', requested_phone_number: '9123456789' }, { databases });
+    assert.equal(validCtx.getResponse().statusCode, 201);
+    const data = validCtx.getResponse().body.data;
+    assert.equal(data.request.status, 'pending');
+    assert.equal(data.request.academic_department_id, 'dept_comp');
+    // Verify audit log appended
+    const auditDocs = collections.get('audit_logs') || [];
+    const reqAudit = auditDocs.find((a) => a.action === 'request_phone_change');
+    assert.ok(reqAudit, 'Audit log for request_phone_change must be recorded');
+    assert.equal(reqAudit.actor_id, studentCaller.id);
+    // 7. Duplicate active request blocked (409 Conflict)
+    const dupCtx = createComplaintMockContext();
+    await handleRequestPhoneChange(dupCtx.context, studentCaller, { reason: 'Submitting a second request while first is pending.' }, { databases });
+    assert.equal(dupCtx.getResponse().statusCode, 409);
+    assert.equal(dupCtx.getResponse().body.code, 'ACTIVE_REQUEST_EXISTS');
+});
+test('Day 5: handleReviewPhoneChange - Academic Admin review scope, rejection reason, and Water/Sanitation block', async () => {
+    const { databases, collections } = createComplaintInMemoryDb({
+        phone_change_requests: [
+            {
+                $id: 'pcr_pending_comp_1',
+                student_user_id: 'usr_comp_student_1',
+                academic_department_id: 'dept_comp',
+                old_phone_number: '9876543210',
+                requested_phone_number: '9123456789',
+                reason: 'Lost device and need to update to family phone.',
+                status: 'pending',
+                reviewed_by: '',
+                decision_reason: '',
+                permission_consumed: false,
+                requested_at: new Date().toISOString(),
+                $permissions: [],
+            },
+        ],
+        audit_logs: [],
+    });
+    const compAdminCaller = {
+        id: 'admin_comp_1',
+        email: 'admin.comp@college.edu',
+        name: 'Computer Academic Admin',
+        role: 'department_admin',
+        department_id: 'dept_comp',
+        department_name: 'Computer Engineering',
+        admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+    };
+    const civilAdminCaller = {
+        id: 'admin_civil_1',
+        email: 'admin.civil@college.edu',
+        name: 'Civil Academic Admin',
+        role: 'department_admin',
+        department_id: 'dept_civil',
+        department_name: 'Civil Engineering',
+        admin_assignments: [makeAdminAssignment('admin_civil_1', 'dept_civil', 'academic')],
+    };
+    const waterAdminCaller = {
+        id: 'admin_water_1',
+        email: 'admin.water@college.edu',
+        name: 'Water Maintenance Admin',
+        role: 'department_admin',
+        department_id: 'dept_water',
+        department_name: 'Water Supply',
+        admin_assignments: [makeAdminAssignment('admin_water_1', 'dept_water', 'maintenance')],
+    };
+    const studentCaller = {
+        id: 'usr_comp_student_1',
+        email: 'aarav@college.edu',
+        name: 'Aarav Patel',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    // 1. Water Admin blocked from reviewing academic phone change (403 FORBIDDEN)
+    const waterCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(waterCtx.context, waterAdminCaller, { request_id: 'pcr_pending_comp_1', decision: 'approved' }, { databases });
+    assert.equal(waterCtx.getResponse().statusCode, 403);
+    assert.equal(waterCtx.getResponse().body.code, 'FORBIDDEN');
+    // 2. Cross-department Academic Admin blocked (403 FORBIDDEN)
+    const crossCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(crossCtx.context, civilAdminCaller, { request_id: 'pcr_pending_comp_1', decision: 'approved' }, { databases });
+    assert.equal(crossCtx.getResponse().statusCode, 403);
+    assert.equal(crossCtx.getResponse().body.code, 'FORBIDDEN');
+    // 3. Student blocked from reviewing (403 FORBIDDEN)
+    const studentRevCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(studentRevCtx.context, studentCaller, { request_id: 'pcr_pending_comp_1', decision: 'approved' }, { databases });
+    assert.equal(studentRevCtx.getResponse().statusCode, 403);
+    // 4. Rejection without reason blocked (400 REASON_REQUIRED)
+    const noReasonCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(noReasonCtx.context, compAdminCaller, { request_id: 'pcr_pending_comp_1', decision: 'rejected', decision_reason: '' }, { databases });
+    assert.equal(noReasonCtx.getResponse().statusCode, 400);
+    assert.equal(noReasonCtx.getResponse().body.code, 'REASON_REQUIRED');
+    // 5. Valid approval by student's assigned academic Department Admin
+    const approveCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(approveCtx.context, compAdminCaller, { request_id: 'pcr_pending_comp_1', decision: 'approved' }, { databases });
+    assert.equal(approveCtx.getResponse().statusCode, 200);
+    const data = approveCtx.getResponse().body.data;
+    assert.equal(data.request.status, 'approved');
+    assert.equal(data.request.permission_consumed, false);
+    // Verify audit log for review_phone_change
+    const auditDocs = collections.get('audit_logs') || [];
+    const reviewAudit = auditDocs.find((a) => a.action === 'review_phone_change');
+    assert.ok(reviewAudit, 'Audit log for review_phone_change must be recorded');
+    assert.equal(reviewAudit.actor_id, compAdminCaller.id);
+    // 6. Reviewing already-reviewed request returns 400
+    const reReviewCtx = createComplaintMockContext();
+    await handleReviewPhoneChange(reReviewCtx.context, compAdminCaller, { request_id: 'pcr_pending_comp_1', decision: 'approved' }, { databases });
+    assert.equal(reReviewCtx.getResponse().statusCode, 400);
+    assert.equal(reReviewCtx.getResponse().body.code, 'REQUEST_ALREADY_REVIEWED');
+});
+test('Day 5: handleCompletePhoneChange - One-time permission consumption and failure-safety', async () => {
+    const initialProfiles = [
+        {
+            $id: 'prof_comp_student_1',
+            user_id: 'usr_comp_student_1',
+            name: 'Aarav Patel',
+            enrollment_no: '246510307001',
+            student_department_id: 'dept_comp',
+            phone_number: '9876543210',
+            role: 'student',
+            name_locked: true,
+            enrollment_locked: true,
+            phone_locked: true,
+            $permissions: [],
+        },
+    ];
+    const initialRequests = [
+        {
+            $id: 'pcr_approved_1',
+            student_user_id: 'usr_comp_student_1',
+            academic_department_id: 'dept_comp',
+            old_phone_number: '9876543210',
+            requested_phone_number: '9123456789',
+            reason: 'SIM card damaged.',
+            status: 'approved',
+            permission_consumed: false,
+            $permissions: [],
+        },
+        {
+            $id: 'pcr_consumed_1',
+            student_user_id: 'usr_comp_student_1',
+            academic_department_id: 'dept_comp',
+            old_phone_number: '9876543210',
+            requested_phone_number: '9123456789',
+            reason: 'Already completed change.',
+            status: 'completed',
+            permission_consumed: true,
+            $permissions: [],
+        },
+    ];
+    const { databases, collections } = createComplaintInMemoryDb({
+        profiles: initialProfiles,
+        phone_change_requests: initialRequests,
+        audit_logs: [],
+    });
+    const studentCaller = {
+        id: 'usr_comp_student_1',
+        email: 'aarav@college.edu',
+        name: 'Aarav Patel',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    const otherStudentCaller = {
+        id: 'usr_other_student_1',
+        email: 'other@college.edu',
+        name: 'Other Student',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    // 1. Non-matching student gets 404 (Oracle Elimination / IDOR prevention)
+    const idorCtx = createComplaintMockContext();
+    await handleCompletePhoneChange(idorCtx.context, otherStudentCaller, { request_id: 'pcr_approved_1', new_phone_number: '9123456789' }, { databases });
+    assert.equal(idorCtx.getResponse().statusCode, 404);
+    assert.equal(idorCtx.getResponse().body.code, 'NOT_FOUND');
+    // 2. Already consumed request returns 403 PERMISSION_NOT_AVAILABLE
+    const consumedCtx = createComplaintMockContext();
+    await handleCompletePhoneChange(consumedCtx.context, studentCaller, { request_id: 'pcr_consumed_1', new_phone_number: '9123456789' }, { databases });
+    assert.equal(consumedCtx.getResponse().statusCode, 403);
+    assert.equal(consumedCtx.getResponse().body.code, 'PERMISSION_NOT_AVAILABLE');
+    // 3. New phone equals old phone returns 400 SAME_PHONE_NUMBER
+    const samePhoneCtx = createComplaintMockContext();
+    await handleCompletePhoneChange(samePhoneCtx.context, studentCaller, { request_id: 'pcr_approved_1', new_phone_number: '9876543210' }, { databases });
+    assert.equal(samePhoneCtx.getResponse().statusCode, 400);
+    assert.equal(samePhoneCtx.getResponse().body.code, 'SAME_PHONE_NUMBER');
+    // 4. FAILURE SAFETY SIMULATION:
+    // If the profile document update fails, permission MUST NOT be consumed and old phone must remain active!
+    const failingDatabases = {
+        ...databases,
+        async updateDocument(dbId, collectionId, documentId, data) {
+            if (collectionId === 'profiles') {
+                throw new Error('Database disk write failure on profiles');
+            }
+            return databases.updateDocument(dbId, collectionId, documentId, data);
+        },
+    };
+    const failCtx = createComplaintMockContext();
+    await handleCompletePhoneChange(failCtx.context, studentCaller, { request_id: 'pcr_approved_1', new_phone_number: '9123456789' }, { databases: failingDatabases });
+    assert.equal(failCtx.getResponse().statusCode, 500);
+    assert.equal(failCtx.getResponse().body.code, 'PROFILE_SAVE_FAILED');
+    // Verify permission was NOT consumed on failure:
+    const requestAfterFail = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+    assert.equal(requestAfterFail.permission_consumed, false, 'Permission must remain unconsumed after profile write failure');
+    assert.equal(requestAfterFail.status, 'approved', 'Request status must remain approved so student can retry');
+    // Verify profile phone was NOT modified:
+    const profileAfterFail = (collections.get('profiles') || [])[0];
+    assert.equal(profileAfterFail.phone_number, '9876543210', 'Old phone number must remain active after profile write failure');
+    // 5. Successful completion (Happy path)
+    const successCtx = createComplaintMockContext();
+    await handleCompletePhoneChange(successCtx.context, studentCaller, { request_id: 'pcr_approved_1', new_phone_number: '9123456789' }, { databases });
+    assert.equal(successCtx.getResponse().statusCode, 200);
+    // Verify profile updated and locked
+    const updatedProfile = (collections.get('profiles') || [])[0];
+    assert.equal(updatedProfile.phone_number, '9123456789');
+    assert.equal(updatedProfile.phone_locked, true);
+    // Verify request marked completed and consumed
+    const updatedReq = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+    assert.equal(updatedReq.status, 'completed');
+    assert.equal(updatedReq.permission_consumed, true);
+    // Verify audit log with masked phone
+    const auditDocs = collections.get('audit_logs') || [];
+    const compAudit = auditDocs.find((a) => a.action === 'complete_phone_change');
+    assert.ok(compAudit, 'Audit log for complete_phone_change must be recorded');
+    const detailsStr = String(compAudit.details || '');
+    assert.ok(detailsStr.includes('****'), 'Audit log must mask phone number');
+});
+test('Day 5: handleListPhoneChangeRequests - Scoped listing by role and Water/Sanitation rejection', async () => {
+    const { databases } = createComplaintInMemoryDb({
+        phone_change_requests: [
+            {
+                $id: 'pcr_comp_1',
+                student_user_id: 'usr_comp_student_1',
+                academic_department_id: 'dept_comp',
+                status: 'pending',
+                $permissions: [],
+            },
+            {
+                $id: 'pcr_civil_1',
+                student_user_id: 'usr_civil_student_1',
+                academic_department_id: 'dept_civil',
+                status: 'pending',
+                $permissions: [],
+            },
+        ],
+    });
+    const studentCaller = {
+        id: 'usr_comp_student_1',
+        email: 'comp@college.edu',
+        name: 'Comp Student',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    const compAdminCaller = {
+        id: 'admin_comp_1',
+        email: 'admin.comp@college.edu',
+        name: 'Computer Admin',
+        role: 'department_admin',
+        department_id: 'dept_comp',
+        department_name: 'Computer Engineering',
+        admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+    };
+    const waterAdminCaller = {
+        id: 'admin_water_1',
+        email: 'admin.water@college.edu',
+        name: 'Water Admin',
+        role: 'department_admin',
+        department_id: 'dept_water',
+        department_name: 'Water Supply',
+        admin_assignments: [makeAdminAssignment('admin_water_1', 'dept_water', 'maintenance')],
+    };
+    const principalCaller = {
+        id: 'usr_principal_1',
+        email: 'principal@college.edu',
+        name: 'Principal',
+        role: 'principal',
+        department_id: null,
+        department_name: null,
+    };
+    // 1. Student sees only their own request
+    const studListCtx = createComplaintMockContext();
+    await handleListPhoneChangeRequests(studListCtx.context, studentCaller, {}, { databases });
+    assert.equal(studListCtx.getResponse().statusCode, 200);
+    const studData = studListCtx.getResponse().body.data;
+    assert.ok(studData.requests.every((r) => r.student_user_id === studentCaller.id));
+    // 2. Academic Admin sees only their academic department
+    const compAdminListCtx = createComplaintMockContext();
+    await handleListPhoneChangeRequests(compAdminListCtx.context, compAdminCaller, {}, { databases });
+    assert.equal(compAdminListCtx.getResponse().statusCode, 200);
+    const compData = compAdminListCtx.getResponse().body.data;
+    assert.ok(compData.requests.every((r) => r.academic_department_id === 'dept_comp'));
+    // 3. Water maintenance admin receives 403 FORBIDDEN
+    const waterListCtx = createComplaintMockContext();
+    await handleListPhoneChangeRequests(waterListCtx.context, waterAdminCaller, {}, { databases });
+    assert.equal(waterListCtx.getResponse().statusCode, 403);
+    assert.equal(waterListCtx.getResponse().body.code, 'FORBIDDEN');
+    // 4. Principal sees all requests
+    const prinListCtx = createComplaintMockContext();
+    await handleListPhoneChangeRequests(prinListCtx.context, principalCaller, {}, { databases });
+    assert.equal(prinListCtx.getResponse().statusCode, 200);
+    const prinData = prinListCtx.getResponse().body.data;
+    assert.equal(prinData.total, 2);
+});
+test('Day 5: handleGetPrincipalDashboard - 6-department breakdown, delay metrics, and Principal status mutation prohibition', async () => {
+    const past6Days = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    const past1Day = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    const { databases } = createComplaintInMemoryDb({
+        complaints: [
+            {
+                $id: 'cmpl_delayed_water_1',
+                student_user_id: 'usr_student_1',
+                student_name: 'Student 1',
+                student_enrollment_no: '246510307001',
+                student_department_id: 'dept_comp',
+                maintenance_department_id: 'dept_water',
+                title: 'Water filter broken',
+                location: 'Ground Floor',
+                description: 'No clean drinking water.',
+                priority: 'high',
+                status: 'Pending',
+                support_count: 1,
+                created_at: past6Days,
+                last_meaningful_update_at: past6Days,
+                $permissions: [],
+            },
+            {
+                $id: 'cmpl_fresh_comp_1',
+                student_user_id: 'usr_student_2',
+                student_name: 'Student 2',
+                student_enrollment_no: '246510307002',
+                student_department_id: 'dept_comp',
+                maintenance_department_id: 'dept_comp',
+                title: 'Monitor flickering',
+                location: 'Lab 2',
+                description: 'Screen flickers when typing.',
+                priority: 'low',
+                status: 'In Progress',
+                support_count: 2,
+                created_at: past1Day,
+                last_meaningful_update_at: past1Day,
+                $permissions: [],
+            },
+        ],
+        complaint_warnings: [],
+    });
+    const principalCaller = {
+        id: 'usr_principal_1',
+        email: 'principal@college.edu',
+        name: 'College Principal',
+        role: 'principal',
+        department_id: null,
+        department_name: null,
+    };
+    const studentCaller = {
+        id: 'usr_student_1',
+        email: 'student@college.edu',
+        name: 'Student',
+        role: 'student',
+        department_id: null,
+        department_name: null,
+    };
+    // 1. Student blocked from principal dashboard (403 FORBIDDEN)
+    const studDashCtx = createComplaintMockContext();
+    await handleGetPrincipalDashboard(studDashCtx.context, studentCaller, { databases });
+    assert.equal(studDashCtx.getResponse().statusCode, 403);
+    // 2. Principal receives 200 OK with all 6 canonical department metrics
+    const prinDashCtx = createComplaintMockContext();
+    await handleGetPrincipalDashboard(prinDashCtx.context, principalCaller, { databases });
+    assert.equal(prinDashCtx.getResponse().statusCode, 200);
+    const dashData = prinDashCtx.getResponse().body.data;
+    // Verify 6 departments represented in breakdown
+    const breakdown = dashData.metrics.department_breakdown;
+    assert.ok(breakdown.dept_comp, 'Computer dept metrics must exist');
+    assert.ok(breakdown.dept_civil, 'Civil dept metrics must exist');
+    assert.ok(breakdown.dept_elec, 'Electrical dept metrics must exist');
+    assert.ok(breakdown.dept_mech, 'Mechanical dept metrics must exist');
+    assert.ok(breakdown.dept_water, 'Water dept metrics must exist');
+    assert.ok(breakdown.dept_sanit, 'Sanitation dept metrics must exist');
+    // Verify delayed complaint identified
+    assert.equal(dashData.delayed_complaints.length, 1);
+    assert.equal(dashData.delayed_complaints[0].complaint.$id, 'cmpl_delayed_water_1');
+    assert.ok(dashData.delayed_complaints[0].days_delayed >= 5);
+    assert.equal(dashData.delayed_complaints[0].is_warning_eligible, true);
+    // 3. Principal cannot change complaint status in handleUpdateAdminComplaint (403 FORBIDDEN)
+    const prinStatusCtx = createComplaintMockContext();
+    await handleUpdateAdminComplaint(prinStatusCtx.context, principalCaller, {
+        complaint_id: 'cmpl_delayed_water_1',
+        status: 'Resolved',
+        official_response: 'Principal attempting status change.',
+    }, { databases });
+    assert.equal(prinStatusCtx.getResponse().statusCode, 403);
+    assert.equal(prinStatusCtx.getResponse().body.code, 'FORBIDDEN');
 });
