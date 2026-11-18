@@ -370,8 +370,23 @@ export async function handleCompletePhoneChange(context, caller, data, deps) {
             });
         }
         catch (reqUpdateErr) {
-            // Profile was updated, but request status failed to mark. Log warning.
-            error(`[phone-change] Warning: Profile saved but request status update failed: ${String(reqUpdateErr)}`);
+            error(`[phone-change] Failed to mark request as consumed, attempting profile rollback: ${String(reqUpdateErr)}`);
+            // Compensation / Rollback: revert the profile update so state does not become dirty
+            try {
+                await databases.updateDocument(config.databaseId, config.profilesCollectionId, profileDoc.$id, {
+                    phone_number: oldPhoneNumber,
+                    phone_locked: true,
+                    updated_at: now,
+                });
+            }
+            catch (rollbackErr) {
+                error(`[phone-change] CRITICAL: Profile rollback also failed: ${String(rollbackErr)}`);
+            }
+            return res.json({
+                success: false,
+                error: 'Failed to finalize phone change request. Profile change was rolled back; please retry.',
+                code: 'REQUEST_COMPLETION_FAILED',
+            }, 500);
         }
         // Step 3: Append audit log
         await appendAuditLog(databases, config.databaseId, config.auditLogsCollectionId, {

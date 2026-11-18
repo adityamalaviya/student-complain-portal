@@ -14,6 +14,10 @@ Reusable UI components matching the approved Minimalist Institutional Design Sys
 - `EmptyState.tsx`: Minimal empty feed illustration and call-to-action button.
 - `ErrorState.tsx`: Minimal error alert box with retry button.
 - `AdminResolutionModal.tsx`: Accessible dialog for department administrators to update investigation status (including Pending progress notes and optional substantive progress updates), submit official remarks persisted in `complaint_timeline`, guard against duplicate submissions, and surface server errors while preserving unsaved input.
+- `PhoneChangeModal.tsx`: Accessible dialog for students to request an academic phone number change or complete approved changes with one-time permission consumption.
+- `PhoneRejectModal.tsx`: Accessible dialog for academic department administrators to reject student phone change requests with mandatory reason validation ($\ge 5$ characters) logged to the audit trail.
+- `ClarificationRequestModal.tsx`: Dialog for administrators to request additional complaint details from students.
+- `ClarificationReplyBox.tsx`: Interactive component for students to respond to administrative clarification inquiries.
 
 ## Design System Rules
 - Tailwind CSS exclusively, dark mode support on every component.

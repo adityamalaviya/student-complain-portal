@@ -389,7 +389,7 @@ function processReviewPhoneChange({ adminCaller, request, decision, decisionReas
   return { status: 200, body: { success: true, data: { request } } };
 }
 
-function processCompletePhoneChange({ studentCaller, request, profile, newPhoneNumber, simulateDbError = false }) {
+function processCompletePhoneChange({ studentCaller, request, profile, newPhoneNumber, simulateDbError = false, simulateStep2Error = false }) {
   if (studentCaller.role !== 'student') {
     return { status: 403, body: { success: false, error: 'Only students can complete phone change updates.', code: 'FORBIDDEN' } };
   }
@@ -420,10 +420,23 @@ function processCompletePhoneChange({ studentCaller, request, profile, newPhoneN
     };
   }
 
+  const previousPhone = profile.phone_number;
   profile.phone_number = newPhoneNumber;
   profile.phone_locked = true;
 
-  // Step 2: Mark permission consumed
+  // Step 2: Mark permission consumed. If Step 2 fails, roll back Step 1!
+  if (simulateStep2Error) {
+    profile.phone_number = previousPhone;
+    return {
+      status: 500,
+      body: {
+        success: false,
+        error: 'Failed to finalize phone change request. Profile change was rolled back; please retry.',
+        code: 'REQUEST_COMPLETION_FAILED',
+      },
+    };
+  }
+
   request.status = 'completed';
   request.permission_consumed = true;
 
@@ -578,6 +591,20 @@ test('Day 5: Phone Change Workflow - One-time permission consumption and failure
   assert.equal(failRes.body.code, 'PROFILE_SAVE_FAILED');
   assert.equal(profile.phone_number, '9876543210', 'Old phone number must remain active');
   assert.equal(approvedRequest.permission_consumed, false, 'Permission must NOT be consumed on failure');
+  assert.equal(approvedRequest.status, 'approved', 'Request status must remain approved for retry');
+
+  // 2b. Failure Safety Step 2: Step 2 failure triggers profile rollback
+  const step2FailRes = processCompletePhoneChange({
+    studentCaller: student,
+    request: approvedRequest,
+    profile,
+    newPhoneNumber: '9123456789',
+    simulateStep2Error: true,
+  });
+  assert.equal(step2FailRes.status, 500);
+  assert.equal(step2FailRes.body.code, 'REQUEST_COMPLETION_FAILED');
+  assert.equal(profile.phone_number, '9876543210', 'Profile phone must be rolled back on Step 2 failure');
+  assert.equal(approvedRequest.permission_consumed, false, 'Permission must NOT be consumed on Step 2 failure');
   assert.equal(approvedRequest.status, 'approved', 'Request status must remain approved for retry');
 
   // 3. Successful completion updates phone and consumes permission

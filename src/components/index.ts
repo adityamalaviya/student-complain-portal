@@ -11,3 +11,4 @@ export * from './AdminResolutionModal';
 export * from './ClarificationRequestModal';
 export * from './ClarificationReplyBox';
 export * from './PhoneChangeModal';
+export * from './PhoneRejectModal';

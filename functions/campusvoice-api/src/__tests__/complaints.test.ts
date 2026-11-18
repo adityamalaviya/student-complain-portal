@@ -5236,6 +5236,36 @@ test('Day 5: handleCompletePhoneChange - One-time permission consumption and fai
   const profileAfterFail = (collections.get('profiles') || [])[0];
   assert.equal(profileAfterFail.phone_number, '9876543210', 'Old phone number must remain active after profile write failure');
 
+  // 4b. Step 2 Failure & Automatic Rollback Simulation:
+  // If updating phone_change_requests throws, profiles update must be rolled back to old phone!
+  const step2FailingDatabases: DatabaseClientLike = {
+    ...databases,
+    async updateDocument(dbId, collectionId, documentId, data) {
+      if (collectionId === 'phone_change_requests' && data && (data as Record<string, unknown>).status === 'completed') {
+        throw new Error('Database network timeout on phone_change_requests completion');
+      }
+      return databases.updateDocument(dbId, collectionId, documentId, data);
+    },
+  };
+
+  const step2FailCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    step2FailCtx.context,
+    studentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9123456789' },
+    { databases: step2FailingDatabases }
+  );
+  assert.equal(step2FailCtx.getResponse().statusCode, 500);
+  assert.equal(step2FailCtx.getResponse().body.code, 'REQUEST_COMPLETION_FAILED');
+
+  // Verify permission remains unconsumed and profile rolled back:
+  const requestAfterStep2Fail = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+  assert.equal(requestAfterStep2Fail.permission_consumed, false, 'Permission must remain unconsumed after Step 2 write failure');
+  assert.equal(requestAfterStep2Fail.status, 'approved', 'Request status must remain approved so student can retry');
+
+  const profileAfterStep2Fail = (collections.get('profiles') || [])[0];
+  assert.equal(profileAfterStep2Fail.phone_number, '9876543210', 'Profile phone number must be rolled back to old phone number');
+
   // 5. Successful completion (Happy path)
   const successCtx = createComplaintMockContext();
   await handleCompletePhoneChange(
