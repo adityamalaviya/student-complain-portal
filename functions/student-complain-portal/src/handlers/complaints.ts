@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { ID, Query, type Models } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from '../db.js';
+import { appendAuditLog } from './audit.js';
 import {
   PHONE_NUMBER_REGEX,
   isAcademicDepartment,
@@ -969,11 +970,6 @@ export async function handleCreateComplaint(
       profile.department_name ||
       maintenanceDept.name;
 
-    const enrollmentDeptCode =
-      typeof profile.enrollment_no === 'string' && profile.enrollment_no.length === 12
-        ? profile.enrollment_no.slice(7, 9)
-        : undefined;
-
     const complaintData = {
       student_user_id: profile.user_id,
       student_name: profile.name,
@@ -988,7 +984,6 @@ export async function handleCreateComplaint(
       support_count: 1,
       last_meaningful_update_at: now,
       department_name: effectiveDepartmentName,
-      ...(enrollmentDeptCode ? { department_code: enrollmentDeptCode } : {}),
       ...(attachmentFileId ? { attachment_file_id: attachmentFileId } : {}),
       created_at: now,
       updated_at: now,
@@ -1021,6 +1016,26 @@ export async function handleCreateComplaint(
 
     log(
       `[complaints] Created complaint ${doc.$id} by student ${profile.user_id} (academic=${profile.student_department_id}, maintenance=${maintenanceDept.id})`
+    );
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'complaint_created',
+        actor_id: profile.user_id,
+        actor_role: 'student',
+        target_resource_id: doc.$id,
+        target_resource_type: 'complaint',
+        details: {
+          student_department_id: profile.student_department_id,
+          maintenance_department_id: maintenanceDept.id,
+          priority,
+          has_attachment: Boolean(attachmentFileId),
+        },
+      },
+      log
     );
 
     const createdComplaint: Complaint = projectComplaint(
@@ -1637,6 +1652,24 @@ export async function handleSupportComplaint(
 
     log(`[complaints] User ${caller.id} supported complaint ${complaintId} (new count: ${newCount})`);
 
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'support_added',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          new_support_count: newCount,
+          is_resupport: Boolean(existingDoc),
+        },
+      },
+      log
+    );
+
     return res.json(
       {
         success: true,
@@ -1852,6 +1885,23 @@ export async function handleRemoveSupport(
     }
 
     log(`[complaints] User ${caller.id} removed support from complaint ${complaintId} (new count: ${newCount})`);
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'support_removed',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          new_support_count: newCount,
+        },
+      },
+      log
+    );
 
     return res.json(
       {
@@ -2491,6 +2541,26 @@ export async function handleUpdateAdminComplaint(
       `[admin] Admin ${caller.id} recorded ${noteEntryType} on complaint ${complaintId} (status: ${existingStatus} -> ${normalizedStatus})`
     );
 
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'complaint_status_changed',
+        actor_id: caller.id,
+        actor_role: 'department_admin',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          old_status: existingStatus,
+          new_status: normalizedStatus,
+          is_substantive: requestedSubstantive,
+          maintenance_department_id: existing.maintenance_department_id,
+        },
+      },
+      log
+    );
+
     return res.json(
       {
         success: true,
@@ -2822,6 +2892,24 @@ export async function handleRequestClarification(
 
     log(`[complaints] Admin ${caller.id} requested clarification on complaint ${complaintId}`);
 
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'clarification_requested',
+        actor_id: caller.id,
+        actor_role: 'department_admin',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          maintenance_department_id: complaint.maintenance_department_id,
+          question_preview: question.slice(0, 100),
+        },
+      },
+      log
+    );
+
     const timelineEntry: ComplaintTimeline = {
       $id: timelineDoc.$id,
       complaint_id: complaintId,
@@ -2964,6 +3052,23 @@ export async function handleReplyClarification(
     );
 
     log(`[complaints] Creator ${caller.id} replied to clarification on complaint ${complaintId}`);
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'clarification_replied',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          reply_preview: reply.slice(0, 100),
+        },
+      },
+      log
+    );
 
     const timelineEntry: ComplaintTimeline = {
       $id: timelineDoc.$id,

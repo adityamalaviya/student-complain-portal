@@ -239,3 +239,119 @@ These are audit-report findings based on the inspected repository snapshot; reru
 ### Pending Live Migration & Unresolved Authorization Dependencies
 - **Live Appwrite Migration Pending:** Existing live `departments` documents have immutable `$id` values (`'06'`, `'07'`) and required `departments.code` / unique index (`idx_code` / `idx_dept_code`). Safe migration steps are documented in `docs/schema.md` Section 5.
 - **Unresolved Admin Authorization Dependency:** Legacy env allowlists exist only for `ADMIN_ALLOWLIST_06` (`dept_civil`) and `ADMIN_ALLOWLIST_07` (`dept_comp`). Administrators for `dept_elec`, `dept_mech`, `dept_water`, and `dept_sanit` require verified DB records in `department_admins` (not invented in env allowlists).
+
+---
+
+## 11. Day 3 Verification & Schema Hardening Execution Handoff (Completed)
+
+**Date:** 18 November 2026  
+**Status:** DAY 3 AUDIT, SCHEMA REALIGNMENT & TEST VERIFICATION COMPLETE — READY FOR DAY 4  
+**Scope Achieved:** Complete verification of Day 3 Privacy and Attachment Security, resolution of all failing cloud function tests, live Appwrite Cloud provisioning verification, resolution of complaint creation `DATABASE_ERROR`, implementation of complaint creation audit logging, and strict dual-directory synchronization.
+
+### A. Summary of Issues Resolved
+1. **Cloud Function Test Failures:**
+   - **Principal Role Resolution & Spoofing Guard (`handleGetProfile`):** Derived `role: 'principal'` when caller is verified Principal and added strict 403 Forbidden check when caller role and profile document role mismatch between student and principal.
+   - **Database Outage Fail-Closed Security (`verifyCaller`):** Isolated 404 (assignment not found) from unexpected database/network errors. Non-404 errors re-throw, returning `statusCode: 500, caller: null` to fail closed securely.
+   - **Revoked Admin Profile Demotion (`handleGetProfile`):** When an admin assignment is revoked or deactivated (`isStaleAdminRole`), stale admin profiles are demoted on the fly in the database to `role: 'student'`, `profile_status: 'incomplete'`, and lock flags are cleared so the user can onboard cleanly.
+2. **Complaint Creation `DATABASE_ERROR` Fix (`handleCreateComplaint`):**
+   - Removed undeclared `department_code` from `complaintData`.
+   - `complaintData` now strictly matches the 16 declared attributes in the Appwrite `complaints` collection schema.
+3. **Complaint Creation Audit Logging (`handleCreateComplaint`):**
+   - Integrated `appendAuditLog` to record a structured audit event (`action: 'complaint_created'`) into the append-only `audit_logs` collection upon successful complaint creation.
+4. **Dual Function Folder Parity:**
+   - Synchronized all source files and compiled build artifacts between `functions/campusvoice-api` and `functions/student-complain-portal` (`git diff --no-index` confirmed 0 diff across both `src/` and `dist/`).
+5. **Live Appwrite Cloud Provisioning:**
+   - Executed `scripts/setup-appwrite.mjs` against live Appwrite Cloud (`https://fra.cloud.appwrite.io/v1`).
+   - Verified `complaint-attachments` storage bucket with private file security (`fileSecurity: true`) and 5 MB limit.
+   - Verified/provisioned all 9 collections (`departments`, `profiles`, `complaints`, `complaint_supports`, `complaint_timeline`, `phone_change_requests`, `complaint_warnings`, `department_admins`, `audit_logs`) and verified `idx_cmpl_attachment` index on `complaints`.
+6. **Frontend Model Typing Fix:**
+   - Updated `Complaint` in `src/types/models.ts` making `$createdAt?: string;` and `$updatedAt?: string;` optional to align with runtime responses.
+
+### B. Modified Files
+1. `functions/campusvoice-api/src/auth.ts` & `dist/auth.js`
+2. `functions/campusvoice-api/src/handlers/profile.ts` & `dist/handlers/profile.js`
+3. `functions/campusvoice-api/src/handlers/complaints.ts` & `dist/handlers/complaints.js`
+4. `functions/campusvoice-api/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+5. `functions/student-complain-portal/src/auth.ts` & `dist/auth.js`
+6. `functions/student-complain-portal/src/handlers/profile.ts` & `dist/handlers/profile.js`
+7. `functions/student-complain-portal/src/handlers/complaints.ts` & `dist/handlers/complaints.js`
+8. `functions/student-complain-portal/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+9. `src/types/models.ts`
+10. `scripts/setup-appwrite.mjs`
+11. `docs/handoff.md`
+
+### C. Test Verification Evidence
+- **CampusVoice API Test Suite:** `npm --prefix functions/campusvoice-api test` → **36 / 36 passed** (0 failed, 0 skipped).
+- **Student Complain Portal Test Suite:** `npm --prefix functions/student-complain-portal test` → **36 / 36 passed** (0 failed, 0 skipped).
+- **Root Workspace Test Suite:** `npm test` (`node scripts/run-tests.mjs`) → **44 / 44 passed** (0 failed, 0 skipped).
+- **TypeScript Strict Compilation:** `npm run typecheck` (`tsc --noEmit`) → Exited with code 0 (zero errors).
+- **ESLint Compliance:** `npm run lint` (`next lint`) → Exited with code 0 (✔ No ESLint warnings or errors).
+- **Dual Function Directory Parity:** `git diff --no-index functions/campusvoice-api/src functions/student-complain-portal/src` and `dist` → 0 diff.
+
+### D. Next Dependencies
+- **Day 4 Workstream:** Immutable complaint timeline (`complaint_timeline`), Maintenance Admin status/progress/clarification flows, support baseline (`1 + active_supports`), removal, and re-support concurrency lifecycle.
+- **Dependencies:** Day 3 verification complete and approved. Ready to proceed with Day 4 implementation.
+
+---
+
+## 12. Day 4 Execution & Verification Handoff (Completed)
+
+**Date:** 19 November 2026  
+**Status:** DAY 4 COMPLETE — TIMELINE IMMUTABILITY & SUPPORT LIFECYCLE VERIFIED  
+**Scope Achieved:** Complete verification of Day 4 Complaint Timeline, Status Transitions, Clarification Workflow, Support Lifecycle with Base-1 & Revocation, Concurrency Invariance, Append-Only Audit Logging, and Dual-Directory Synchronization.
+
+### A. Summary of Scope Implemented & Verified
+1. **Complaint Content Immutability (`handleUpdateAdminComplaint`):**
+   - Core complaint attributes (`title`, `location`, `description`, `student_department_id`, `maintenance_department_id`, `student_user_id`, `student_name`, `student_enrollment_no`, `attachment_file_id`, `created_at`) are permanently immutable.
+   - Updates only modify lifecycle attributes (`status`, `last_meaningful_update_at`, `updated_at`).
+   - Official responses, status transitions, and progress notes are written as discrete records in `complaint_timeline`.
+2. **Maintenance Admin Status Jurisdiction & Transition Rules:**
+   - Only the assigned Maintenance Admin (`maintenance_department_id`) can update status.
+   - Status changes by Principal (403 `FORBIDDEN`) and Students (403 `FORBIDDEN`) are blocked.
+   - Probes by cross-department admins return 404 `NOT_FOUND` (Oracle Elimination).
+   - Reverting from `In Progress` or `Resolved` back to `Pending` is strictly blocked (400 `INVALID_STATUS_TRANSITION`).
+3. **Clarification Workflow (`handleRequestClarification` & `handleReplyClarification`):**
+   - Maintenance Admin can request clarification (persisted with `entry_type: 'clarification_request'`). Cross-department admin blocked with 404.
+   - Only the original complaint creator can reply (persisted with `entry_type: 'clarification_reply'`). Non-creator students blocked with 403 `FORBIDDEN`.
+4. **Community Support Lifecycle & Concurrency Invariance:**
+   - Baseline count is 1 (creator). Creator self-support is forbidden (400 `CANNOT_SUPPORT_OWN_COMPLAINT`).
+   - Creator baseline support cannot be removed (400 `CANNOT_REMOVE_CREATOR_SUPPORT`).
+   - Same-academic-department eligibility strictly enforced (`student_department_id`). Cross-department returns 404.
+   - Deterministic 32-character SHA-256 document IDs (`sha256(complaintId + ':' + callerId).slice(0, 32)`).
+   - Duplicate support attempts return 409 `ALREADY_SUPPORTED` without counter drift.
+   - Support revocation sets `status: 'revoked'`; repeated removal returns 400 `NOT_SUPPORTED`.
+   - Re-support reactivates the record to `status: 'active'`.
+   - Derived count is strictly `1 + active support records`.
+5. **Append-Only Audit Logging (`appendAuditLog`):**
+   - All Day 4 state mutations append structured records to `audit_logs`:
+     - `complaint_status_changed`
+     - `clarification_requested`
+     - `clarification_replied`
+     - `support_added`
+     - `support_removed`
+6. **Dual Function Folder Parity:**
+   - 100% byte-for-byte parity across `functions/campusvoice-api` and `functions/student-complain-portal` (`git diff --no-index` confirmed 0 diff across both `src/` and `dist/`).
+7. **Frontend UI Quality & Accessibility:**
+   - Full Next.js App Router verification (`src/app/complaints/[id]/page.tsx`, `ComplaintSupportButton.tsx`, `AdminResolutionModal.tsx`, `ClarificationRequestModal.tsx`, `ClarificationReplyBox.tsx`).
+   - Strict TypeScript, functional components, design tokens from `tokens.ts`, `@phosphor-icons/react` exclusively.
+
+### B. Modified Files
+1. `functions/campusvoice-api/src/handlers/complaints.ts` & `dist/handlers/complaints.js`
+2. `functions/campusvoice-api/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+3. `functions/student-complain-portal/src/handlers/complaints.ts` & `dist/handlers/complaints.js`
+4. `functions/student-complain-portal/src/__tests__/complaints.test.ts` & `dist/__tests__/complaints.test.js`
+5. `docs/superpowers/plans/2026-11-18-day4-complaint-timeline-support-lifecycle.md`
+6. `docs/handoff.md`
+
+### C. Test Verification Evidence
+- **CampusVoice API Test Suite:** `npm --prefix functions/campusvoice-api test` → **40 / 40 passed** (0 failed, 0 skipped).
+- **Student Complain Portal Test Suite:** `npm --prefix functions/student-complain-portal test` → **40 / 40 passed** (0 failed, 0 skipped).
+- **Root Workspace Test Suite:** `npm test` (`node scripts/run-tests.mjs`) → **44 / 44 passed** (0 failed, 0 skipped).
+- **TypeScript Strict Compilation:** `npm run typecheck` (`tsc --noEmit`) → Exited with code 0 (zero errors).
+- **ESLint Compliance:** `npm run lint` (`next lint`) → Exited with code 0 (✔ No ESLint warnings or errors).
+- **Dual Function Directory Parity:** `git diff --no-index functions/campusvoice-api/src functions/student-complain-portal/src` and `dist` → 0 diff.
+
+### D. Next Dependencies
+- **Day 5 Workstream:** Phone-change request workflow (`phone_change_requests`), academic Department Admin review and one-time permission grant, failure safety, Water/Sanitation admin restriction, and Principal cross-department dashboard foundations.
+- **Dependencies:** Day 4 verification complete and approved. Ready to proceed with Day 5 implementation.
+
