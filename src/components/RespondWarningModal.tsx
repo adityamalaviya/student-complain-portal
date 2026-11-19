@@ -159,9 +159,25 @@ export function RespondWarningModal({
                 placeholder="e.g. Technician dispatched; replacement parts arrived from vendor today. Issue will be resolved within 24 hours."
                 className="w-full rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-amber-500 focus:outline-hidden focus:ring-2 focus:ring-amber-500/20 disabled:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:placeholder:text-slate-500"
               />
-              <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
-                <span>Min 10 characters</span>
-                <span className={trimmedResponse.length > 2000 ? 'text-red-500 font-bold' : ''}>
+              <div className="mt-1 flex items-center justify-between text-[11px]">
+                <span
+                  className={
+                    trimmedResponse.length > 0 && trimmedResponse.length < 10
+                      ? 'font-medium text-amber-600 dark:text-amber-400'
+                      : 'text-slate-400'
+                  }
+                >
+                  Min 10 characters
+                </span>
+                <span
+                  className={
+                    trimmedResponse.length > 2000
+                      ? 'font-bold text-red-500'
+                      : trimmedResponse.length > 0 && trimmedResponse.length < 10
+                      ? 'font-medium text-amber-600 dark:text-amber-400'
+                      : 'text-slate-400'
+                  }
+                >
                   {trimmedResponse.length} / 2000
                 </span>
               </div>

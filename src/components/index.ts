@@ -14,3 +14,4 @@ export * from './PhoneChangeModal';
 export * from './PhoneRejectModal';
 export * from './IssueWarningModal';
 export * from './RespondWarningModal';
+export * from './principal';

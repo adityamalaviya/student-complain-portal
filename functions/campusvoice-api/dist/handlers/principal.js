@@ -432,6 +432,26 @@ export async function handleAssignAdmin(context, caller, data, deps) {
         }, 400);
     }
     try {
+        // Guard against duplicate active assignments
+        try {
+            const existingActive = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [
+                Query.equal('email', email),
+                Query.equal('department_id', resolvedDept.id),
+                Query.equal('scope', scope),
+                Query.equal('is_active', true),
+                Query.limit(1),
+            ]);
+            if (existingActive.documents.length > 0) {
+                return res.json({
+                    success: false,
+                    error: `An active administrator assignment already exists for ${email} in department '${resolvedDept.name}' with scope '${scope}'.`,
+                    code: 'ASSIGNMENT_ALREADY_EXISTS',
+                }, 409);
+            }
+        }
+        catch {
+            // Non-fatal if collection or index query throws
+        }
         const now = new Date().toISOString();
         const docId = `da_${ID.unique().slice(0, 32)}`;
         // Try finding user_id from profiles if not explicitly supplied
@@ -531,7 +551,8 @@ export async function handleRevokeAdmin(context, caller, data, deps) {
         if (targetUserId) {
             try {
                 const remaining = await databases.listDocuments(config.databaseId, config.departmentAdminsCollectionId, [Query.equal('user_id', targetUserId), Query.equal('is_active', true), Query.limit(10)]);
-                if (remaining.documents.length === 0) {
+                const activeRemaining = remaining.documents.filter((d) => d.$id !== assignmentId && (readBooleanField(d, 'is_active') ?? true));
+                if (activeRemaining.length === 0) {
                     // Revert profile role to student
                     await databases.updateDocument(config.databaseId, config.profilesCollectionId, targetUserId, {
                         role: 'student',
