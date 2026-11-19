@@ -550,6 +550,18 @@ export default function AdminDashboardPage(): React.ReactElement {
                             <span>Delayed ({delayInfo.days_delayed}d)</span>
                           </span>
                         )}
+                        {((complaint as { warning_count?: number }).warning_count ?? 0) > 0 && (
+                          <Link
+                            href={`/complaints/${complaint.$id}`}
+                            className="inline-flex items-center gap-1 rounded bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800 transition hover:bg-red-200 dark:bg-red-950/60 dark:text-red-300"
+                          >
+                            <WarningCircle size={12} weight="bold" />
+                            <span>
+                              {(complaint as { warning_count?: number }).warning_count} Warning
+                              {((complaint as { warning_count?: number }).warning_count ?? 0) > 1 ? 's' : ''}
+                            </span>
+                          </Link>
+                        )}
                         {complaint.priority === 'high' && (
                           <ComplaintPriorityBadge priority="high" size="sm" />
                         )}

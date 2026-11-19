@@ -25,15 +25,25 @@ import {
   handleCompletePhoneChange,
   handleListPhoneChangeRequests,
 } from '../handlers/phoneChange.js';
-import { handleGetPrincipalDashboard } from '../handlers/principal.js';
+import {
+  handleGetPrincipalDashboard,
+  handleIssueWarning,
+  handleRespondToWarning,
+  handleListAdminAssignments,
+  handleAssignAdmin,
+  handleRevokeAdmin,
+  handleGetAuditHistory,
+} from '../handlers/principal.js';
 import type { DatabaseClientLike, StorageClientLike } from '../departments.js';
 import type {
   AdminMetrics,
   AdminScope,
   AppwriteContext,
+  AuditLog,
   AuthenticatedCaller,
   Complaint,
   ComplaintTimeline,
+  ComplaintWarning,
   DepartmentAdminAssignment,
   DepartmentId,
   IssueType,
@@ -5487,6 +5497,469 @@ test('Day 5: handleGetPrincipalDashboard - 6-department breakdown, delay metrics
   assert.equal(prinStatusCtx.getResponse().statusCode, 403);
   assert.equal(prinStatusCtx.getResponse().body.code, 'FORBIDDEN');
 });
+
+test('Day 6: handleAssignAdmin, handleRevokeAdmin, handleListAdminAssignments - Admin Assignment & Dynamic Role Management', async () => {
+  const { databases, collections } = createComplaintInMemoryDb({
+    department_admins: [],
+    profiles: [
+      {
+        $id: 'usr_target_1',
+        name: 'Faculty User',
+        email: 'faculty.civil@college.edu',
+        role: 'student',
+      } as unknown as Models.Document,
+    ],
+    audit_logs: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student_1',
+    email: 'student@college.edu',
+    name: 'Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Non-principal caller blocked with 403 FORBIDDEN
+  const studAssignCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    studAssignCtx.context,
+    studentCaller,
+    { email: 'prof@college.edu', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(studAssignCtx.getResponse().statusCode, 403);
+  assert.equal(studAssignCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Validation failures: invalid email, invalid department, invalid scope
+  const badEmailCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badEmailCtx.context,
+    principalCaller,
+    { email: 'not-an-email', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(badEmailCtx.getResponse().statusCode, 400);
+  assert.equal(badEmailCtx.getResponse().body.code, 'INVALID_EMAIL');
+
+  const badDeptCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badDeptCtx.context,
+    principalCaller,
+    { email: 'prof@college.edu', department_id: 'dept_invented', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(badDeptCtx.getResponse().statusCode, 400);
+  assert.equal(badDeptCtx.getResponse().body.code, 'INVALID_DEPARTMENT');
+
+  const badScopeCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badScopeCtx.context,
+    principalCaller,
+    { email: 'prof@college.edu', department_id: 'dept_civil', scope: 'super_scope' },
+    { databases }
+  );
+  assert.equal(badScopeCtx.getResponse().statusCode, 400);
+  assert.equal(badScopeCtx.getResponse().body.code, 'INVALID_SCOPE');
+
+  // 3. Mandatory Security Invariant: Water and Sanitation CANNOT be assigned academic scope
+  const waterAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    waterAcadCtx.context,
+    principalCaller,
+    { email: 'water.admin@college.edu', department_id: 'dept_water', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(waterAcadCtx.getResponse().statusCode, 400);
+  assert.equal(waterAcadCtx.getResponse().body.code, 'INVALID_DEPARTMENT_SCOPE');
+
+  const sanitAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    sanitAcadCtx.context,
+    principalCaller,
+    { email: 'sanit.admin@college.edu', department_id: 'dept_sanit', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(sanitAcadCtx.getResponse().statusCode, 400);
+  assert.equal(sanitAcadCtx.getResponse().body.code, 'INVALID_DEPARTMENT_SCOPE');
+
+  // 4. Valid maintenance assignment for Water succeeds
+  const waterMaintCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    waterMaintCtx.context,
+    principalCaller,
+    { email: 'water.admin@college.edu', department_id: 'dept_water', scope: 'maintenance' },
+    { databases }
+  );
+  assert.equal(waterMaintCtx.getResponse().statusCode, 201);
+  const waterAssDoc = waterMaintCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(waterAssDoc.assignment.department_id, 'dept_water');
+  assert.equal(waterAssDoc.assignment.scope, 'maintenance');
+  assert.equal(waterAssDoc.assignment.is_active, true);
+
+  // 5. Valid academic assignment for Civil succeeds and updates profile role
+  const civilAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    civilAcadCtx.context,
+    principalCaller,
+    { email: 'faculty.civil@college.edu', user_id: 'usr_target_1', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(civilAcadCtx.getResponse().statusCode, 201);
+  const civilAssDoc = civilAcadCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(civilAssDoc.assignment.department_id, 'dept_civil');
+  assert.equal(civilAssDoc.assignment.scope, 'academic');
+
+  // Verify profile role updated to department_admin
+  const targetProf = collections.get('profiles')?.find((p) => p.$id === 'usr_target_1');
+  assert.equal(targetProf?.role, 'department_admin');
+
+  // Verify audit log appended
+  const auditLogs = collections.get('audit_logs') || [];
+  assert.ok(auditLogs.some((l) => l.action === 'assign_department_admin'));
+
+  // 6. Principal lists admin assignments
+  const listCtx = createComplaintMockContext();
+  await handleListAdminAssignments(listCtx.context, principalCaller, { databases });
+  assert.equal(listCtx.getResponse().statusCode, 200);
+  const listData = listCtx.getResponse().body.data as { assignments: DepartmentAdminAssignment[]; total: number };
+  assert.equal(listData.total, 2);
+
+  // 7. Student blocked from listing assignments
+  const studListCtx = createComplaintMockContext();
+  await handleListAdminAssignments(studListCtx.context, studentCaller, { databases });
+  assert.equal(studListCtx.getResponse().statusCode, 403);
+
+  // 8. Revoke admin assignment
+  const revokeCtx = createComplaintMockContext();
+  await handleRevokeAdmin(
+    revokeCtx.context,
+    principalCaller,
+    { assignment_id: civilAssDoc.assignment.$id },
+    { databases }
+  );
+  assert.equal(revokeCtx.getResponse().statusCode, 200);
+  const revokedData = revokeCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(revokedData.assignment.is_active, false);
+
+  // Verify user profile role reverted to student (since no other active admin assignments exist)
+  const updatedTargetProf = collections.get('profiles')?.find((p) => p.$id === 'usr_target_1');
+  assert.equal(updatedTargetProf?.role, 'student');
+
+  // Verify audit log appended for revocation
+  assert.ok(collections.get('audit_logs')?.some((l) => l.action === 'revoke_department_admin'));
+});
+
+test('Day 6: handleIssueWarning & handleRespondToWarning - 5-Day Delay Milestones, Multiple Warnings & Responses', async () => {
+  const past7Days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const past2Days = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { databases, collections } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_delayed_elec',
+        student_user_id: 'usr_s1',
+        student_name: 'Student 1',
+        student_enrollment_no: '246510309001',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Wiring fault in Lab',
+        location: 'EE Block',
+        description: 'Exposed wires sparking.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_fresh_elec',
+        student_user_id: 'usr_s2',
+        student_name: 'Student 2',
+        student_enrollment_no: '246510309002',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Tube light broken',
+        location: 'Room 101',
+        description: 'Light not turning on.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past2Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_resolved_elec',
+        student_user_id: 'usr_s3',
+        student_name: 'Student 3',
+        student_enrollment_no: '246510309003',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Switchboard repaired',
+        location: 'Room 102',
+        description: 'Repaired previously.',
+        priority: 'medium',
+        status: 'Resolved',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    complaint_warnings: [],
+    audit_logs: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const elecAdminCaller: AuthenticatedCaller = {
+    id: 'usr_admin_elec',
+    email: 'elec.admin@college.edu',
+    name: 'Electrical Admin',
+    role: 'department_admin',
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+    admin_assignments: [
+      {
+        $id: 'da_elec',
+        user_id: 'usr_admin_elec',
+        email: 'elec.admin@college.edu',
+        department_id: 'dept_elec',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: past7Days,
+      },
+    ],
+  };
+
+  const mechAdminCaller: AuthenticatedCaller = {
+    id: 'usr_admin_mech',
+    email: 'mech.admin@college.edu',
+    name: 'Mechanical Admin',
+    role: 'department_admin',
+    department_id: 'dept_mech',
+    department_name: 'Mechanical',
+    admin_assignments: [
+      {
+        $id: 'da_mech',
+        user_id: 'usr_admin_mech',
+        email: 'mech.admin@college.edu',
+        department_id: 'dept_mech',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: past7Days,
+      },
+    ],
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_s1',
+    email: 's1@college.edu',
+    name: 'Student 1',
+    role: 'student',
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+  };
+
+  // 1. Non-principal cannot issue warning (403 FORBIDDEN)
+  const nonPrinWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    nonPrinWarnCtx.context,
+    studentCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'Why has this not been resolved yet?' },
+    { databases }
+  );
+  assert.equal(nonPrinWarnCtx.getResponse().statusCode, 403);
+
+  // 2. Cannot warn on fresh complaint (<= 5 days) -> 400 NOT_DELAY_ELIGIBLE
+  const freshWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    freshWarnCtx.context,
+    principalCaller,
+    { complaint_id: 'cmpl_fresh_elec', warning_reason: 'Please attend to this complaint immediately.' },
+    { databases }
+  );
+  assert.equal(freshWarnCtx.getResponse().statusCode, 400);
+  assert.equal(freshWarnCtx.getResponse().body.code, 'NOT_DELAY_ELIGIBLE');
+
+  // 3. Cannot warn on Resolved complaint -> 400 CANNOT_WARN_RESOLVED
+  const resolvedWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    resolvedWarnCtx.context,
+    principalCaller,
+    { complaint_id: 'cmpl_resolved_elec', warning_reason: 'Complaint is already resolved.' },
+    { databases }
+  );
+  assert.equal(resolvedWarnCtx.getResponse().statusCode, 400);
+  assert.equal(resolvedWarnCtx.getResponse().body.code, 'CANNOT_WARN_RESOLVED');
+
+  // 4. Principal successfully issues warning on delayed complaint
+  const validWarnCtx1 = createComplaintMockContext();
+  await handleIssueWarning(
+    validWarnCtx1.context,
+    principalCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'First formal warning: 7 days without resolution.' },
+    { databases }
+  );
+  assert.equal(validWarnCtx1.getResponse().statusCode, 201);
+  const warnData1 = validWarnCtx1.getResponse().body.data as { warning: ComplaintWarning };
+  assert.equal(warnData1.warning.complaint_id, 'cmpl_delayed_elec');
+  assert.equal(warnData1.warning.days_delayed >= 5, true);
+
+  // 5. Multiple warnings allowed while unresolved
+  const validWarnCtx2 = createComplaintMockContext();
+  await handleIssueWarning(
+    validWarnCtx2.context,
+    principalCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'Second formal warning: Urgent action required.' },
+    { databases }
+  );
+  assert.equal(validWarnCtx2.getResponse().statusCode, 201);
+  const warnData2 = validWarnCtx2.getResponse().body.data as { warning: ComplaintWarning };
+  assert.notEqual(warnData1.warning.$id, warnData2.warning.$id);
+
+  // Verify warnings count in DB
+  const warningsList = collections.get('complaint_warnings') || [];
+  assert.equal(warningsList.length, 2);
+
+  // 6. Admin responds to warning
+  // Cross-department admin blocked with 403 FORBIDDEN
+  const wrongAdminRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    wrongAdminRespCtx.context,
+    mechAdminCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Attempting cross-department response.' },
+    { databases }
+  );
+  assert.equal(wrongAdminRespCtx.getResponse().statusCode, 403);
+
+  // Student blocked with 403 FORBIDDEN
+  const studRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    studRespCtx.context,
+    studentCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Student attempting response.' },
+    { databases }
+  );
+  assert.equal(studRespCtx.getResponse().statusCode, 403);
+
+  // Assigned maintenance admin responds successfully
+  const validRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    validRespCtx.context,
+    elecAdminCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Parts ordered from supplier; replacement scheduled for tomorrow.' },
+    { databases }
+  );
+  assert.equal(validRespCtx.getResponse().statusCode, 200);
+  const updatedWarn = validRespCtx.getResponse().body.data as { warning: ComplaintWarning };
+  assert.equal(updatedWarn.warning.admin_response, 'Parts ordered from supplier; replacement scheduled for tomorrow.');
+  assert.ok(updatedWarn.warning.responded_at);
+
+  // Verify audit logs appended
+  const auditLogs = collections.get('audit_logs') || [];
+  assert.ok(auditLogs.some((l) => l.action === 'issue_warning'));
+  assert.ok(auditLogs.some((l) => l.action === 'respond_to_warning'));
+});
+
+test('Day 6: handleGetAuditHistory - Append-Only Audit History Retrieval', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    audit_logs: [
+      {
+        $id: 'al_1',
+        action: 'issue_warning',
+        actor_id: 'usr_principal_1',
+        actor_role: 'principal',
+        target_resource_id: 'cw_1',
+        target_resource_type: 'complaint_warning',
+        details: JSON.stringify({ reason: 'Delayed complaint' }),
+        created_at: '2026-11-19T10:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'al_2',
+        action: 'respond_to_warning',
+        actor_id: 'usr_admin_1',
+        actor_role: 'department_admin',
+        target_resource_id: 'cw_1',
+        target_resource_type: 'complaint_warning',
+        details: JSON.stringify({ response: 'Acknowledged' }),
+        created_at: '2026-11-19T11:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'al_3',
+        action: 'assign_department_admin',
+        actor_id: 'usr_principal_1',
+        actor_role: 'principal',
+        target_resource_id: 'da_1',
+        target_resource_type: 'department_admin',
+        details: JSON.stringify({ department_id: 'dept_civil', scope: 'academic' }),
+        created_at: '2026-11-19T12:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student_1',
+    email: 'student@college.edu',
+    name: 'Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Student blocked with 403 FORBIDDEN
+  const studAuditCtx = createComplaintMockContext();
+  await handleGetAuditHistory(studAuditCtx.context, studentCaller, {}, { databases });
+  assert.equal(studAuditCtx.getResponse().statusCode, 403);
+
+  // 2. Principal retrieves all audit logs
+  const prinAuditCtx = createComplaintMockContext();
+  await handleGetAuditHistory(prinAuditCtx.context, principalCaller, {}, { databases });
+  assert.equal(prinAuditCtx.getResponse().statusCode, 200);
+  const auditData = prinAuditCtx.getResponse().body.data as { audit_logs: AuditLog[]; total: number };
+  assert.equal(auditData.total, 3);
+  assert.equal(auditData.audit_logs.length, 3);
+  assert.equal(auditData.audit_logs[0].action, 'issue_warning');
+
+  // 3. Action filtering support
+  const filteredCtx = createComplaintMockContext();
+  await handleGetAuditHistory(filteredCtx.context, principalCaller, { action: 'issue_warning' }, { databases });
+  assert.equal(filteredCtx.getResponse().statusCode, 200);
+  const filteredData = filteredCtx.getResponse().body.data as { audit_logs: AuditLog[]; total: number };
+  assert.equal(filteredData.audit_logs.length, 1);
+  assert.equal(filteredData.audit_logs[0].action, 'issue_warning');
+});
+
 
 
 

@@ -32,6 +32,10 @@ import {
   handleGetPrincipalDashboard,
   handleIssueWarning,
   handleRespondToWarning,
+  handleListAdminAssignments,
+  handleAssignAdmin,
+  handleRevokeAdmin,
+  handleGetAuditHistory,
   type PrincipalHandlerDeps,
 } from './handlers/principal.js';
 import type { AppwriteContext } from './types.js';
@@ -196,6 +200,18 @@ export default async function main(
 
       case 'respond-to-warning':
         return await handleRespondToWarning(context, caller, data, deps?.principalDeps);
+
+      case 'list-admin-assignments':
+        return await handleListAdminAssignments(context, caller, deps?.principalDeps);
+
+      case 'assign-admin':
+        return await handleAssignAdmin(context, caller, data, deps?.principalDeps);
+
+      case 'revoke-admin':
+        return await handleRevokeAdmin(context, caller, data, deps?.principalDeps);
+
+      case 'get-audit-history':
+        return await handleGetAuditHistory(context, caller, data, deps?.principalDeps);
 
       default:
         return res.json(

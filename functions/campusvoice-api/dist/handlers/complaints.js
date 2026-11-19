@@ -1006,6 +1006,25 @@ export async function handleGetComplaint(context, caller, data, deps) {
         catch {
             hasSupported = false;
         }
+        let warnings = [];
+        if (includePrivateDetails) {
+            try {
+                const warningsResult = await databases.listDocuments(config.databaseId, config.warningsCollectionId, [Query.equal('complaint_id', complaintId), Query.orderAsc('created_at')]);
+                warnings = warningsResult.documents.map((wDoc) => ({
+                    $id: wDoc.$id,
+                    complaint_id: readStringField(wDoc, 'complaint_id'),
+                    issued_by_principal_id: readStringField(wDoc, 'issued_by_principal_id'),
+                    warning_reason: readStringField(wDoc, 'warning_reason'),
+                    days_delayed: readNumberField(wDoc, 'days_delayed') ?? 0,
+                    admin_response: readStringField(wDoc, 'admin_response') || undefined,
+                    responded_at: readStringField(wDoc, 'responded_at') || undefined,
+                    created_at: readStringField(wDoc, 'created_at') || wDoc.$createdAt,
+                }));
+            }
+            catch {
+                warnings = [];
+            }
+        }
         return res.json({
             success: true,
             data: {
@@ -1022,6 +1041,7 @@ export async function handleGetComplaint(context, caller, data, deps) {
                 },
                 timeline: projectedTimeline,
                 has_supported: hasSupported,
+                warnings,
             },
         }, 200);
     }

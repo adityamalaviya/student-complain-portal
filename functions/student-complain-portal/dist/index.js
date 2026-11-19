@@ -3,7 +3,7 @@ import { INSTITUTIONAL_DEPARTMENTS, toDepartmentModel } from './departments.js';
 import { handleGetProfile, handleCompleteOnboarding, handleListDepartments, } from './handlers/profile.js';
 import { handleCreateComplaint, handleListComplaints, handleGetComplaint, handleGetComplaintAttachment, handleSupportComplaint, handleRemoveSupport, handleGetSupportState, handleGetAdminDashboard, handleListAdminComplaints, handleUpdateAdminComplaint, handleRequestClarification, handleReplyClarification, } from './handlers/complaints.js';
 import { handleRequestPhoneChange, handleReviewPhoneChange, handleCompletePhoneChange, handleListPhoneChangeRequests, } from './handlers/phoneChange.js';
-import { handleGetPrincipalDashboard, handleIssueWarning, handleRespondToWarning, } from './handlers/principal.js';
+import { handleGetPrincipalDashboard, handleIssueWarning, handleRespondToWarning, handleListAdminAssignments, handleAssignAdmin, handleRevokeAdmin, handleGetAuditHistory, } from './handlers/principal.js';
 export default async function main(context, deps) {
     const { req, res, log } = context;
     try {
@@ -114,6 +114,14 @@ export default async function main(context, deps) {
                 return await handleIssueWarning(context, caller, data, deps?.principalDeps);
             case 'respond-to-warning':
                 return await handleRespondToWarning(context, caller, data, deps?.principalDeps);
+            case 'list-admin-assignments':
+                return await handleListAdminAssignments(context, caller, deps?.principalDeps);
+            case 'assign-admin':
+                return await handleAssignAdmin(context, caller, data, deps?.principalDeps);
+            case 'revoke-admin':
+                return await handleRevokeAdmin(context, caller, data, deps?.principalDeps);
+            case 'get-audit-history':
+                return await handleGetAuditHistory(context, caller, data, deps?.principalDeps);
             default:
                 return res.json({
                     success: false,

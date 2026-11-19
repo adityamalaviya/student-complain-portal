@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { extractAndMapEnrollment } from '../src/lib/utils/department.ts';
+import { calculateComplaintDelay } from '../src/lib/utils/delay.ts';
 
 // =====================================================================
 // Phase 6: Testing & Hardening Comprehensive Verification Suite
@@ -669,4 +670,710 @@ test('Phase 6 Test 6: Full Multi-Role End-to-End Lifecycle Verification', () => 
     'Vendor recalibration completed. Pressure gauge sensor replaced and recalibrated to ISO standards.'
   );
   assert.equal(complaint.support_count, 1);
+});
+
+// =====================================================================
+// Day 6: Institutional Governance, Warnings, and Audit Engine Helpers
+// =====================================================================
+
+const INSTITUTIONAL_DEPARTMENTS_CONFIG = {
+  dept_comp: { name: 'Computer Engineering', is_academic: true, is_maintenance: true },
+  dept_it: { name: 'Information Technology', is_academic: true, is_maintenance: true },
+  dept_mech: { name: 'Mechanical Engineering', is_academic: true, is_maintenance: true },
+  dept_civil: { name: 'Civil Engineering', is_academic: true, is_maintenance: true },
+  dept_elec: { name: 'Electrical Engineering', is_academic: true, is_maintenance: true },
+  dept_water: { name: 'Water & Utilities', is_academic: false, is_maintenance: true },
+  dept_sanit: { name: 'Sanitation & Hygiene', is_academic: false, is_maintenance: true },
+};
+
+function processIssueWarning({ caller, complaint, warningReason, warningsDb, now = new Date() }) {
+  if (caller.role !== 'principal') {
+    return {
+      status: 403,
+      body: { success: false, error: 'Only the Principal can issue warnings on delayed complaints.', code: 'FORBIDDEN' },
+    };
+  }
+
+  const reason = typeof warningReason === 'string' ? warningReason.trim() : '';
+  if (reason.length < 10 || reason.length > 2000) {
+    return {
+      status: 400,
+      body: { success: false, error: 'Warning reason must be between 10 and 2000 characters.', code: 'INVALID_WARNING_REASON' },
+    };
+  }
+
+  if (complaint.status === 'Resolved' || complaint.status === 'resolved') {
+    return {
+      status: 400,
+      body: { success: false, error: 'Principal cannot issue warnings on resolved complaints.', code: 'CANNOT_WARN_RESOLVED' },
+    };
+  }
+
+  const delayInfo = calculateComplaintDelay(complaint, now);
+  if (!delayInfo.is_delayed) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: `Complaint is not eligible for a warning. Elapsed time since last milestone has not exceeded 5 days (currently ${delayInfo.days_delayed} days).`,
+        code: 'NOT_DELAY_ELIGIBLE',
+      },
+    };
+  }
+
+  const warningId = `cw_${crypto.randomUUID().replace(/-/g, '').slice(0, 32)}`;
+  const warningRecord = {
+    $id: warningId,
+    complaint_id: complaint.$id,
+    issued_by_principal_id: caller.id,
+    warning_reason: reason,
+    days_delayed: delayInfo.days_delayed,
+    admin_response: null,
+    responded_at: null,
+    created_at: typeof now === 'string' ? now : now.toISOString(),
+  };
+
+  if (warningsDb) {
+    const list = warningsDb.get(complaint.$id) || [];
+    list.push(warningRecord);
+    warningsDb.set(complaint.$id, list);
+  }
+
+  return {
+    status: 201,
+    body: { success: true, warning: warningRecord },
+  };
+}
+
+function processRespondToWarning({ caller, warning, complaint, adminResponse, now = new Date() }) {
+  const isPrincipal = caller.role === 'principal';
+  let isAuthorizedAdmin = false;
+
+  if (!isPrincipal && caller.role === 'department_admin') {
+    const maintenanceAssignments = (caller.admin_assignments || []).filter(
+      (a) => a.is_active && a.scope === 'maintenance' && a.department_id === complaint.maintenance_department_id
+    );
+    isAuthorizedAdmin = maintenanceAssignments.length > 0;
+  }
+
+  if (!isPrincipal && !isAuthorizedAdmin) {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: 'Only the assigned Maintenance Department Administrator can respond to this warning.',
+        code: 'FORBIDDEN',
+      },
+    };
+  }
+
+  const responseText = typeof adminResponse === 'string' ? adminResponse.trim() : '';
+  if (responseText.length < 10 || responseText.length > 2000) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'Admin response must be between 10 and 2000 characters.',
+        code: 'INVALID_ADMIN_RESPONSE',
+      },
+    };
+  }
+
+  warning.admin_response = responseText;
+  warning.responded_at = typeof now === 'string' ? now : now.toISOString();
+
+  return {
+    status: 200,
+    body: { success: true, warning },
+  };
+}
+
+function processAssignAdmin({ caller, email, departmentId, scope, profilesDb, assignmentsDb }) {
+  if (caller.role !== 'principal') {
+    return {
+      status: 403,
+      body: { success: false, error: 'Only the Principal can assign department administrators.', code: 'FORBIDDEN' },
+    };
+  }
+
+  const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    return {
+      status: 400,
+      body: { success: false, error: 'A valid email address is required.', code: 'INVALID_EMAIL' },
+    };
+  }
+
+  const dept = INSTITUTIONAL_DEPARTMENTS_CONFIG[departmentId];
+  if (!dept) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'Invalid department ID. Must be one of the six canonical institutional departments.',
+        code: 'INVALID_DEPARTMENT',
+      },
+    };
+  }
+
+  if (scope !== 'academic' && scope !== 'maintenance') {
+    return {
+      status: 400,
+      body: { success: false, error: "Scope must be either 'academic' or 'maintenance'.", code: 'INVALID_SCOPE' },
+    };
+  }
+
+  // Canonical Invariant: Water and Sanitation are maintenance-only and cannot have academic administrators
+  if (scope === 'academic' && !dept.is_academic) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: `Department '${dept.name}' (${departmentId}) is maintenance-only and cannot be assigned academic scope.`,
+        code: 'INVALID_DEPARTMENT_SCOPE',
+      },
+    };
+  }
+
+  // Look up profile if present
+  let targetProfile = null;
+  if (profilesDb) {
+    for (const p of profilesDb.values()) {
+      if (p.email?.toLowerCase() === normalizedEmail) {
+        targetProfile = p;
+        break;
+      }
+    }
+  }
+
+  const assignmentId = `da_${crypto.randomUUID().replace(/-/g, '').slice(0, 32)}`;
+  const assignment = {
+    $id: assignmentId,
+    user_id: targetProfile ? (targetProfile.user_id || targetProfile.$id) : '',
+    email: normalizedEmail,
+    department_id: departmentId,
+    scope,
+    is_active: true,
+    assigned_by: caller.id,
+    created_at: new Date().toISOString(),
+  };
+
+  if (assignmentsDb) {
+    assignmentsDb.set(assignmentId, assignment);
+  }
+
+  if (targetProfile) {
+    targetProfile.role = 'department_admin';
+  }
+
+  return {
+    status: 201,
+    body: { success: true, assignment },
+  };
+}
+
+function processRevokeAdmin({ caller, assignmentId, profilesDb, assignmentsDb }) {
+  if (caller.role !== 'principal') {
+    return {
+      status: 403,
+      body: { success: false, error: 'Only the Principal can revoke administrator assignments.', code: 'FORBIDDEN' },
+    };
+  }
+
+  const assignment = assignmentsDb ? assignmentsDb.get(assignmentId) : null;
+  if (!assignment) {
+    return {
+      status: 404,
+      body: { success: false, error: 'Assignment not found.', code: 'NOT_FOUND' },
+    };
+  }
+
+  assignment.is_active = false;
+
+  // Check if target user has any other active assignments
+  if (assignment.user_id && profilesDb && assignmentsDb) {
+    let hasOtherActive = false;
+    for (const a of assignmentsDb.values()) {
+      if (a.user_id === assignment.user_id && a.is_active && a.$id !== assignmentId) {
+        hasOtherActive = true;
+        break;
+      }
+    }
+    if (!hasOtherActive) {
+      const profile = profilesDb.get(assignment.user_id);
+      if (profile) {
+        profile.role = 'student';
+      }
+    }
+  }
+
+  return {
+    status: 200,
+    body: { success: true, assignment },
+  };
+}
+
+function processGetAuditHistory({ caller, auditLogsList, filter = {} }) {
+  if (caller.role !== 'principal') {
+    return {
+      status: 403,
+      body: { success: false, error: 'Only the Principal can inspect system audit logs.', code: 'FORBIDDEN' },
+    };
+  }
+
+  let filtered = [...auditLogsList];
+  if (filter.action) {
+    filtered = filtered.filter((log) => log.action === filter.action);
+  }
+  if (filter.actor_id) {
+    filtered = filtered.filter((log) => log.actor_id === filter.actor_id);
+  }
+  if (filter.target_resource_id) {
+    filtered = filtered.filter((log) => log.target_resource_id === filter.target_resource_id);
+  }
+
+  // Sort descending by created_at
+  filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        audit_logs: filtered,
+        total: filtered.length,
+      },
+    },
+  };
+}
+
+// ----------------------------------------------------
+// Day 6 Tests
+// ----------------------------------------------------
+
+test('Phase 6 Test 7: Five-Day Delay Milestone Logic & Non-Substantive Invariance', () => {
+  const now = new Date('2026-11-20T12:00:00.000Z');
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+  // 1. Pending complaint created 3 days ago -> NOT delayed
+  const pendingRecent = {
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 3 * MS_PER_DAY).toISOString(),
+  };
+  const delayRecent = calculateComplaintDelay(pendingRecent, now);
+  assert.equal(delayRecent.is_delayed, false);
+  assert.equal(delayRecent.days_delayed, 3);
+
+  // 2. Pending complaint created 6 days ago -> IS delayed
+  const pendingDelayed = {
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 6 * MS_PER_DAY).toISOString(),
+  };
+  const delayOld = calculateComplaintDelay(pendingDelayed, now);
+  assert.equal(delayOld.is_delayed, true);
+  assert.equal(delayOld.days_delayed, 6);
+  assert.ok(delayOld.reason?.includes('pending resolution for more than 5 days'));
+
+  // 3. In Progress complaint created 10 days ago, with substantive progress update 2 days ago -> NOT delayed
+  const inProgressActive = {
+    status: 'In Progress',
+    created_at: new Date(now.getTime() - 10 * MS_PER_DAY).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 2 * MS_PER_DAY).toISOString(),
+  };
+  const delayProgressActive = calculateComplaintDelay(inProgressActive, now);
+  assert.equal(delayProgressActive.is_delayed, false);
+  assert.equal(delayProgressActive.days_delayed, 2);
+
+  // 4. In Progress complaint created 10 days ago, last meaningful update 8 days ago -> IS delayed
+  const inProgressStalled = {
+    status: 'In Progress',
+    created_at: new Date(now.getTime() - 10 * MS_PER_DAY).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 8 * MS_PER_DAY).toISOString(),
+  };
+  const delayProgressStalled = calculateComplaintDelay(inProgressStalled, now);
+  assert.equal(delayProgressStalled.is_delayed, true);
+  assert.equal(delayProgressStalled.days_delayed, 8);
+  assert.ok(delayProgressStalled.reason?.includes('substantive progress update'));
+
+  // 5. Non-substantive update (e.g. upvote, view) does not change last_meaningful_update_at -> timer continues
+  const complaintAfterUpvote = {
+    ...inProgressStalled,
+    support_count: 5, // Upvote bumped support count but last_meaningful_update_at unchanged
+  };
+  const delayAfterUpvote = calculateComplaintDelay(complaintAfterUpvote, now);
+  assert.equal(delayAfterUpvote.is_delayed, true);
+  assert.equal(delayAfterUpvote.days_delayed, 8);
+
+  // 6. Substantive update (admin progress note) resets timer
+  const complaintAfterProgressUpdate = {
+    ...inProgressStalled,
+    last_meaningful_update_at: now.toISOString(),
+  };
+  const delayAfterSubstantive = calculateComplaintDelay(complaintAfterProgressUpdate, now);
+  assert.equal(delayAfterSubstantive.is_delayed, false);
+  assert.equal(delayAfterSubstantive.days_delayed, 0);
+
+  // 7. Resolved complaint is NEVER delayed (even if created 40 days ago)
+  const resolvedComplaint = {
+    status: 'Resolved',
+    created_at: new Date(now.getTime() - 40 * MS_PER_DAY).toISOString(),
+    resolved_at: new Date(now.getTime() - 30 * MS_PER_DAY).toISOString(),
+  };
+  const delayResolved = calculateComplaintDelay(resolvedComplaint, now);
+  assert.equal(delayResolved.is_delayed, false);
+  assert.equal(delayResolved.days_delayed, 0);
+});
+
+test('Phase 6 Test 8: Principal Manual Warning Directives, Multiple Warnings & RBAC', () => {
+  const now = new Date('2026-11-20T12:00:00.000Z');
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const warningsDb = new Map();
+
+  const principalCaller = { id: 'usr_principal_01', role: 'principal' };
+  const studentCaller = { id: 'usr_student_01', role: 'student' };
+  const adminCaller = { id: 'usr_admin_01', role: 'department_admin' };
+
+  const delayedComplaint = {
+    $id: 'c_water_delayed_01',
+    maintenance_department_id: 'dept_water',
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 7 * MS_PER_DAY).toISOString(),
+  };
+
+  const nonDelayedComplaint = {
+    $id: 'c_water_fresh_02',
+    maintenance_department_id: 'dept_water',
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 2 * MS_PER_DAY).toISOString(),
+  };
+
+  const resolvedComplaint = {
+    $id: 'c_water_resolved_03',
+    maintenance_department_id: 'dept_water',
+    status: 'Resolved',
+    created_at: new Date(now.getTime() - 15 * MS_PER_DAY).toISOString(),
+  };
+
+  // 1. Student attempts warning -> 403 FORBIDDEN
+  const studentAttempt = processIssueWarning({
+    caller: studentCaller,
+    complaint: delayedComplaint,
+    warningReason: 'Student attempting warning directive',
+    warningsDb,
+    now,
+  });
+  assert.equal(studentAttempt.status, 403);
+  assert.equal(studentAttempt.body.code, 'FORBIDDEN');
+
+  // 2. Department Admin attempts warning -> 403 FORBIDDEN
+  const adminAttempt = processIssueWarning({
+    caller: adminCaller,
+    complaint: delayedComplaint,
+    warningReason: 'Admin attempting warning directive',
+    warningsDb,
+    now,
+  });
+  assert.equal(adminAttempt.status, 403);
+  assert.equal(adminAttempt.body.code, 'FORBIDDEN');
+
+  // 3. Principal warns non-delayed complaint (< 5 days) -> 400 NOT_DELAY_ELIGIBLE
+  const earlyWarning = processIssueWarning({
+    caller: principalCaller,
+    complaint: nonDelayedComplaint,
+    warningReason: 'Please attend to this grievance immediately.',
+    warningsDb,
+    now,
+  });
+  assert.equal(earlyWarning.status, 400);
+  assert.equal(earlyWarning.body.code, 'NOT_DELAY_ELIGIBLE');
+
+  // 4. Principal warns resolved complaint -> 400 CANNOT_WARN_RESOLVED
+  const resolvedWarning = processIssueWarning({
+    caller: principalCaller,
+    complaint: resolvedComplaint,
+    warningReason: 'Warning on already resolved grievance',
+    warningsDb,
+    now,
+  });
+  assert.equal(resolvedWarning.status, 400);
+  assert.equal(resolvedWarning.body.code, 'CANNOT_WARN_RESOLVED');
+
+  // 5. Principal warns delayed complaint (> 5 days) -> 201 Created
+  const validWarning1 = processIssueWarning({
+    caller: principalCaller,
+    complaint: delayedComplaint,
+    warningReason: 'First formal directive: Water supply interruption has exceeded standard 5-day milestone.',
+    warningsDb,
+    now,
+  });
+  assert.equal(validWarning1.status, 201);
+  assert.ok(validWarning1.body.warning.$id.startsWith('cw_'));
+  assert.equal(validWarning1.body.warning.days_delayed, 7);
+
+  // 6. Principal issues second warning on same complaint -> multiple warnings supported
+  const futureNow = new Date(now.getTime() + 4 * MS_PER_DAY);
+  const validWarning2 = processIssueWarning({
+    caller: principalCaller,
+    complaint: delayedComplaint,
+    warningReason: 'Second formal directive: Critical priority escalation requested by campus administration.',
+    warningsDb,
+    now: futureNow,
+  });
+  assert.equal(validWarning2.status, 201);
+  assert.equal(validWarning2.body.warning.days_delayed, 11);
+
+  const storedWarnings = warningsDb.get(delayedComplaint.$id);
+  assert.equal(storedWarnings.length, 2, 'Complaint must have 2 warnings recorded');
+});
+
+test('Phase 6 Test 9: Maintenance Admin Warning Responses & Scoped Authorization', () => {
+  const now = new Date('2026-11-20T14:00:00.000Z');
+
+  const complaint = {
+    $id: 'c_water_100',
+    maintenance_department_id: 'dept_water',
+    status: 'Pending',
+  };
+
+  const warning = {
+    $id: 'cw_water_warning_01',
+    complaint_id: complaint.$id,
+    issued_by_principal_id: 'usr_principal_01',
+    warning_reason: 'Please restore water pressure to Block C.',
+    days_delayed: 6,
+    admin_response: null,
+    responded_at: null,
+  };
+
+  const studentCaller = { id: 'usr_student_01', role: 'student' };
+  const waterMaintenanceAdmin = {
+    id: 'usr_water_admin',
+    role: 'department_admin',
+    admin_assignments: [{ department_id: 'dept_water', scope: 'maintenance', is_active: true }],
+  };
+  const civilMaintenanceAdmin = {
+    id: 'usr_civil_admin',
+    role: 'department_admin',
+    admin_assignments: [{ department_id: 'dept_civil', scope: 'maintenance', is_active: true }],
+  };
+  const waterAcademicAdmin = {
+    id: 'usr_water_academic',
+    role: 'department_admin',
+    admin_assignments: [{ department_id: 'dept_water', scope: 'academic', is_active: true }],
+  };
+
+  // 1. Student attempt -> 403 FORBIDDEN
+  const studentAttempt = processRespondToWarning({
+    caller: studentCaller,
+    warning,
+    complaint,
+    adminResponse: 'Student responding to warning directive',
+    now,
+  });
+  assert.equal(studentAttempt.status, 403);
+  assert.equal(studentAttempt.body.code, 'FORBIDDEN');
+
+  // 2. Cross-department admin (Civil admin trying to respond to Water warning) -> 403 FORBIDDEN
+  const crossDeptAttempt = processRespondToWarning({
+    caller: civilMaintenanceAdmin,
+    warning,
+    complaint,
+    adminResponse: 'Civil admin attempting response to Water warning',
+    now,
+  });
+  assert.equal(crossDeptAttempt.status, 403);
+  assert.equal(crossDeptAttempt.body.code, 'FORBIDDEN');
+
+  // 3. Academic admin for Water (wrong scope) -> 403 FORBIDDEN
+  const academicScopeAttempt = processRespondToWarning({
+    caller: waterAcademicAdmin,
+    warning,
+    complaint,
+    adminResponse: 'Academic admin responding to maintenance warning',
+    now,
+  });
+  assert.equal(academicScopeAttempt.status, 403);
+  assert.equal(academicScopeAttempt.body.code, 'FORBIDDEN');
+
+  // 4. Authorized Maintenance Admin responds -> 200 Success
+  const validResponse = processRespondToWarning({
+    caller: waterMaintenanceAdmin,
+    warning,
+    complaint,
+    adminResponse: 'Primary pump overhaul has been completed; water pressure testing scheduled for 4 PM.',
+    now,
+  });
+  assert.equal(validResponse.status, 200);
+  assert.equal(
+    warning.admin_response,
+    'Primary pump overhaul has been completed; water pressure testing scheduled for 4 PM.'
+  );
+  assert.ok(warning.responded_at);
+});
+
+test('Phase 6 Test 10: Dynamic Department Admin Assignment, Water/Sanitation Scope Prohibition & Revocation', () => {
+  const profilesDb = new Map();
+  const assignmentsDb = new Map();
+
+  const principalCaller = { id: 'usr_principal_01', role: 'principal' };
+  const studentCaller = { id: 'usr_student_01', role: 'student' };
+
+  // Seed profiles
+  const studentProfile = {
+    user_id: 'usr_candidate_01',
+    email: 'admin.water@college.edu',
+    name: 'Ramesh Patel',
+    role: 'student',
+  };
+  profilesDb.set(studentProfile.user_id, studentProfile);
+
+  // 1. Non-Principal attempts assignment -> 403 FORBIDDEN
+  const unauthorizedAssign = processAssignAdmin({
+    caller: studentCaller,
+    email: 'admin.water@college.edu',
+    departmentId: 'dept_water',
+    scope: 'maintenance',
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(unauthorizedAssign.status, 403);
+  assert.equal(unauthorizedAssign.body.code, 'FORBIDDEN');
+
+  // 2. Principal assigns Water (dept_water) with academic scope -> 400 INVALID_DEPARTMENT_SCOPE
+  const invalidWaterScope = processAssignAdmin({
+    caller: principalCaller,
+    email: 'admin.water@college.edu',
+    departmentId: 'dept_water',
+    scope: 'academic',
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(invalidWaterScope.status, 400);
+  assert.equal(invalidWaterScope.body.code, 'INVALID_DEPARTMENT_SCOPE');
+  assert.ok(invalidWaterScope.body.error.includes('maintenance-only and cannot be assigned academic scope'));
+
+  // 3. Principal assigns Sanitation (dept_sanit) with academic scope -> 400 INVALID_DEPARTMENT_SCOPE
+  const invalidSanitScope = processAssignAdmin({
+    caller: principalCaller,
+    email: 'admin.sanit@college.edu',
+    departmentId: 'dept_sanit',
+    scope: 'academic',
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(invalidSanitScope.status, 400);
+  assert.equal(invalidSanitScope.body.code, 'INVALID_DEPARTMENT_SCOPE');
+
+  // 4. Principal assigns Water (dept_water) with maintenance scope -> 201 Success & Role Promotion
+  const validWaterAssign = processAssignAdmin({
+    caller: principalCaller,
+    email: 'admin.water@college.edu',
+    departmentId: 'dept_water',
+    scope: 'maintenance',
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(validWaterAssign.status, 201);
+  const assignmentId = validWaterAssign.body.assignment.$id;
+  assert.ok(assignmentId.startsWith('da_'));
+  assert.equal(studentProfile.role, 'department_admin', 'Target profile role must be promoted to department_admin');
+
+  // 5. Principal assigns Computer (dept_comp) with academic scope -> 201 Success
+  const validCompAssign = processAssignAdmin({
+    caller: principalCaller,
+    email: 'admin.comp@college.edu',
+    departmentId: 'dept_comp',
+    scope: 'academic',
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(validCompAssign.status, 201);
+  assert.equal(validCompAssign.body.assignment.scope, 'academic');
+
+  // 6. Principal revokes Water admin assignment -> 200 Success & Role Demotion
+  const revokeRes = processRevokeAdmin({
+    caller: principalCaller,
+    assignmentId,
+    profilesDb,
+    assignmentsDb,
+  });
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.assignment.is_active, false);
+  assert.equal(studentProfile.role, 'student', 'Target profile role must revert to student when no active assignments remain');
+});
+
+test('Phase 6 Test 11: Append-Only Audit Logs Retrieval, Filtering & Tamper Resistance', () => {
+  const principalCaller = { id: 'usr_principal_01', role: 'principal' };
+  const studentCaller = { id: 'usr_student_01', role: 'student' };
+  const adminCaller = { id: 'usr_admin_01', role: 'department_admin' };
+
+  const auditLogsList = [
+    {
+      $id: 'audit_01',
+      action: 'issue_warning',
+      actor_id: 'usr_principal_01',
+      actor_role: 'principal',
+      target_resource_id: 'cw_01',
+      target_resource_type: 'complaint_warning',
+      details: JSON.stringify({ complaint_id: 'c_water_01', days_delayed: 6 }),
+      created_at: '2026-11-20T10:00:00.000Z',
+    },
+    {
+      $id: 'audit_02',
+      action: 'assign_department_admin',
+      actor_id: 'usr_principal_01',
+      actor_role: 'principal',
+      target_resource_id: 'da_01',
+      target_resource_type: 'department_admin',
+      details: JSON.stringify({ department_id: 'dept_water', scope: 'maintenance' }),
+      created_at: '2026-11-20T11:00:00.000Z',
+    },
+    {
+      $id: 'audit_03',
+      action: 'respond_to_warning',
+      actor_id: 'usr_water_admin',
+      actor_role: 'department_admin',
+      target_resource_id: 'cw_01',
+      target_resource_type: 'complaint_warning',
+      details: JSON.stringify({ complaint_id: 'c_water_01', response: 'Inspected' }),
+      created_at: '2026-11-20T12:00:00.000Z',
+    },
+  ];
+
+  // 1. Student attempts to read audit trail -> 403 FORBIDDEN
+  const studentAttempt = processGetAuditHistory({
+    caller: studentCaller,
+    auditLogsList,
+  });
+  assert.equal(studentAttempt.status, 403);
+  assert.equal(studentAttempt.body.code, 'FORBIDDEN');
+
+  // 2. Department Admin attempts to read audit trail -> 403 FORBIDDEN
+  const adminAttempt = processGetAuditHistory({
+    caller: adminCaller,
+    auditLogsList,
+  });
+  assert.equal(adminAttempt.status, 403);
+  assert.equal(adminAttempt.body.code, 'FORBIDDEN');
+
+  // 3. Principal reads complete audit trail -> 200 Success
+  const principalRead = processGetAuditHistory({
+    caller: principalCaller,
+    auditLogsList,
+  });
+  assert.equal(principalRead.status, 200);
+  assert.equal(principalRead.body.data.total, 3);
+  // Verify chronological ordering descending
+  assert.equal(principalRead.body.data.audit_logs[0].$id, 'audit_03');
+  assert.equal(principalRead.body.data.audit_logs[2].$id, 'audit_01');
+
+  // 4. Principal filters by action
+  const warningFilter = processGetAuditHistory({
+    caller: principalCaller,
+    auditLogsList,
+    filter: { action: 'issue_warning' },
+  });
+  assert.equal(warningFilter.status, 200);
+  assert.equal(warningFilter.body.data.total, 1);
+  assert.equal(warningFilter.body.data.audit_logs[0].action, 'issue_warning');
 });

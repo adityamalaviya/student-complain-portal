@@ -15,6 +15,8 @@ import {
   User,
   ShieldCheck,
   ClockCounterClockwise,
+  Clock,
+  WarningCircle,
   ArrowsClockwise,
   ChatText,
   NotePencil,
@@ -29,8 +31,8 @@ import {
   apiReplyClarification,
   apiUpdateAdminComplaint,
 } from '@/lib/api';
-import { resolveDepartment } from '@/lib/utils';
-import type { Complaint, ComplaintStatus, ComplaintTimeline } from '@/types';
+import { resolveDepartment, calculateComplaintDelay } from '@/lib/utils';
+import type { Complaint, ComplaintStatus, ComplaintTimeline, ComplaintWarning } from '@/types';
 import {
   ComplaintStatusBadge,
   ComplaintPriorityBadge,
@@ -39,6 +41,8 @@ import {
   AdminResolutionModal,
   ClarificationRequestModal,
   ClarificationReplyBox,
+  IssueWarningModal,
+  RespondWarningModal,
   type AdminResolutionSubmitResult,
 } from '@/components';
 
@@ -159,6 +163,10 @@ export default function ComplaintDetailPage(): React.ReactElement {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isResolutionModalOpen, setIsResolutionModalOpen] = useState<boolean>(false);
   const [isClarificationModalOpen, setIsClarificationModalOpen] = useState<boolean>(false);
+  const [warnings, setWarnings] = useState<ComplaintWarning[]>([]);
+  const [isIssueWarningModalOpen, setIsIssueWarningModalOpen] = useState<boolean>(false);
+  const [selectedWarningForResponse, setSelectedWarningForResponse] = useState<ComplaintWarning | null>(null);
+  const [isRespondWarningModalOpen, setIsRespondWarningModalOpen] = useState<boolean>(false);
 
   // Authentication & Onboarding Guards
   useEffect(() => {
@@ -185,6 +193,8 @@ export default function ComplaintDetailPage(): React.ReactElement {
         setTimeline(Array.isArray(res.data.timeline) ? res.data.timeline : []);
         setHasSupported(Boolean(res.data.has_supported));
         setSupportCount(res.data.complaint.support_count ?? 1);
+        const rawWarnings = (res.data as { warnings?: ComplaintWarning[] }).warnings;
+        setWarnings(Array.isArray(rawWarnings) ? rawWarnings : []);
       } else if (
         res.code === 'NOT_FOUND' ||
         res.code === 'UNAUTHORIZED' ||
@@ -626,6 +636,102 @@ export default function ComplaintDetailPage(): React.ReactElement {
             />
           </div>
 
+          {/* Institutional Administrative Warnings Section */}
+          {complaint && (warnings.length > 0 || (isPrincipal && complaint.status !== 'Resolved' && (Boolean(complaint.is_delayed) || calculateComplaintDelay(complaint).is_delayed))) && (
+            <section className="mt-8 rounded-2xl border border-red-200 bg-red-50/40 p-5 dark:border-red-900/60 dark:bg-red-950/20">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-400">
+                    <WarningCircle size={18} weight="bold" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900 sm:text-base dark:text-white">
+                      Institutional Administrative Warnings
+                    </h2>
+                    <p className="text-xs text-slate-600 dark:text-slate-400">
+                      Formal directives issued by the Principal for complaints exceeding resolution milestones.
+                    </p>
+                  </div>
+                </div>
+
+                {isPrincipal && complaint.status !== 'Resolved' && (Boolean(complaint.is_delayed) || calculateComplaintDelay(complaint).is_delayed) && (
+                  <button
+                    type="button"
+                    onClick={() => setIsIssueWarningModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-red-700 dark:bg-red-700 dark:hover:bg-red-600"
+                  >
+                    <WarningCircle size={14} weight="bold" />
+                    <span>Issue Warning</span>
+                  </button>
+                )}
+              </div>
+
+              {warnings.length === 0 ? (
+                <div className="mt-4 rounded-xl border border-red-100 bg-white/80 p-4 text-xs text-slate-600 dark:border-red-950/40 dark:bg-slate-900/60 dark:text-slate-400">
+                  This grievance has exceeded the 5-day resolution milestone. No formal administrative warnings have been issued yet.
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {warnings.map((w, idx) => (
+                    <div
+                      key={w.$id || idx}
+                      className="rounded-xl border border-red-200 bg-white p-4 shadow-2xs dark:border-red-900/60 dark:bg-slate-900"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-red-800 dark:bg-red-950 dark:text-red-300">
+                            Warning #{idx + 1}
+                          </span>
+                          <span className="text-xs font-bold text-slate-900 dark:text-white">
+                            Issued by Principal
+                          </span>
+                          <span className="text-xs text-slate-500">• {formatTimelineDate(w.created_at)}</span>
+                        </div>
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                          <Clock size={12} weight="bold" />
+                          {w.days_delayed}d delayed
+                        </span>
+                      </div>
+
+                      <p className="mt-2 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+                        {w.warning_reason}
+                      </p>
+
+                      {w.admin_response ? (
+                        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
+                          <div className="flex items-center justify-between text-[11px] font-semibold text-amber-900 dark:text-amber-300">
+                            <span>Maintenance Administrator Response:</span>
+                            {w.responded_at && <span>{formatTimelineDate(w.responded_at)}</span>}
+                          </div>
+                          <p className="mt-1 text-slate-800 dark:text-slate-200">{w.admin_response}</p>
+                        </div>
+                      ) : (
+                        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-xs dark:border-slate-800">
+                          <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                            Awaiting response from Maintenance Administrator...
+                          </span>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedWarningForResponse(w);
+                                setIsRespondWarningModalOpen(true);
+                              }}
+                              className="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-200 dark:bg-amber-900/60 dark:text-amber-200"
+                            >
+                              <ChatText size={12} weight="bold" />
+                              <span>Respond to Warning</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           {/* Official Responses & Chronological Complaint Timeline */}
           <section className="mt-8 border-t border-slate-100 pt-6 dark:border-slate-800">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -795,6 +901,40 @@ export default function ComplaintDetailPage(): React.ReactElement {
             onSubmit={handleClarificationSubmit}
           />
         </>
+      )}
+
+      {isPrincipal && complaint && (
+        <IssueWarningModal
+          isOpen={isIssueWarningModalOpen}
+          complaintId={complaint.$id}
+          complaintTitle={complaint.title}
+          departmentName={maintDept?.name || complaint.department_name}
+          daysDelayed={calculateComplaintDelay(complaint).days_delayed}
+          onClose={() => setIsIssueWarningModalOpen(false)}
+          onSuccess={() => {
+            setIsIssueWarningModalOpen(false);
+            void fetchComplaintDetails();
+          }}
+        />
+      )}
+
+      {selectedWarningForResponse && (
+        <RespondWarningModal
+          isOpen={isRespondWarningModalOpen}
+          warningId={selectedWarningForResponse.$id}
+          complaintTitle={complaint?.title}
+          warningReason={selectedWarningForResponse.warning_reason}
+          daysDelayed={selectedWarningForResponse.days_delayed}
+          onClose={() => {
+            setIsRespondWarningModalOpen(false);
+            setSelectedWarningForResponse(null);
+          }}
+          onSuccess={() => {
+            setIsRespondWarningModalOpen(false);
+            setSelectedWarningForResponse(null);
+            void fetchComplaintDetails();
+          }}
+        />
       )}
 
       {/* Footer */}
