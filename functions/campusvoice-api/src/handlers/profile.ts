@@ -233,42 +233,50 @@ export async function handleGetProfile(
       is_active: true,
     };
 
-    // 2. Derive role:
-    const effectiveRole: UserRole = adminAssignment ? 'department_admin' : 'student';
-
-    // 6. Add these logs:
-    console.log('[get-profile] caller email:', caller.email);
-    console.log('[get-profile] admin assignment found:', !!adminAssignment);
-    console.log('[get-profile] effective role:', effectiveRole);
-
     const listResult = await databases.listDocuments(
       config.databaseId,
       config.profilesCollectionId,
       [Query.equal('user_id', caller.id), Query.limit(1)]
     );
 
-    // 3. If profile document exists:
-    if (listResult.total > 0 && listResult.documents[0]) {
-      const doc = listResult.documents[0];
-      const isCallerAdmin = effectiveRole === 'department_admin';
+    const doc = listResult.total > 0 && listResult.documents[0] ? listResult.documents[0] : null;
+    const rawDocRole = doc ? readStringField(doc, 'role') : '';
 
-      // Update its role field to effectiveRole
-      if (readStringField(doc, 'role') !== effectiveRole) {
-        try {
-          await databases.updateDocument(
-            config.databaseId,
-            config.profilesCollectionId,
-            doc.$id,
-            {
-              role: effectiveRole,
-              updated_at: new Date().toISOString(),
-            }
-          );
-          log(`[profile] Updated profile ${doc.$id} role to ${effectiveRole}`);
-        } catch (syncErr) {
-          log(`[profile] Notice: Could not sync effectiveRole to profile doc: ${String(syncErr)}`);
-        }
-      }
+    // Reject Principal/Student role mismatches (spoofing detection)
+    if (
+      (caller.role === 'principal' && doc && rawDocRole !== 'principal') ||
+      (caller.role === 'student' && doc && rawDocRole === 'principal')
+    ) {
+      return res.json(
+        {
+          success: false,
+          error: 'Forbidden: Unauthorized role.',
+          code: 'FORBIDDEN',
+        },
+        403
+      );
+    }
+
+    const isPrincipal =
+      !adminAssignment &&
+      caller.role === 'principal' &&
+      (doc ? rawDocRole === 'principal' || readBooleanField(doc, 'is_principal') === true : true);
+
+    const isCallerAdmin = Boolean(adminAssignment);
+    const effectiveRole: UserRole = isCallerAdmin
+      ? 'department_admin'
+      : isPrincipal
+      ? 'principal'
+      : 'student';
+
+    // Logs for traceability:
+    console.log('[get-profile] caller email:', caller.email);
+    console.log('[get-profile] admin assignment found:', !!adminAssignment);
+    console.log('[get-profile] effective role:', effectiveRole);
+
+    // 3. If profile document exists:
+    if (doc) {
+      const isStaleAdminRole = effectiveRole === 'student' && rawDocRole === 'department_admin';
 
       const legacyLocked = readBooleanField(doc, 'is_locked');
       const rawNameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
@@ -301,9 +309,13 @@ export async function handleGetProfile(
       const resolvedStoredDept = resolveDepartment(rawDocDeptId) || resolveDepartment(rawStudentDeptId);
       const effectiveDeptId: DepartmentId | null = isCallerAdmin
         ? (assignment.department_id ?? callerDept?.id ?? caller.department_id ?? resolvedStoredDept?.id ?? (rawDocDeptId ? (rawDocDeptId as DepartmentId) : null))
+        : isPrincipal
+        ? null
         : effectiveStudentDeptId;
       const effectiveDeptName = isCallerAdmin
         ? (assignment.department_name || callerDept?.name || caller.department_name || resolvedStoredDept?.name || readStringField(doc, 'department_name') || '')
+        : isPrincipal
+        ? ''
         : effectiveStudentDeptId && resolvedStudentDept
         ? resolvedStudentDept.name
         : '';
@@ -317,18 +329,73 @@ export async function handleGetProfile(
           PHONE_NUMBER_REGEX.test(phoneNumber)
       );
 
-      const nameLocked = isCallerAdmin ? true : rawNameLocked;
-      const enrollmentLocked = isCallerAdmin ? true : rawEnrollmentLocked;
-      const phoneLocked = isCallerAdmin ? true : rawPhoneLocked;
+      // Sync updated role / status back to database if needed
+      if (isStaleAdminRole) {
+        try {
+          await databases.updateDocument(
+            config.databaseId,
+            config.profilesCollectionId,
+            doc.$id,
+            {
+              role: 'student',
+              ...(!hasValidStudentOnboarding
+                ? {
+                    name_locked: false,
+                    enrollment_locked: false,
+                    phone_locked: false,
+                    profile_status: 'incomplete',
+                  }
+                : {}),
+              updated_at: new Date().toISOString(),
+            }
+          );
+          log(`[profile] Downgraded stale department_admin role on profile ${doc.$id} to student`);
+        } catch (syncErr) {
+          log(`[profile] Notice: Could not sync stale admin downgrade to profile doc: ${String(syncErr)}`);
+        }
+      } else if (rawDocRole !== effectiveRole) {
+        try {
+          await databases.updateDocument(
+            config.databaseId,
+            config.profilesCollectionId,
+            doc.$id,
+            {
+              role: effectiveRole,
+              updated_at: new Date().toISOString(),
+            }
+          );
+          log(`[profile] Updated profile ${doc.$id} role to ${effectiveRole}`);
+        } catch (syncErr) {
+          log(`[profile] Notice: Could not sync effectiveRole to profile doc: ${String(syncErr)}`);
+        }
+      }
 
-      // is_onboarded: true for admin, check fields for student
-      const isOnboarded = isCallerAdmin ? true : hasValidStudentOnboarding;
+      const nameLocked = isCallerAdmin || isPrincipal
+        ? true
+        : isStaleAdminRole && !hasValidStudentOnboarding
+        ? false
+        : rawNameLocked;
+      const enrollmentLocked = isCallerAdmin || isPrincipal
+        ? true
+        : isStaleAdminRole && !hasValidStudentOnboarding
+        ? false
+        : rawEnrollmentLocked;
+      const phoneLocked = isCallerAdmin || isPrincipal
+        ? true
+        : isStaleAdminRole && !hasValidStudentOnboarding
+        ? false
+        : rawPhoneLocked;
+
+      // is_onboarded: true for admin / principal, check fields for student
+      const isOnboarded = isCallerAdmin || isPrincipal ? true : hasValidStudentOnboarding;
 
       const rawStatus = readStringField(doc, 'profile_status');
-      const profileStatus: ProfileStatus = isCallerAdmin
+      const profileStatus: ProfileStatus = isCallerAdmin || isPrincipal
         ? rawStatus === 'pending_verification' || rawStatus === 'rejected'
           ? rawStatus
           : 'complete'
+        : isStaleAdminRole && !hasValidStudentOnboarding
+        ? 'incomplete'
         : rawStatus === 'pending_verification' || rawStatus === 'rejected'
         ? rawStatus
         : isOnboarded
@@ -369,8 +436,65 @@ export async function handleGetProfile(
     }
 
     // 4. If NO profile document exists:
+    // - For principal: create profile document with role: 'principal' and is_onboarded: true
     // - For admin: create profile document with role: 'department_admin' and is_onboarded: true
     // - For student: return { profile: null, is_onboarded: false } so frontend redirects to onboarding
+    if (effectiveRole === 'principal') {
+      const newPrincipalProfileData = {
+        $id: caller.id,
+        user_id: caller.id,
+        auth_user_id: caller.id,
+        email: caller.email,
+        name: caller.name,
+        role: 'principal' as const,
+        is_active: true,
+        is_locked: true,
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        profile_status: 'complete' as const,
+        created_at: new Date().toISOString(),
+      };
+
+      try {
+        await databases.createDocument(
+          config.databaseId,
+          config.profilesCollectionId,
+          caller.id,
+          newPrincipalProfileData
+        );
+      } catch (createErr) {
+        log(`[profile] Notice: principal profile creation skipped: ${String(createErr)}`);
+      }
+
+      return res.json(
+        {
+          success: true,
+          data: {
+            profile: buildProfileResponse(caller.id, {
+              user_id: caller.id,
+              auth_user_id: caller.id,
+              email: caller.email,
+              name: caller.name,
+              display_name: caller.name,
+              enrollment_no: '',
+              student_department_id: null,
+              phone_number: '',
+              role: 'principal',
+              profile_status: 'complete',
+              name_locked: true,
+              enrollment_locked: true,
+              phone_locked: true,
+              created_at: newPrincipalProfileData.created_at,
+              updated_at: newPrincipalProfileData.created_at,
+            }),
+            is_onboarded: true,
+          },
+        },
+        200
+      );
+    }
+
     if (effectiveRole === 'department_admin') {
       const newProfileData = {
         $id: caller.id,

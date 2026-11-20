@@ -34,10 +34,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     try {
       let currentUser = await getCurrentUser();
 
-      if (!currentUser) {
-        // Session may not be persisted yet — wait and retry once
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        currentUser = await getCurrentUser();
+      // Only retry with a brief delay if returning from an OAuth callback with token parameters
+      if (!currentUser && typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        if (params.has('userId') || params.has('secret')) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          currentUser = await getCurrentUser();
+        }
       }
 
       setUser(currentUser);

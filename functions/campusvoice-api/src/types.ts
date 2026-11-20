@@ -95,6 +95,7 @@ export interface Complaint {
   last_meaningful_update_at?: string;
   attachment_file_id?: string;
   is_own_complaint?: boolean;
+  has_supported?: boolean;
   department_name?: string;
   issue_type?: IssueType;
   official_response?: string;

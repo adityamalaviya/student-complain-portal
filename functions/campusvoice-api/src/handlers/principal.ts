@@ -8,14 +8,19 @@ import {
   readNumberField,
   readStringField,
   resolveDepartment,
+  isAcademicDepartment,
+  isMaintenanceDepartment,
   type DatabaseClientLike,
 } from '../departments.js';
 import { isDelayed } from './complaints.js';
 import type {
+  AdminScope,
   AppwriteContext,
+  AuditLog,
   AuthenticatedCaller,
   Complaint,
   ComplaintWarning,
+  DepartmentAdminAssignment,
   DepartmentId,
   PrincipalMetrics,
 } from '../types.js';
@@ -60,6 +65,32 @@ function toWarningModel(doc: Models.Document): ComplaintWarning {
   };
 }
 
+function toAdminAssignmentModel(doc: Models.Document): DepartmentAdminAssignment {
+  return {
+    $id: doc.$id,
+    user_id: readStringField(doc, 'user_id'),
+    email: readStringField(doc, 'email'),
+    department_id: readStringField(doc, 'department_id'),
+    scope: (readStringField(doc, 'scope') || 'maintenance') as AdminScope,
+    is_active: readBooleanField(doc, 'is_active') ?? true,
+    assigned_by: readStringField(doc, 'assigned_by'),
+    created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+  };
+}
+
+function toAuditLogModel(doc: Models.Document): AuditLog {
+  return {
+    $id: doc.$id,
+    action: readStringField(doc, 'action'),
+    actor_id: readStringField(doc, 'actor_id'),
+    actor_role: (readStringField(doc, 'actor_role') || 'system') as AuditLog['actor_role'],
+    target_resource_id: readStringField(doc, 'target_resource_id'),
+    target_resource_type: readStringField(doc, 'target_resource_type'),
+    details: readStringField(doc, 'details'),
+    created_at: readStringField(doc, 'created_at') || doc.$createdAt,
+  };
+}
+
 // ----------------------------------------------------
 // 1. Get Principal Dashboard Foundation (All 6 Departments)
 // ----------------------------------------------------
@@ -84,36 +115,6 @@ export async function handleGetPrincipalDashboard(
   }
 
   try {
-    // 1. Query complaints across all departments (up to 500)
-    const complaintsResult = await databases.listDocuments(
-      config.databaseId,
-      config.complaintsCollectionId,
-      [Query.orderDesc('$createdAt'), Query.limit(500)]
-    );
-
-    // 2. Query all warnings
-    let allWarnings: Models.Document[] = [];
-    try {
-      const warningsResult = await databases.listDocuments(
-        config.databaseId,
-        config.warningsCollectionId,
-        [Query.orderDesc('created_at'), Query.limit(500)]
-      );
-      allWarnings = warningsResult.documents;
-    } catch {
-      allWarnings = [];
-    }
-
-    // Index warnings by complaint_id
-    const warningsByComplaint = new Map<string, ComplaintWarning[]>();
-    for (const wDoc of allWarnings) {
-      const model = toWarningModel(wDoc);
-      const list = warningsByComplaint.get(model.complaint_id) || [];
-      list.push(model);
-      warningsByComplaint.set(model.complaint_id, list);
-    }
-
-    // 3. Compute Metrics & Breakdown for all 6 Canonical Departments
     const breakdown: PrincipalMetrics['department_breakdown'] = {};
     for (const dept of INSTITUTIONAL_DEPARTMENTS) {
       breakdown[dept.id] = {
@@ -125,11 +126,88 @@ export async function handleGetPrincipalDashboard(
       };
     }
 
+    // 1. Parallel index-backed count queries per department and status (Query.limit(1) for scale)
+    const countQueries = INSTITUTIONAL_DEPARTMENTS.flatMap((dept) => [
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'Pending'),
+        Query.limit(1),
+      ]),
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'In Progress'),
+        Query.limit(1),
+      ]),
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'Resolved'),
+        Query.limit(1),
+      ]),
+    ]);
+
+    // 2. Parallel queries for recent feed, warnings, and active unresolved issues
+    const [countResults, recentComplaintsRes, warningsResult, pendingRes, inProgressRes] =
+      await Promise.all([
+        Promise.all(countQueries),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.orderDesc('$createdAt'),
+          Query.limit(50),
+        ]),
+        databases
+          .listDocuments(config.databaseId, config.warningsCollectionId, [
+            Query.orderDesc('created_at'),
+            Query.limit(100),
+          ])
+          .catch(() => ({ total: 0, documents: [] as Models.Document[] })),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.equal('status', 'Pending'),
+          Query.limit(100),
+        ]),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.equal('status', 'In Progress'),
+          Query.limit(100),
+        ]),
+      ]);
+
+    // 3. Populate department counts and institutional metrics
     let totalPending = 0;
     let totalInProgress = 0;
     let totalResolved = 0;
-    let totalDelayed = 0;
 
+    for (let i = 0; i < INSTITUTIONAL_DEPARTMENTS.length; i++) {
+      const dept = INSTITUTIONAL_DEPARTMENTS[i];
+      const pendingCount = countResults[i * 3]?.total ?? 0;
+      const inProgCount = countResults[i * 3 + 1]?.total ?? 0;
+      const resolvedCount = countResults[i * 3 + 2]?.total ?? 0;
+      const deptTotal = pendingCount + inProgCount + resolvedCount;
+
+      breakdown[dept.id] = {
+        total: deptTotal,
+        pending: pendingCount,
+        in_progress: inProgCount,
+        resolved: resolvedCount,
+        delayed: 0,
+      };
+
+      totalPending += pendingCount;
+      totalInProgress += inProgCount;
+      totalResolved += resolvedCount;
+    }
+
+    const totalComplaints = totalPending + totalInProgress + totalResolved;
+    const allWarnings = warningsResult.documents;
+
+    // Index warnings by complaint_id
+    const warningsByComplaint = new Map<string, ComplaintWarning[]>();
+    for (const wDoc of allWarnings) {
+      const model = toWarningModel(wDoc);
+      const list = warningsByComplaint.get(model.complaint_id) || [];
+      list.push(model);
+      warningsByComplaint.set(model.complaint_id, list);
+    }
+
+    // 4. Identify 5-day overdue grievances among active unresolved complaints
+    let totalDelayed = 0;
     const delayedComplaintsList: Array<{
       complaint: Complaint;
       days_delayed: number;
@@ -139,27 +217,19 @@ export async function handleGetPrincipalDashboard(
     }> = [];
 
     const now = new Date();
+    const seenComplaintIds = new Set<string>();
+    const unresolvedDocs = [...pendingRes.documents, ...inProgressRes.documents];
 
-    for (const doc of complaintsResult.documents) {
+    for (const doc of unresolvedDocs) {
+      const complaintId = doc.$id;
+      if (seenComplaintIds.has(complaintId)) continue;
+      seenComplaintIds.add(complaintId);
+
       const complaint = toComplaintModel(doc);
-      const status = complaint.status;
       const deptId = complaint.maintenance_department_id as DepartmentId;
 
       if (!breakdown[deptId]) {
         breakdown[deptId] = { total: 0, pending: 0, in_progress: 0, resolved: 0, delayed: 0 };
-      }
-
-      breakdown[deptId].total += 1;
-
-      if (status === 'Pending') {
-        totalPending += 1;
-        breakdown[deptId].pending += 1;
-      } else if (status === 'In Progress') {
-        totalInProgress += 1;
-        breakdown[deptId].in_progress += 1;
-      } else if (status === 'Resolved') {
-        totalResolved += 1;
-        breakdown[deptId].resolved += 1;
       }
 
       // Check 5-day delay eligibility using authoritative isDelayed
@@ -172,11 +242,11 @@ export async function handleGetPrincipalDashboard(
           (doc.$createdAt as string) ||
           '',
       });
+
       if (isComplaintDelayed) {
         totalDelayed += 1;
         breakdown[deptId].delayed += 1;
 
-        const complaintId = complaint.$id || doc.$id;
         const delayInfo = calculateComplaintDelay(complaint, now);
         const complaintWarnings = complaintId ? warningsByComplaint.get(complaintId) || [] : [];
         delayedComplaintsList.push({
@@ -184,18 +254,18 @@ export async function handleGetPrincipalDashboard(
           days_delayed: delayInfo.days_delayed,
           warning_count: complaintWarnings.length,
           warnings: complaintWarnings,
-          is_warning_eligible: status !== 'Resolved',
+          is_warning_eligible: complaint.status !== 'Resolved',
         });
       }
     }
 
     const metrics: PrincipalMetrics = {
-      total_complaints: complaintsResult.total,
+      total_complaints: totalComplaints,
       total_pending: totalPending,
       total_in_progress: totalInProgress,
       total_resolved: totalResolved,
       total_delayed: totalDelayed,
-      total_warnings_issued: allWarnings.length,
+      total_warnings_issued: warningsResult.total,
       department_breakdown: breakdown,
     };
 
@@ -205,7 +275,7 @@ export async function handleGetPrincipalDashboard(
         data: {
           metrics,
           delayed_complaints: delayedComplaintsList,
-          recent_complaints: complaintsResult.documents.slice(0, 50).map(toComplaintModel),
+          recent_complaints: recentComplaintsRes.documents.map(toComplaintModel),
           recent_warnings: allWarnings.slice(0, 50).map(toWarningModel),
         },
       },
@@ -490,6 +560,452 @@ export async function handleRespondToWarning(
       {
         success: false,
         error: 'Unable to submit response to warning.',
+        code: 'INTERNAL_ERROR',
+      },
+      500
+    );
+  }
+}
+
+// ----------------------------------------------------
+// 4. List Department Admin Assignments (Principal Only)
+// ----------------------------------------------------
+export async function handleListAdminAssignments(
+  context: AppwriteContext,
+  caller: AuthenticatedCaller,
+  deps?: PrincipalHandlerDeps
+): Promise<unknown> {
+  const { res, error } = context;
+  const config = getAppwriteConfig();
+  const databases = deps?.databases ?? getServerClient().databases;
+
+  if (caller.role !== 'principal') {
+    return res.json(
+      {
+        success: false,
+        error: 'Only the Principal can view administrator assignments.',
+        code: 'FORBIDDEN',
+      },
+      403
+    );
+  }
+
+  try {
+    const result = await databases.listDocuments(
+      config.databaseId,
+      config.departmentAdminsCollectionId,
+      [Query.orderDesc('created_at'), Query.limit(100)]
+    );
+
+    return res.json(
+      {
+        success: true,
+        data: {
+          assignments: result.documents.map(toAdminAssignmentModel),
+          total: result.total,
+        },
+      },
+      200
+    );
+  } catch (err) {
+    error(`[principal] Error listing admin assignments: ${String(err)}`);
+    return res.json(
+      {
+        success: false,
+        error: 'Unable to list administrator assignments.',
+        code: 'INTERNAL_ERROR',
+      },
+      500
+    );
+  }
+}
+
+// ----------------------------------------------------
+// 5. Assign Department Administrator (Principal Only)
+// ----------------------------------------------------
+export async function handleAssignAdmin(
+  context: AppwriteContext,
+  caller: AuthenticatedCaller,
+  data: Record<string, unknown>,
+  deps?: PrincipalHandlerDeps
+): Promise<unknown> {
+  const { res, error, log } = context;
+  const config = getAppwriteConfig();
+  const databases = deps?.databases ?? getServerClient().databases;
+
+  if (caller.role !== 'principal') {
+    return res.json(
+      {
+        success: false,
+        error: 'Only the Principal can assign department administrators.',
+        code: 'FORBIDDEN',
+      },
+      403
+    );
+  }
+
+  const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+  const departmentId = typeof data.department_id === 'string' ? data.department_id.trim() : '';
+  const scope = data.scope === 'academic' || data.scope === 'maintenance' ? data.scope : null;
+  const targetUserId = typeof data.user_id === 'string' ? data.user_id.trim() : '';
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.json(
+      {
+        success: false,
+        error: 'A valid email address is required.',
+        code: 'INVALID_EMAIL',
+      },
+      400
+    );
+  }
+
+  const resolvedDept = resolveDepartment(departmentId);
+  if (!resolvedDept) {
+    return res.json(
+      {
+        success: false,
+        error: 'Invalid department ID. Must be one of the six canonical institutional departments.',
+        code: 'INVALID_DEPARTMENT',
+      },
+      400
+    );
+  }
+
+  if (!scope) {
+    return res.json(
+      {
+        success: false,
+        error: "Scope must be either 'academic' or 'maintenance'.",
+        code: 'INVALID_SCOPE',
+      },
+      400
+    );
+  }
+
+  // Canonical Invariant: Water and Sanitation are maintenance-only and cannot have academic administrators
+  if (scope === 'academic' && !resolvedDept.is_academic) {
+    return res.json(
+      {
+        success: false,
+        error: `Department '${resolvedDept.name}' (${resolvedDept.id}) is maintenance-only and cannot be assigned academic scope.`,
+        code: 'INVALID_DEPARTMENT_SCOPE',
+      },
+      400
+    );
+  }
+
+  try {
+    // Guard against duplicate active assignments
+    try {
+      const existingActive = await databases.listDocuments(
+        config.databaseId,
+        config.departmentAdminsCollectionId,
+        [
+          Query.equal('email', email),
+          Query.equal('department_id', resolvedDept.id),
+          Query.equal('scope', scope),
+          Query.equal('is_active', true),
+          Query.limit(1),
+        ]
+      );
+      if (existingActive.documents.length > 0) {
+        return res.json(
+          {
+            success: false,
+            error: `An active administrator assignment already exists for ${email} in department '${resolvedDept.name}' with scope '${scope}'.`,
+            code: 'ASSIGNMENT_ALREADY_EXISTS',
+          },
+          409
+        );
+      }
+    } catch {
+      // Non-fatal if collection or index query throws
+    }
+
+    const now = new Date().toISOString();
+    const docId = `da_${ID.unique().slice(0, 32)}`;
+
+    // Try finding user_id from profiles if not explicitly supplied
+    let effectiveUserId = targetUserId;
+    if (!effectiveUserId) {
+      try {
+        const userProfiles = await databases.listDocuments(
+          config.databaseId,
+          config.profilesCollectionId,
+          [Query.equal('email', email), Query.limit(1)]
+        );
+        if (userProfiles.documents.length > 0) {
+          effectiveUserId = userProfiles.documents[0].$id;
+        }
+      } catch {
+        // non-fatal, fallback to empty string
+      }
+    }
+
+    const newAssignment = await databases.createDocument(
+      config.databaseId,
+      config.departmentAdminsCollectionId,
+      docId,
+      {
+        user_id: effectiveUserId,
+        email,
+        department_id: resolvedDept.id,
+        scope,
+        is_active: true,
+        assigned_by: caller.id,
+        created_at: now,
+      },
+      [] // Strictly empty permissions ($permissions = [])
+    );
+
+    // Update user profile role to department_admin if profile exists
+    if (effectiveUserId) {
+      try {
+        await databases.updateDocument(
+          config.databaseId,
+          config.profilesCollectionId,
+          effectiveUserId,
+          {
+            role: 'department_admin',
+          }
+        );
+      } catch {
+        // Profile update is non-fatal if user has not yet signed up or logged in
+      }
+    }
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'assign_department_admin',
+        actor_id: caller.id,
+        actor_role: 'principal',
+        target_resource_id: newAssignment.$id,
+        target_resource_type: 'department_admin',
+        details: {
+          user_id: effectiveUserId,
+          email,
+          department_id: resolvedDept.id,
+          scope,
+          assigned_by: caller.id,
+        },
+      },
+      log
+    );
+
+    return res.json(
+      {
+        success: true,
+        data: {
+          assignment: toAdminAssignmentModel(newAssignment),
+        },
+      },
+      201
+    );
+  } catch (err) {
+    error(`[principal] Error assigning department admin: ${String(err)}`);
+    return res.json(
+      {
+        success: false,
+        error: 'Unable to assign department administrator.',
+        code: 'INTERNAL_ERROR',
+      },
+      500
+    );
+  }
+}
+
+// ----------------------------------------------------
+// 6. Revoke Department Administrator (Principal Only)
+// ----------------------------------------------------
+export async function handleRevokeAdmin(
+  context: AppwriteContext,
+  caller: AuthenticatedCaller,
+  data: Record<string, unknown>,
+  deps?: PrincipalHandlerDeps
+): Promise<unknown> {
+  const { res, error, log } = context;
+  const config = getAppwriteConfig();
+  const databases = deps?.databases ?? getServerClient().databases;
+
+  if (caller.role !== 'principal') {
+    return res.json(
+      {
+        success: false,
+        error: 'Only the Principal can revoke administrator assignments.',
+        code: 'FORBIDDEN',
+      },
+      403
+    );
+  }
+
+  const assignmentId = typeof data.assignment_id === 'string' ? data.assignment_id.trim() : '';
+  if (!assignmentId) {
+    return res.json(
+      {
+        success: false,
+        error: 'Assignment ID is required.',
+        code: 'INVALID_ASSIGNMENT_ID',
+      },
+      400
+    );
+  }
+
+  try {
+    const doc = await databases.getDocument(
+      config.databaseId,
+      config.departmentAdminsCollectionId,
+      assignmentId
+    );
+
+    const updatedDoc = await databases.updateDocument(
+      config.databaseId,
+      config.departmentAdminsCollectionId,
+      assignmentId,
+      {
+        is_active: false,
+      }
+    );
+
+    const targetUserId = readStringField(doc, 'user_id');
+    const targetEmail = readStringField(doc, 'email');
+
+    // Check if target user has any remaining active admin assignments
+    if (targetUserId) {
+      try {
+        const remaining = await databases.listDocuments(
+          config.databaseId,
+          config.departmentAdminsCollectionId,
+          [Query.equal('user_id', targetUserId), Query.equal('is_active', true), Query.limit(10)]
+        );
+
+        const activeRemaining = remaining.documents.filter(
+          (d) => d.$id !== assignmentId && (readBooleanField(d, 'is_active') ?? true)
+        );
+
+        if (activeRemaining.length === 0) {
+          // Revert profile role to student
+          await databases.updateDocument(
+            config.databaseId,
+            config.profilesCollectionId,
+            targetUserId,
+            {
+              role: 'student',
+            }
+          );
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'revoke_department_admin',
+        actor_id: caller.id,
+        actor_role: 'principal',
+        target_resource_id: assignmentId,
+        target_resource_type: 'department_admin',
+        details: {
+          assignment_id: assignmentId,
+          user_id: targetUserId,
+          email: targetEmail,
+          revoked_by: caller.id,
+        },
+      },
+      log
+    );
+
+    return res.json(
+      {
+        success: true,
+        data: {
+          assignment: toAdminAssignmentModel(updatedDoc),
+        },
+      },
+      200
+    );
+  } catch (err) {
+    error(`[principal] Error revoking admin assignment ${assignmentId}: ${String(err)}`);
+    return res.json(
+      {
+        success: false,
+        error: 'Unable to revoke department administrator assignment.',
+        code: 'INTERNAL_ERROR',
+      },
+      500
+    );
+  }
+}
+
+// ----------------------------------------------------
+// 7. Get System Audit History (Principal Only)
+// ----------------------------------------------------
+export async function handleGetAuditHistory(
+  context: AppwriteContext,
+  caller: AuthenticatedCaller,
+  data: Record<string, unknown> = {},
+  deps?: PrincipalHandlerDeps
+): Promise<unknown> {
+  const { res, error } = context;
+  const config = getAppwriteConfig();
+  const databases = deps?.databases ?? getServerClient().databases;
+
+  if (caller.role !== 'principal') {
+    return res.json(
+      {
+        success: false,
+        error: 'Only the Principal can inspect system audit logs.',
+        code: 'FORBIDDEN',
+      },
+      403
+    );
+  }
+
+  try {
+    const rawLimit = Number(data.limit);
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 && rawLimit <= 100 ? rawLimit : 50;
+
+    const queries = [Query.orderDesc('created_at'), Query.limit(limit)];
+
+    if (typeof data.action === 'string' && data.action.trim()) {
+      queries.push(Query.equal('action', data.action.trim()));
+    }
+    if (typeof data.actor_id === 'string' && data.actor_id.trim()) {
+      queries.push(Query.equal('actor_id', data.actor_id.trim()));
+    }
+    if (typeof data.target_resource_id === 'string' && data.target_resource_id.trim()) {
+      queries.push(Query.equal('target_resource_id', data.target_resource_id.trim()));
+    }
+
+    const result = await databases.listDocuments(
+      config.databaseId,
+      config.auditLogsCollectionId,
+      queries
+    );
+
+    return res.json(
+      {
+        success: true,
+        data: {
+          audit_logs: result.documents.map(toAuditLogModel),
+          total: result.total,
+        },
+      },
+      200
+    );
+  } catch (err) {
+    error(`[principal] Error loading audit history: ${String(err)}`);
+    return res.json(
+      {
+        success: false,
+        error: 'Unable to retrieve audit logs.',
         code: 'INTERNAL_ERROR',
       },
       500

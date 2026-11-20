@@ -115,6 +115,7 @@ export interface Complaint {
   attachment_file_id?: string;
   attachment_url?: string;
   is_own_complaint?: boolean;
+  has_supported?: boolean;
   is_delayed?: boolean;
   // Legacy compatibility fields during migration
   department_name?: string;
@@ -123,8 +124,8 @@ export interface Complaint {
   resolved_at?: string;
   created_at?: string;
   updated_at?: string;
-  $createdAt: string;
-  $updatedAt: string;
+  $createdAt?: string;
+  $updatedAt?: string;
 }
 
 export interface ComplaintAttachmentData {

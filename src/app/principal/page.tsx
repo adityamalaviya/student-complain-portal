@@ -1,71 +1,69 @@
 'use client';
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
 import {
   CircleNotch,
   SignOut,
-  Clock,
-  Funnel,
-  Buildings,
   ShieldCheck,
+  Users,
+  Scroll,
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/hooks';
-import { apiGetPrincipalDashboard } from '@/lib/api';
-import { resolveDepartment } from '@/lib/utils';
+import {
+  apiGetPrincipalDashboard,
+  apiListAdminAssignments,
+  apiRevokeAdmin,
+  apiGetAuditHistory,
+} from '@/lib/api';
 import type {
-  Complaint,
   PrincipalDashboardData,
-  DepartmentId,
+  DepartmentAdminAssignment,
+  AuditLog,
 } from '@/types';
 import {
-  ComplaintStatusBadge,
-  ComplaintPriorityBadge,
-  DepartmentBadge,
-  EmptyState,
-  ErrorState,
-  LoadingSkeleton,
+  PrincipalGrievanceOverviewTab,
+  PrincipalAdminAssignmentsTab,
+  PrincipalAuditTrailTab,
+  AssignAdminModal,
+  IssueWarningModal,
 } from '@/components';
-
-const CANONICAL_DEPARTMENTS: readonly DepartmentId[] = [
-  'dept_comp',
-  'dept_civil',
-  'dept_elec',
-  'dept_mech',
-  'dept_water',
-  'dept_sanit',
-];
-
-function formatTimestamp(dateString?: string): string {
-  if (!dateString) return 'Recently';
-  try {
-    const d = new Date(dateString);
-    return d.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return 'Recently';
-  }
-}
 
 export default function PrincipalDashboardPage(): React.ReactElement {
   const router = useRouter();
   const { user, profile, loading, isPrincipal, signOutUser } = useAuth();
 
+  // Tab Navigation State
+  const [activeTab, setActiveTab] = useState<'overview' | 'admins' | 'audit'>('overview');
+
+  // Overview Tab State
   const [dashboardData, setDashboardData] = useState<PrincipalDashboardData | null>(null);
   const [isLoadingDashboard, setIsLoadingDashboard] = useState<boolean>(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [departmentFilter, setDepartmentFilter] = useState<string>('all');
 
-  // Auth guard:
-  // - loading -> show spinner
-  // - not authenticated -> redirect /sign-in
-  // - authenticated but not principal -> redirect /dashboard
-  // - only render if isPrincipal === true
+  // Warning Modal State
+  const [warningModalOpen, setWarningModalOpen] = useState<boolean>(false);
+  const [selectedComplaintForWarning, setSelectedComplaintForWarning] = useState<{
+    id: string;
+    title: string;
+    departmentName: string;
+    daysDelayed: number;
+  } | null>(null);
+
+  // Admin Assignments State
+  const [adminAssignments, setAdminAssignments] = useState<DepartmentAdminAssignment[]>([]);
+  const [isLoadingAdmins, setIsLoadingAdmins] = useState<boolean>(false);
+  const [adminsError, setAdminsError] = useState<string | null>(null);
+  const [isAssignModalOpen, setIsAssignModalOpen] = useState<boolean>(false);
+
+  // Audit Logs State
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [isLoadingAudit, setIsLoadingAudit] = useState<boolean>(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditActionFilter, setAuditActionFilter] = useState<string>('all');
+
+  // Auth Guard
   useEffect(() => {
     if (!loading) {
       if (!user) {
@@ -76,72 +74,137 @@ export default function PrincipalDashboardPage(): React.ReactElement {
     }
   }, [loading, user, isPrincipal, router]);
 
+  // Fetch Dashboard Metrics & Delayed Grievances
   const fetchDashboardData = useCallback(async (): Promise<void> => {
-    if (!user || !isPrincipal) return;
     setIsLoadingDashboard(true);
     setFetchError(null);
-
     try {
-      const response = await apiGetPrincipalDashboard();
-      if (response.success && response.data) {
-        setDashboardData(response.data);
+      const res = await apiGetPrincipalDashboard();
+      if (res.success && res.data) {
+        setDashboardData(res.data);
       } else {
-        setFetchError(response.error || 'Failed to load dashboard');
+        setFetchError(res.error || 'Unable to load institutional oversight data.');
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load dashboard';
-      setFetchError(msg);
+    } catch (err) {
+      setFetchError(err instanceof Error ? err.message : 'Network error loading dashboard.');
     } finally {
       setIsLoadingDashboard(false);
     }
-  }, [user, isPrincipal]);
+  }, []);
 
+  // Fetch Admin Assignments
+  const fetchAdminAssignments = useCallback(async (): Promise<void> => {
+    setIsLoadingAdmins(true);
+    setAdminsError(null);
+    try {
+      const res = await apiListAdminAssignments();
+      if (res.success && res.data) {
+        setAdminAssignments(res.data.assignments || []);
+      } else {
+        setAdminsError(res.error || 'Failed to load administrator assignments.');
+      }
+    } catch (err) {
+      setAdminsError(err instanceof Error ? err.message : 'Network error loading admin assignments.');
+    } finally {
+      setIsLoadingAdmins(false);
+    }
+  }, []);
+
+  // Fetch System Audit Logs
+  const fetchAuditLogs = useCallback(async (): Promise<void> => {
+    setIsLoadingAudit(true);
+    setAuditError(null);
+    try {
+      const res = await apiGetAuditHistory({
+        limit: 100,
+        action: auditActionFilter === 'all' ? undefined : auditActionFilter,
+      });
+      if (res.success && res.data) {
+        setAuditLogs(res.data.audit_logs || []);
+      } else {
+        setAuditError(res.error || 'Failed to load audit history.');
+      }
+    } catch (err) {
+      setAuditError(err instanceof Error ? err.message : 'Network error loading audit history.');
+    } finally {
+      setIsLoadingAudit(false);
+    }
+  }, [auditActionFilter]);
+
+  // Initial Data Fetch
   useEffect(() => {
-    if (!loading && user && isPrincipal) {
-      void fetchDashboardData();
+    if (user && isPrincipal) {
+      fetchDashboardData();
     }
-  }, [loading, user, isPrincipal, fetchDashboardData]);
+  }, [user, isPrincipal, fetchDashboardData]);
 
-  const filteredComplaints = useMemo(() => {
-    const list = dashboardData?.recent_complaints || [];
-    if (departmentFilter === 'all') {
-      return list;
+  // Tab Change Data Fetch
+  useEffect(() => {
+    if (activeTab === 'admins') {
+      fetchAdminAssignments();
+    } else if (activeTab === 'audit') {
+      fetchAuditLogs();
     }
-    return list.filter((c) => {
-      const maintId = resolveDepartment(c.maintenance_department_id)?.id || c.maintenance_department_id;
-      const studentDeptId = resolveDepartment(c.student_department_id)?.id || c.student_department_id;
-      return maintId === departmentFilter || studentDeptId === departmentFilter;
-    });
-  }, [dashboardData?.recent_complaints, departmentFilter]);
+  }, [activeTab, fetchAdminAssignments, fetchAuditLogs]);
 
-  if (loading || !user || !isPrincipal) {
+  // Revoke Handler for Tab
+  const handleRevokeAssignment = async (
+    assignmentId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await apiRevokeAdmin(assignmentId);
+      if (res.success) {
+        await fetchAdminAssignments();
+        return { success: true };
+      }
+      return { success: false, error: res.error || 'Failed to revoke administrator.' };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Network error revoking administrator.',
+      };
+    }
+  };
+
+  if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-gray-950">
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-950">
+        <CircleNotch size={32} className="animate-spin text-blue-700 dark:text-blue-400" />
+      </div>
+    );
+  }
+
+  if (!user || !isPrincipal) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-950">
         <CircleNotch size={32} className="animate-spin text-blue-700 dark:text-blue-400" />
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
-      {/* Top App Bar */}
-      <header className="sticky top-0 z-30 w-full border-b border-slate-200 bg-white/95 shadow-xs backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/95">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-12">
-          {/* Brand & Role Scope */}
-          <div className="flex items-center gap-3 sm:gap-4">
-            <Link href="/principal" className="flex items-center gap-2">
-              <span className="h-2.5 w-2.5 rounded-full bg-blue-700 ring-4 ring-blue-100 dark:bg-blue-400 dark:ring-blue-900/30" />
-              <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
-                CampusVoice
-              </span>
-            </Link>
-
-            <div className="hidden h-4 w-px bg-slate-200 sm:block dark:bg-slate-800" />
-
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/60 dark:text-blue-300">
-              <ShieldCheck size={14} weight="bold" />
-              Principal Governance
-            </span>
+    <div className="flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900 transition-colors dark:bg-slate-950 dark:text-white">
+      {/* Top Header */}
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-xs dark:border-slate-800 dark:bg-slate-900/95">
+        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-12">
+          {/* Logo / Branding */}
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-700 text-white shadow-xs">
+              <ShieldCheck size={24} weight="bold" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white">
+                  CampusVoice
+                </span>
+                <span className="rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-blue-800 uppercase dark:bg-blue-950 dark:text-blue-300">
+                  Principal
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Institutional Governance &amp; Compliance
+              </p>
+            </div>
           </div>
 
           {/* User & Sign Out */}
@@ -170,271 +233,127 @@ export default function PrincipalDashboardPage(): React.ReactElement {
       {/* Main Content Area */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 sm:py-10 lg:px-12">
         {/* Page Header */}
-        <div className="mb-8">
-          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
-                Principal Dashboard
-              </h1>
-              <p className="mt-1 text-xs text-slate-500 sm:text-sm dark:text-slate-400">
-                Institutional oversight of student grievances, department SLA compliance, and delay monitoring.
-              </p>
-            </div>
-            {dashboardData?.metrics && (
-              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
-                <span className="rounded-lg bg-white px-3 py-1.5 font-medium shadow-2xs dark:bg-slate-900">
-                  Total Complaints: <strong className="text-slate-900 dark:text-white">{dashboardData.metrics.total_complaints}</strong>
-                </span>
-                <span className="rounded-lg bg-white px-3 py-1.5 font-medium shadow-2xs dark:bg-slate-900">
-                  Total Delayed: <strong className={dashboardData.metrics.total_delayed > 0 ? 'text-amber-600 dark:text-amber-400 font-bold' : 'text-slate-900 dark:text-white'}>{dashboardData.metrics.total_delayed}</strong>
-                </span>
-              </div>
-            )}
+        <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-end">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
+              Institutional Governance
+            </h1>
+            <p className="mt-1 text-xs text-slate-500 sm:text-sm dark:text-slate-400">
+              Cross-departmental monitoring, administrative warning directives, and system audit log verification.
+            </p>
           </div>
         </div>
 
-        {/* Loading Spinner for full dashboard */}
-        {isLoadingDashboard ? (
-          <div className="space-y-6">
-            <div className="flex items-center justify-center py-12">
-              <CircleNotch size={36} className="animate-spin text-blue-700 dark:text-blue-400" />
-            </div>
-            <LoadingSkeleton count={3} />
-          </div>
-        ) : fetchError ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-xs dark:border-slate-800 dark:bg-slate-900">
-            <ErrorState
-              title="Failed to load dashboard"
-              message={fetchError}
-              onRetry={fetchDashboardData}
-            />
-          </div>
-        ) : (
-          <div className="space-y-8">
-            {/* 6 Department Cards in a Grid */}
-            <section aria-labelledby="department-cards-heading">
-              <h2 id="department-cards-heading" className="sr-only">
-                Department Performance Metrics
-              </h2>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {CANONICAL_DEPARTMENTS.map((deptId) => {
-                  const dept = resolveDepartment(deptId);
-                  const deptName = dept?.name || deptId;
-                  const breakdown = dashboardData?.metrics?.department_breakdown?.[deptId] || {
-                    total: 0,
-                    pending: 0,
-                    in_progress: 0,
-                    resolved: 0,
-                    delayed: 0,
-                  };
-                  const delayedCount = breakdown.delayed ?? (breakdown as Record<string, number>).delayed_count ?? 0;
-                  const hasDelayed = delayedCount > 0;
+        {/* Tab Navigation */}
+        <div className="mb-8 flex border-b border-slate-200 dark:border-slate-800">
+          <button
+            type="button"
+            onClick={() => setActiveTab('overview')}
+            className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-bold transition sm:text-sm ${
+              activeTab === 'overview'
+                ? 'border-blue-700 text-blue-700 dark:border-blue-400 dark:text-blue-400'
+                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <ShieldCheck size={18} weight={activeTab === 'overview' ? 'bold' : 'regular'} />
+            <span>Grievance Oversight</span>
+          </button>
 
-                  return (
-                    <div
-                      key={deptId}
-                      className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700"
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
-                          <div className="flex items-center gap-2">
-                            <Buildings size={18} className="text-blue-700 dark:text-blue-400" />
-                            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                              {deptName}
-                            </h3>
-                          </div>
-                          <span className="font-mono text-xs font-semibold text-slate-500 dark:text-slate-400">
-                            Total: {breakdown.total}
-                          </span>
-                        </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('admins')}
+            className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-bold transition sm:text-sm ${
+              activeTab === 'admins'
+                ? 'border-blue-700 text-blue-700 dark:border-blue-400 dark:text-blue-400'
+                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Users size={18} weight={activeTab === 'admins' ? 'bold' : 'regular'} />
+            <span>Admin Assignments</span>
+            {adminAssignments.length > 0 && (
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                {adminAssignments.filter((a) => a.is_active).length}
+              </span>
+            )}
+          </button>
 
-                        {/* Counts Grid */}
-                        <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                          <div className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
-                            <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                              Pending
-                            </span>
-                            <span className="font-mono text-base font-bold text-slate-900 dark:text-white">
-                              {breakdown.pending}
-                            </span>
-                          </div>
-                          <div className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
-                            <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                              In Progress
-                            </span>
-                            <span className="font-mono text-base font-bold text-blue-700 dark:text-blue-400">
-                              {breakdown.in_progress}
-                            </span>
-                          </div>
-                          <div className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
-                            <span className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                              Resolved
-                            </span>
-                            <span className="font-mono text-base font-bold text-emerald-600 dark:text-emerald-400">
-                              {breakdown.resolved}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('audit')}
+            className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-bold transition sm:text-sm ${
+              activeTab === 'audit'
+                ? 'border-blue-700 text-blue-700 dark:border-blue-400 dark:text-blue-400'
+                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Scroll size={18} weight={activeTab === 'audit' ? 'bold' : 'regular'} />
+            <span>Audit Trail</span>
+          </button>
+        </div>
 
-                      {/* Delayed Count Badge */}
-                      <div
-                        className={`mt-4 flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition ${
-                          hasDelayed
-                            ? 'border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-200'
-                            : 'border border-slate-100 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400'
-                        }`}
-                      >
-                        <span className="flex items-center gap-1.5 font-semibold">
-                          <Clock size={14} weight={hasDelayed ? 'bold' : 'regular'} />
-                          Delayed (&gt;5d)
-                        </span>
-                        <span
-                          className={`font-mono text-xs font-bold ${
-                            hasDelayed
-                              ? 'rounded-md bg-amber-200/80 px-2 py-0.5 text-amber-950 dark:bg-amber-900/60 dark:text-amber-100'
-                              : 'text-slate-600 dark:text-slate-400'
-                          }`}
-                        >
-                          {delayedCount}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+        {/* Tab 1: Grievance Oversight */}
+        {activeTab === 'overview' && (
+          <PrincipalGrievanceOverviewTab
+            dashboardData={dashboardData}
+            isLoading={isLoadingDashboard}
+            error={fetchError}
+            departmentFilter={departmentFilter}
+            onDepartmentFilterChange={setDepartmentFilter}
+            onRetry={fetchDashboardData}
+            onIssueWarning={(complaint) => {
+              setSelectedComplaintForWarning(complaint);
+              setWarningModalOpen(true);
+            }}
+          />
+        )}
 
-            {/* Recent Complaints Section with Filter Dropdown */}
-            <section
-              aria-labelledby="recent-complaints-heading"
-              className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900"
-            >
-              {/* Header with Department filter dropdown */}
-              <div className="flex flex-col justify-between gap-4 border-b border-slate-100 bg-slate-50/50 p-5 sm:flex-row sm:items-center dark:border-slate-800 dark:bg-slate-800/40">
-                <div className="flex items-center gap-2">
-                  <h2
-                    id="recent-complaints-heading"
-                    className="text-sm font-bold text-slate-900 sm:text-base dark:text-white"
-                  >
-                    Recent Institutional Grievances
-                  </h2>
-                  <span className="rounded-full bg-slate-200 px-2 py-0.5 font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                    {filteredComplaints.length}
-                  </span>
-                </div>
+        {/* Tab 2: Admin Assignments */}
+        {activeTab === 'admins' && (
+          <PrincipalAdminAssignmentsTab
+            assignments={adminAssignments}
+            isLoading={isLoadingAdmins}
+            error={adminsError}
+            onRefresh={fetchAdminAssignments}
+            onOpenAssignModal={() => setIsAssignModalOpen(true)}
+            onRevoke={handleRevokeAssignment}
+          />
+        )}
 
-                <div className="flex items-center gap-2">
-                  <Funnel size={14} className="text-slate-400" />
-                  <label htmlFor="department-filter" className="sr-only">
-                    Filter by Department
-                  </label>
-                  <select
-                    id="department-filter"
-                    value={departmentFilter}
-                    onChange={(e) => setDepartmentFilter(e.target.value)}
-                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition focus:border-blue-700 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:focus:border-blue-500"
-                  >
-                    <option value="all">All Departments</option>
-                    {CANONICAL_DEPARTMENTS.map((deptId) => {
-                      const dept = resolveDepartment(deptId);
-                      return (
-                        <option key={deptId} value={deptId}>
-                          {dept?.name || deptId}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-              </div>
-
-              {/* Complaints Table */}
-              {filteredComplaints.length === 0 ? (
-                <div className="p-8">
-                  <EmptyState
-                    title="No complaints found"
-                    description={
-                      departmentFilter === 'all'
-                        ? 'There are currently no recorded complaints in the system.'
-                        : 'No complaints match the selected department filter.'
-                    }
-                  />
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-100 bg-slate-50/50 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/20 dark:text-slate-400">
-                      <tr>
-                        <th scope="col" className="px-6 py-3.5">
-                          Title
-                        </th>
-                        <th scope="col" className="px-6 py-3.5">
-                          Department
-                        </th>
-                        <th scope="col" className="px-6 py-3.5">
-                          Status
-                        </th>
-                        <th scope="col" className="px-6 py-3.5">
-                          Priority
-                        </th>
-                        <th scope="col" className="px-6 py-3.5">
-                          Created At
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {filteredComplaints.map((c) => {
-                        const shortId = c.$id ? c.$id.slice(-6).toUpperCase() : '000000';
-                        return (
-                          <tr
-                            key={c.$id}
-                            tabIndex={0}
-                            role="button"
-                            onClick={() => router.push(`/complaints/${c.$id}`)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                router.push(`/complaints/${c.$id}`);
-                              }
-                            }}
-                            className="cursor-pointer transition hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
-                          >
-                            <td className="max-w-xs px-6 py-4 font-medium text-slate-900 sm:max-w-md dark:text-white">
-                              <div className="flex flex-col gap-0.5">
-                                <span className="truncate font-semibold hover:text-blue-700 dark:hover:text-blue-400">
-                                  {c.title}
-                                </span>
-                                <span className="font-mono text-[10px] text-slate-600 dark:text-slate-300">
-                                  #CV-{shortId}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="whitespace-nowrap px-6 py-4">
-                              <DepartmentBadge
-                                departmentId={c.maintenance_department_id || c.student_department_id}
-                                size="sm"
-                              />
-                            </td>
-                            <td className="whitespace-nowrap px-6 py-4">
-                              <ComplaintStatusBadge status={c.status} size="sm" />
-                            </td>
-                            <td className="whitespace-nowrap px-6 py-4">
-                              <ComplaintPriorityBadge priority={c.priority} size="sm" />
-                            </td>
-                            <td className="whitespace-nowrap px-6 py-4 font-mono text-slate-500 dark:text-slate-400">
-                              {formatTimestamp(c.created_at || c.$createdAt)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          </div>
+        {/* Tab 3: System Audit Trail */}
+        {activeTab === 'audit' && (
+          <PrincipalAuditTrailTab
+            auditLogs={auditLogs}
+            isLoading={isLoadingAudit}
+            error={auditError}
+            actionFilter={auditActionFilter}
+            onActionFilterChange={setAuditActionFilter}
+            onRefresh={fetchAuditLogs}
+          />
         )}
       </main>
+
+      {/* Assign Administrator Modal */}
+      <AssignAdminModal
+        isOpen={isAssignModalOpen}
+        onClose={() => setIsAssignModalOpen(false)}
+        onSuccess={fetchAdminAssignments}
+      />
+
+      {/* Issue Warning Modal */}
+      {selectedComplaintForWarning && (
+        <IssueWarningModal
+          isOpen={warningModalOpen}
+          complaintId={selectedComplaintForWarning.id}
+          complaintTitle={selectedComplaintForWarning.title}
+          departmentName={selectedComplaintForWarning.departmentName}
+          daysDelayed={selectedComplaintForWarning.daysDelayed}
+          onClose={() => {
+            setWarningModalOpen(false);
+            setSelectedComplaintForWarning(null);
+          }}
+          onSuccess={fetchDashboardData}
+        />
+      )}
 
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">

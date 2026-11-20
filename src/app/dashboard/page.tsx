@@ -14,6 +14,7 @@ import { useAuth } from '@/lib/hooks';
 import {
   apiListComplaints,
   apiSupportComplaint,
+  apiRemoveSupport,
   type ListComplaintsParams,
 } from '@/lib/api';
 import { resolveDepartment } from '@/lib/utils';
@@ -94,7 +95,15 @@ export default function StudentDashboardPage(): React.ReactElement {
 
       const response = await apiListComplaints(params);
       if (response.success && response.data) {
-        setComplaints(response.data.complaints || []);
+        const fetched = response.data.complaints || [];
+        setComplaints(fetched);
+        const supported = new Set<string>();
+        for (const c of fetched) {
+          if (c.has_supported && c.$id) {
+            supported.add(c.$id);
+          }
+        }
+        setUserSupportedIds(supported);
       } else {
         setComplaints([]);
         if (response.error && response.code !== 'EMPTY_QUEUE') {
@@ -116,66 +125,111 @@ export default function StudentDashboardPage(): React.ReactElement {
     }
   }, [profile, isOnboarded, fetchComplaints]);
 
-  // Support complaint handler
+  // Support complaint handler with full toggle lifecycle (support / remove-support)
   const handleSupportComplaint = async (complaintId: string): Promise<void> => {
-    if (userSupportedIds.has(complaintId)) return;
-
-    const prevSupported = userSupportedIds.has(complaintId);
+    const isCurrentlySupported = userSupportedIds.has(complaintId);
     const target = complaints.find((c) => c.$id === complaintId);
     const prevCount = target ? (target.support_count ?? 1) : 1;
 
-    setUserSupportedIds((prev) => new Set(prev).add(complaintId));
-    setComplaints((prev) =>
-      prev.map((c) =>
-        c.$id === complaintId ? { ...c, support_count: prevCount + 1 } : c
-      )
-    );
-
-    try {
-      const res = await apiSupportComplaint(complaintId);
-      if (res.success && res.data) {
-        setComplaints((prev) =>
-          prev.map((c) =>
-            c.$id === complaintId
-              ? { ...c, support_count: res.data?.support_count ?? c.support_count }
-              : c
-          )
-        );
-      } else {
-        if (res.code === 'ALREADY_SUPPORTED') {
-          setComplaints((prev) =>
-            prev.map((c) =>
-              c.$id === complaintId ? { ...c, support_count: prevCount } : c
-            )
-          );
-        } else {
-          setUserSupportedIds((prev) => {
-            const next = new Set(prev);
-            if (!prevSupported) next.delete(complaintId);
-            return next;
-          });
-          setComplaints((prev) =>
-            prev.map((c) =>
-              c.$id === complaintId ? { ...c, support_count: prevCount } : c
-            )
-          );
-        }
-        if (res.error) {
-          console.warn('[handleSupportComplaint]', res.error);
-        }
-      }
-    } catch (err: unknown) {
+    if (isCurrentlySupported) {
+      // Optimistically revoke support
       setUserSupportedIds((prev) => {
         const next = new Set(prev);
-        if (!prevSupported) next.delete(complaintId);
+        next.delete(complaintId);
         return next;
       });
       setComplaints((prev) =>
         prev.map((c) =>
-          c.$id === complaintId ? { ...c, support_count: prevCount } : c
+          c.$id === complaintId ? { ...c, support_count: Math.max(1, prevCount - 1) } : c
         )
       );
-      console.warn('[handleSupportComplaint] Network error:', err);
+
+      try {
+        const res = await apiRemoveSupport(complaintId);
+        if (res.success && res.data) {
+          setComplaints((prev) =>
+            prev.map((c) =>
+              c.$id === complaintId
+                ? { ...c, support_count: res.data?.support_count ?? c.support_count }
+                : c
+            )
+          );
+        } else {
+          // Revert revocation
+          setUserSupportedIds((prev) => new Set(prev).add(complaintId));
+          setComplaints((prev) =>
+            prev.map((c) =>
+              c.$id === complaintId ? { ...c, support_count: prevCount } : c
+            )
+          );
+          if (res.error) {
+            console.warn('[handleSupportComplaint remove]', res.error);
+          }
+        }
+      } catch (err: unknown) {
+        setUserSupportedIds((prev) => new Set(prev).add(complaintId));
+        setComplaints((prev) =>
+          prev.map((c) =>
+            c.$id === complaintId ? { ...c, support_count: prevCount } : c
+          )
+        );
+        console.warn('[handleSupportComplaint remove] Network error:', err);
+      }
+    } else {
+      // Optimistically add support
+      setUserSupportedIds((prev) => new Set(prev).add(complaintId));
+      setComplaints((prev) =>
+        prev.map((c) =>
+          c.$id === complaintId ? { ...c, support_count: prevCount + 1 } : c
+        )
+      );
+
+      try {
+        const res = await apiSupportComplaint(complaintId);
+        if (res.success && res.data) {
+          setComplaints((prev) =>
+            prev.map((c) =>
+              c.$id === complaintId
+                ? { ...c, support_count: res.data?.support_count ?? c.support_count }
+                : c
+            )
+          );
+        } else {
+          if (res.code === 'ALREADY_SUPPORTED') {
+            setComplaints((prev) =>
+              prev.map((c) =>
+                c.$id === complaintId ? { ...c, support_count: prevCount } : c
+              )
+            );
+          } else {
+            setUserSupportedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(complaintId);
+              return next;
+            });
+            setComplaints((prev) =>
+              prev.map((c) =>
+                c.$id === complaintId ? { ...c, support_count: prevCount } : c
+              )
+            );
+          }
+          if (res.error) {
+            console.warn('[handleSupportComplaint add]', res.error);
+          }
+        }
+      } catch (err: unknown) {
+        setUserSupportedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(complaintId);
+          return next;
+        });
+        setComplaints((prev) =>
+          prev.map((c) =>
+            c.$id === complaintId ? { ...c, support_count: prevCount } : c
+          )
+        );
+        console.warn('[handleSupportComplaint add] Network error:', err);
+      }
     }
   };
 

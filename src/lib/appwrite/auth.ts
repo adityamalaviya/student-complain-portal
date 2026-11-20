@@ -28,7 +28,16 @@ export async function createSession(userId: string, secret: string): Promise<Mod
   return account.createSession(userId, secret);
 }
 
+let cachedJwt: string | null = null;
+let jwtExpiresAt = 0;
+
+export function clearCachedJWT(): void {
+  cachedJwt = null;
+  jwtExpiresAt = 0;
+}
+
 export async function signOut(): Promise<void> {
+  clearCachedJWT();
   try {
     await account.deleteSession('current');
   } catch (err) {
@@ -47,10 +56,20 @@ export async function getCurrentUser(): Promise<AppwriteUser | null> {
 }
 
 export async function createJWT(): Promise<string | null> {
+  const now = Date.now();
+  if (cachedJwt && now < jwtExpiresAt) {
+    return cachedJwt;
+  }
+
   try {
     const response = await account.createJWT();
-    return response.jwt;
+    cachedJwt = response.jwt;
+    // Cache for 10 minutes (Appwrite JWTs are valid for 15 minutes)
+    jwtExpiresAt = now + 10 * 60 * 1000;
+    return cachedJwt;
   } catch {
+    cachedJwt = null;
+    jwtExpiresAt = 0;
     return null;
   }
 }

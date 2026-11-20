@@ -19,17 +19,35 @@ import {
   handleRequestClarification,
   handleReplyClarification,
 } from '../handlers/complaints.js';
+import {
+  handleRequestPhoneChange,
+  handleReviewPhoneChange,
+  handleCompletePhoneChange,
+  handleListPhoneChangeRequests,
+} from '../handlers/phoneChange.js';
+import {
+  handleGetPrincipalDashboard,
+  handleIssueWarning,
+  handleRespondToWarning,
+  handleListAdminAssignments,
+  handleAssignAdmin,
+  handleRevokeAdmin,
+  handleGetAuditHistory,
+} from '../handlers/principal.js';
 import type { DatabaseClientLike, StorageClientLike } from '../departments.js';
 import type {
   AdminMetrics,
   AdminScope,
   AppwriteContext,
+  AuditLog,
   AuthenticatedCaller,
   Complaint,
   ComplaintTimeline,
+  ComplaintWarning,
   DepartmentAdminAssignment,
   DepartmentId,
   IssueType,
+  PrincipalMetrics,
 } from '../types.js';
 
 function makeAdminAssignment(
@@ -434,8 +452,16 @@ test('Day 2: handleCreateComplaint routes across all 6 maintenance departments, 
   assert.equal(stored.status, 'Pending');
   assert.equal(stored.support_count, 1);
   assert.equal(stored.issue_type, undefined);
+  assert.equal(stored.department_code, undefined, 'complaints collection must not store undeclared department_code');
   assert.ok(stored.last_meaningful_update_at);
   assert.deepEqual(stored.$permissions, []);
+
+  // Verify complaint_created audit log was appended
+  const auditLogs = collections.get('audit_logs') || [];
+  const createdAudit = auditLogs.find((a) => a.action === 'complaint_created');
+  assert.ok(createdAudit, 'complaint_created audit entry must be appended');
+  assert.equal(createdAudit.target_resource_id, stored.$id);
+  assert.equal(createdAudit.actor_id, 'usr_comp_student');
 
   // Verify all 6 maintenance departments are selectable
   for (const maintId of ['dept_comp', 'dept_civil', 'dept_elec', 'dept_mech', 'dept_water', 'dept_sanit']) {
@@ -4305,4 +4331,1907 @@ test('Day 1 Support Concurrency: Simultaneous support, remove, and re-support re
   assert.equal(failingRemoveCtx.getResponse().body.success, false);
   assert.equal(failingRemoveCtx.getResponse().body.code, 'DATABASE_ERROR');
 });
+
+test('Day 4: Audit logs are appended for status change, clarification, and support lifecycle', async () => {
+  const { databases, collections } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_comp_audit_1',
+        $collectionId: 'complaints',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        student_user_id: 'usr_comp_creator',
+        student_name: 'Creator Student',
+        student_enrollment_no: '246510307001',
+        student_department_id: 'dept_comp',
+        maintenance_department_id: 'dept_comp',
+        title: 'Lab 1 Workstation Issue',
+        location: 'Lab 1',
+        description: 'Computer 5 monitor does not power on.',
+        priority: 'medium',
+        status: 'Pending',
+        support_count: 1,
+        last_meaningful_update_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+    profiles: [
+      {
+        $id: 'prof_comp_creator',
+        $collectionId: 'profiles',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_comp_creator',
+        name: 'Creator Student',
+        enrollment_no: '246510307001',
+        student_department_id: 'dept_comp',
+        phone_number: '9876543210',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+      },
+      {
+        $id: 'prof_comp_peer',
+        $collectionId: 'profiles',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_comp_peer',
+        name: 'Peer Student',
+        enrollment_no: '246510307002',
+        student_department_id: 'dept_comp',
+        phone_number: '9876543211',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+      },
+    ],
+    complaint_timeline: [],
+    complaint_supports: [],
+    supports: [],
+    audit_logs: [],
+  });
+
+  const adminCaller: AuthenticatedCaller = {
+    id: 'usr_comp_admin',
+    email: 'admin.comp@college.edu',
+    name: 'Comp Admin',
+    role: 'department_admin',
+    department_id: 'dept_comp',
+    department_name: 'Computer',
+    admin_assignments: [makeAdminAssignment('usr_comp_admin', 'dept_comp', 'maintenance')],
+  };
+  const creatorCaller: AuthenticatedCaller = {
+    id: 'usr_comp_creator',
+    email: 'creator@college.edu',
+    name: 'Creator Student',
+    role: 'student',
+    admin_assignments: [],
+    department_id: 'dept_comp',
+    department_name: 'Computer',
+  };
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_comp_peer',
+    email: 'peer@college.edu',
+    name: 'Peer Student',
+    role: 'student',
+    admin_assignments: [],
+    department_id: 'dept_comp',
+    department_name: 'Computer',
+  };
+
+  // 1. Admin updates status to In Progress
+  const updateCtx = createComplaintMockContext();
+  await handleUpdateAdminComplaint(
+    updateCtx.context,
+    adminCaller,
+    { complaint_id: 'cmpl_comp_audit_1', status: 'In Progress', official_response: 'Work started on display unit.' },
+    { databases }
+  );
+  assert.equal(updateCtx.getResponse().statusCode, 200);
+
+  // 2. Admin requests clarification
+  const clarReqCtx = createComplaintMockContext();
+  await handleRequestClarification(
+    clarReqCtx.context,
+    adminCaller,
+    { complaint_id: 'cmpl_comp_audit_1', question: 'Which desk number is affected?' },
+    { databases }
+  );
+  assert.equal(clarReqCtx.getResponse().statusCode, 200);
+
+  // 3. Creator replies to clarification
+  const clarRepCtx = createComplaintMockContext();
+  await handleReplyClarification(
+    clarRepCtx.context,
+    creatorCaller,
+    { complaint_id: 'cmpl_comp_audit_1', reply: 'Desk 5 near the window.' },
+    { databases }
+  );
+  assert.equal(clarRepCtx.getResponse().statusCode, 200);
+
+  // 4. Peer supports complaint
+  const supportCtx = createComplaintMockContext();
+  await handleSupportComplaint(
+    supportCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_comp_audit_1' },
+    { databases }
+  );
+  assert.equal(supportCtx.getResponse().statusCode, 200);
+
+  // 5. Peer removes support
+  const removeCtx = createComplaintMockContext();
+  await handleRemoveSupport(
+    removeCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_comp_audit_1' },
+    { databases }
+  );
+  assert.equal(removeCtx.getResponse().statusCode, 200);
+
+  // Verify all 5 audit actions were appended
+  const auditDocs = collections.get('audit_logs') || [];
+  const statusAudit = auditDocs.find((a) => a.action === 'complaint_status_changed');
+  assert.ok(statusAudit, 'complaint_status_changed audit entry must exist');
+  assert.equal(statusAudit.actor_id, 'usr_comp_admin');
+
+  const clarReqAudit = auditDocs.find((a) => a.action === 'clarification_requested');
+  assert.ok(clarReqAudit, 'clarification_requested audit entry must exist');
+  assert.equal(clarReqAudit.actor_id, 'usr_comp_admin');
+
+  const clarRepAudit = auditDocs.find((a) => a.action === 'clarification_replied');
+  assert.ok(clarRepAudit, 'clarification_replied audit entry must exist');
+  assert.equal(clarRepAudit.actor_id, 'usr_comp_creator');
+
+  const supportAudit = auditDocs.find((a) => a.action === 'support_added');
+  assert.ok(supportAudit, 'support_added audit entry must exist');
+  assert.equal(supportAudit.actor_id, 'usr_comp_peer');
+
+  const removeAudit = auditDocs.find((a) => a.action === 'support_removed');
+  assert.ok(removeAudit, 'support_removed audit entry must exist');
+  assert.equal(removeAudit.actor_id, 'usr_comp_peer');
+});
+
+test('Day 4: Complaint content immutability, Principal status guard, and invalid status transitions', async () => {
+  const initialTimestamp = '2026-11-10T10:00:00.000Z';
+  const { databases, collections } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_immut_1',
+        $collectionId: 'complaints',
+        $databaseId: 'campusvoice',
+        $createdAt: initialTimestamp,
+        $updatedAt: initialTimestamp,
+        $permissions: [],
+        student_user_id: 'usr_student_immut',
+        student_name: 'Immut Student',
+        student_enrollment_no: '246510307099',
+        student_department_id: 'dept_comp',
+        maintenance_department_id: 'dept_water',
+        title: 'Water Cooler Breakdown',
+        location: 'Ground Floor Water Station',
+        description: 'Cooler is leaking cold water continuously.',
+        priority: 'high',
+        status: 'In Progress',
+        support_count: 2,
+        last_meaningful_update_at: initialTimestamp,
+        created_at: initialTimestamp,
+        updated_at: initialTimestamp,
+      },
+    ],
+    profiles: [],
+    complaint_timeline: [],
+    complaint_supports: [],
+    supports: [],
+    audit_logs: [],
+  });
+
+  // 1. Principal attempts status update -> must return 403 Forbidden
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_root',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    admin_assignments: [],
+    department_id: null,
+    department_name: null,
+  };
+  const principalCtx = createComplaintMockContext();
+  await handleUpdateAdminComplaint(
+    principalCtx.context,
+    principalCaller,
+    { complaint_id: 'cmpl_immut_1', status: 'Resolved', official_response: 'Principal direct fix attempt.' },
+    { databases }
+  );
+  assert.equal(principalCtx.getResponse().statusCode, 403);
+  assert.equal(principalCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Concerned Water Maintenance Admin attempts to revert In Progress to Pending -> 400 Invalid Transition
+  const waterAdminCaller: AuthenticatedCaller = {
+    id: 'usr_water_admin',
+    email: 'admin.water@college.edu',
+    name: 'Water Admin',
+    role: 'department_admin',
+    department_id: 'dept_water',
+    department_name: 'Water',
+    admin_assignments: [makeAdminAssignment('usr_water_admin', 'dept_water', 'maintenance')],
+  };
+  const revertCtx = createComplaintMockContext();
+  await handleUpdateAdminComplaint(
+    revertCtx.context,
+    waterAdminCaller,
+    { complaint_id: 'cmpl_immut_1', status: 'Pending', official_response: 'Attempt to reset back to pending.' },
+    { databases }
+  );
+  assert.equal(revertCtx.getResponse().statusCode, 400);
+  assert.equal(revertCtx.getResponse().body.code, 'INVALID_STATUS_TRANSITION');
+
+  // 3. Successful resolution -> status becomes Resolved, content fields unchanged
+  const resolveCtx = createComplaintMockContext();
+  await handleUpdateAdminComplaint(
+    resolveCtx.context,
+    waterAdminCaller,
+    { complaint_id: 'cmpl_immut_1', status: 'Resolved', official_response: 'Replaced faulty valve; test passed.' },
+    { databases }
+  );
+  assert.equal(resolveCtx.getResponse().statusCode, 200);
+
+  const updatedDoc = (collections.get('complaints') || []).find((c) => c.$id === 'cmpl_immut_1');
+  assert.ok(updatedDoc);
+  assert.equal(updatedDoc.status, 'Resolved');
+  assert.equal(updatedDoc.title, 'Water Cooler Breakdown', 'Title must be immutable');
+  assert.equal(updatedDoc.description, 'Cooler is leaking cold water continuously.', 'Description must be immutable');
+  assert.equal(updatedDoc.location, 'Ground Floor Water Station', 'Location must be immutable');
+  assert.equal(updatedDoc.student_department_id, 'dept_comp', 'Student department must be immutable');
+  assert.equal(updatedDoc.maintenance_department_id, 'dept_water', 'Maintenance department must be immutable');
+  assert.equal(updatedDoc.student_user_id, 'usr_student_immut', 'Author ID must be immutable');
+  assert.equal(updatedDoc.created_at, initialTimestamp, 'created_at must be immutable');
+});
+
+test('Day 4: Clarification authorization — cross-dept admin receives 404, non-author student receives 403', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_clar_auth_1',
+        $collectionId: 'complaints',
+        $databaseId: 'campusvoice',
+        $createdAt: new Date().toISOString(),
+        $updatedAt: new Date().toISOString(),
+        $permissions: [],
+        student_user_id: 'usr_author_1',
+        student_department_id: 'dept_comp',
+        maintenance_department_id: 'dept_elec',
+        title: 'Switchboard sparking in Room 101',
+        location: 'Room 101',
+        description: 'Sparking observed when turning on the main switch.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        last_meaningful_update_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+    profiles: [],
+    complaint_timeline: [],
+    complaint_supports: [],
+    supports: [],
+    audit_logs: [],
+  });
+
+  // 1. Civil Admin attempts to request clarification on Electrical complaint -> 404 Oracle Elimination
+  const civilAdminCaller: AuthenticatedCaller = {
+    id: 'usr_civil_admin',
+    email: 'admin.civil@college.edu',
+    name: 'Civil Admin',
+    role: 'department_admin',
+    department_id: 'dept_civil',
+    department_name: 'Civil',
+    admin_assignments: [makeAdminAssignment('usr_civil_admin', 'dept_civil', 'maintenance')],
+  };
+  const civilCtx = createComplaintMockContext();
+  await handleRequestClarification(
+    civilCtx.context,
+    civilAdminCaller,
+    { complaint_id: 'cmpl_clar_auth_1', question: 'Civil admin unauthorized probe.' },
+    { databases }
+  );
+  assert.equal(civilCtx.getResponse().statusCode, 404);
+
+  // 2. Non-author student attempts to reply -> 403 Forbidden
+  const otherStudentCaller: AuthenticatedCaller = {
+    id: 'usr_imposter_student',
+    email: 'imposter@college.edu',
+    name: 'Imposter Student',
+    role: 'student',
+    admin_assignments: [],
+    department_id: 'dept_comp',
+    department_name: 'Computer',
+  };
+  const imposterCtx = createComplaintMockContext();
+  await handleReplyClarification(
+    imposterCtx.context,
+    otherStudentCaller,
+    { complaint_id: 'cmpl_clar_auth_1', reply: 'Trying to answer for creator.' },
+    { databases }
+  );
+  assert.equal(imposterCtx.getResponse().statusCode, 403);
+  assert.equal(imposterCtx.getResponse().body.code, 'FORBIDDEN');
+});
+
+test('Day 4: Creator baseline support removal blocked and complete support toggle cycle verified', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_supp_cycle_1',
+        $collectionId: 'complaints',
+        $databaseId: 'campusvoice',
+        $createdAt: new Date().toISOString(),
+        $updatedAt: new Date().toISOString(),
+        $permissions: [],
+        student_user_id: 'usr_supp_creator',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Transformer hum in substation',
+        location: 'Substation Yard',
+        description: 'Audible hum exceeding decibel standards.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1,
+        last_meaningful_update_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+    profiles: [
+      {
+        $id: 'prof_supp_creator',
+        $collectionId: 'profiles',
+        $databaseId: 'campusvoice',
+        $createdAt: new Date().toISOString(),
+        $updatedAt: new Date().toISOString(),
+        $permissions: [],
+        user_id: 'usr_supp_creator',
+        name: 'Creator Elec',
+        enrollment_no: '246510309001',
+        student_department_id: 'dept_elec',
+        phone_number: '9876543210',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+      },
+      {
+        $id: 'prof_supp_peer',
+        $collectionId: 'profiles',
+        $databaseId: 'campusvoice',
+        $createdAt: new Date().toISOString(),
+        $updatedAt: new Date().toISOString(),
+        $permissions: [],
+        user_id: 'usr_supp_peer',
+        name: 'Peer Elec',
+        enrollment_no: '246510309002',
+        student_department_id: 'dept_elec',
+        phone_number: '9876543211',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+      },
+    ],
+    complaint_timeline: [],
+    complaint_supports: [],
+    supports: [],
+    audit_logs: [],
+  });
+
+  const creatorCaller: AuthenticatedCaller = {
+    id: 'usr_supp_creator',
+    email: 'creator@elec.edu',
+    name: 'Creator Elec',
+    role: 'student',
+    admin_assignments: [],
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+  };
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_supp_peer',
+    email: 'peer@elec.edu',
+    name: 'Peer Elec',
+    role: 'student',
+    admin_assignments: [],
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+  };
+
+  // 1. Creator attempts to remove baseline support -> 400 CANNOT_REMOVE_CREATOR_SUPPORT
+  const creatorRemoveCtx = createComplaintMockContext();
+  await handleRemoveSupport(
+    creatorRemoveCtx.context,
+    creatorCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(creatorRemoveCtx.getResponse().statusCode, 400);
+  assert.equal(creatorRemoveCtx.getResponse().body.code, 'CANNOT_REMOVE_CREATOR_SUPPORT');
+
+  // 2. Peer checks support state before supporting
+  const stateCtx1 = createComplaintMockContext();
+  await handleGetSupportState(
+    stateCtx1.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(stateCtx1.getResponse().statusCode, 200);
+  const data1 = stateCtx1.getResponse().body.data as { has_supported: boolean; support_count: number };
+  assert.equal(data1.has_supported, false);
+  assert.equal(data1.support_count, 1);
+
+  // 3. Peer supports complaint
+  const suppCtx = createComplaintMockContext();
+  await handleSupportComplaint(
+    suppCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(suppCtx.getResponse().statusCode, 200);
+  const data2 = suppCtx.getResponse().body.data as { has_supported: boolean; support_count: number };
+  assert.equal(data2.has_supported, true);
+  assert.equal(data2.support_count, 2);
+
+  // 4. Peer checks support state after supporting
+  const stateCtx2 = createComplaintMockContext();
+  await handleGetSupportState(
+    stateCtx2.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(stateCtx2.getResponse().statusCode, 200);
+  const data3 = stateCtx2.getResponse().body.data as { has_supported: boolean; support_count: number };
+  assert.equal(data3.has_supported, true);
+  assert.equal(data3.support_count, 2);
+
+  // 5. Peer removes support
+  const removeCtx = createComplaintMockContext();
+  await handleRemoveSupport(
+    removeCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(removeCtx.getResponse().statusCode, 200);
+  const data4 = removeCtx.getResponse().body.data as { has_supported: boolean; support_count: number };
+  assert.equal(data4.has_supported, false);
+  assert.equal(data4.support_count, 1);
+
+  // 6. Repeated remove returns 400 NOT_SUPPORTED
+  const repeatRemoveCtx = createComplaintMockContext();
+  await handleRemoveSupport(
+    repeatRemoveCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(repeatRemoveCtx.getResponse().statusCode, 400);
+  assert.equal(repeatRemoveCtx.getResponse().body.code, 'NOT_SUPPORTED');
+
+  // 7. Re-support reactivates the record (count returns to 2)
+  const resuppCtx = createComplaintMockContext();
+  await handleSupportComplaint(
+    resuppCtx.context,
+    peerCaller,
+    { complaint_id: 'cmpl_supp_cycle_1' },
+    { databases }
+  );
+  assert.equal(resuppCtx.getResponse().statusCode, 200);
+  const data5 = resuppCtx.getResponse().body.data as { has_supported: boolean; support_count: number };
+  assert.equal(data5.has_supported, true);
+  assert.equal(data5.support_count, 2);
+});
+
+test('Day 5: handleRequestPhoneChange - Student request submission, validation, conflict guard, and audit log', async () => {
+  const { databases, collections } = createComplaintInMemoryDb({
+    profiles: [
+      {
+        $id: 'prof_comp_student_1',
+        user_id: 'usr_comp_student_1',
+        name: 'Aarav Patel',
+        enrollment_no: '246510307001',
+        student_department_id: 'dept_comp',
+        phone_number: '9876543210',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        profile_status: 'complete',
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'prof_inc_student_1',
+        user_id: 'usr_inc_student_1',
+        name: 'Incomplete Student',
+        enrollment_no: '246510307002',
+        student_department_id: 'dept_comp',
+        phone_number: '',
+        role: 'student',
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    phone_change_requests: [],
+    audit_logs: [],
+  });
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_comp_student_1',
+    email: 'aarav@college.edu',
+    name: 'Aarav Patel',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const adminCaller: AuthenticatedCaller = {
+    id: 'admin_comp_1',
+    email: 'admin.comp@college.edu',
+    name: 'Computer Admin',
+    role: 'department_admin',
+    department_id: 'dept_comp',
+    department_name: 'Computer Engineering',
+    admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+  };
+
+  // 1. Non-student caller blocked
+  const nonStudentCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    nonStudentCtx.context,
+    adminCaller,
+    { reason: 'Admin trying to change phone.' },
+    { databases }
+  );
+  assert.equal(nonStudentCtx.getResponse().statusCode, 403);
+  assert.equal(nonStudentCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Incomplete profile caller blocked
+  const incCaller: AuthenticatedCaller = {
+    id: 'usr_inc_student_1',
+    email: 'inc@college.edu',
+    name: 'Incomplete',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+  const incCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    incCtx.context,
+    incCaller,
+    { reason: 'Lost my registered phone device.' },
+    { databases }
+  );
+  assert.equal(incCtx.getResponse().statusCode, 400);
+  assert.equal(incCtx.getResponse().body.code, 'PROFILE_INCOMPLETE');
+
+  // 3. Invalid reason (< 10 chars)
+  const shortReasonCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    shortReasonCtx.context,
+    studentCaller,
+    { reason: 'Lost sim' },
+    { databases }
+  );
+  assert.equal(shortReasonCtx.getResponse().statusCode, 400);
+  assert.equal(shortReasonCtx.getResponse().body.code, 'INVALID_REASON');
+
+  // 4. Invalid requested phone format (not 10 digits starting with 6-9)
+  const badPhoneCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    badPhoneCtx.context,
+    studentCaller,
+    { reason: 'Lost my primary SIM card.', requested_phone_number: '12345' },
+    { databases }
+  );
+  assert.equal(badPhoneCtx.getResponse().statusCode, 400);
+  assert.equal(badPhoneCtx.getResponse().body.code, 'INVALID_PHONE_NUMBER');
+
+  // 5. Requested phone equals current phone
+  const samePhoneCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    samePhoneCtx.context,
+    studentCaller,
+    { reason: 'Lost my primary SIM card.', requested_phone_number: '9876543210' },
+    { databases }
+  );
+  assert.equal(samePhoneCtx.getResponse().statusCode, 400);
+  assert.equal(samePhoneCtx.getResponse().body.code, 'SAME_PHONE_NUMBER');
+
+  // 6. Valid request creation with audit log
+  const validCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    validCtx.context,
+    studentCaller,
+    { reason: 'SIM card was damaged; changing to alternate personal number.', requested_phone_number: '9123456789' },
+    { databases }
+  );
+  assert.equal(validCtx.getResponse().statusCode, 201);
+  const data = validCtx.getResponse().body.data as { request: { $id: string; status: string; academic_department_id: string } };
+  assert.equal(data.request.status, 'pending');
+  assert.equal(data.request.academic_department_id, 'dept_comp');
+
+  // Verify audit log appended
+  const auditDocs = collections.get('audit_logs') || [];
+  const reqAudit = auditDocs.find((a) => a.action === 'request_phone_change');
+  assert.ok(reqAudit, 'Audit log for request_phone_change must be recorded');
+  assert.equal(reqAudit.actor_id, studentCaller.id);
+
+  // 7. Duplicate active request blocked (409 Conflict)
+  const dupCtx = createComplaintMockContext();
+  await handleRequestPhoneChange(
+    dupCtx.context,
+    studentCaller,
+    { reason: 'Submitting a second request while first is pending.' },
+    { databases }
+  );
+  assert.equal(dupCtx.getResponse().statusCode, 409);
+  assert.equal(dupCtx.getResponse().body.code, 'ACTIVE_REQUEST_EXISTS');
+});
+
+test('Day 5: handleReviewPhoneChange - Academic Admin review scope, rejection reason, and Water/Sanitation block', async () => {
+  const { databases, collections } = createComplaintInMemoryDb({
+    phone_change_requests: [
+      {
+        $id: 'pcr_pending_comp_1',
+        student_user_id: 'usr_comp_student_1',
+        academic_department_id: 'dept_comp',
+        old_phone_number: '9876543210',
+        requested_phone_number: '9123456789',
+        reason: 'Lost device and need to update to family phone.',
+        status: 'pending',
+        reviewed_by: '',
+        decision_reason: '',
+        permission_consumed: false,
+        requested_at: new Date().toISOString(),
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    audit_logs: [],
+  });
+
+  const compAdminCaller: AuthenticatedCaller = {
+    id: 'admin_comp_1',
+    email: 'admin.comp@college.edu',
+    name: 'Computer Academic Admin',
+    role: 'department_admin',
+    department_id: 'dept_comp',
+    department_name: 'Computer Engineering',
+    admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+  };
+
+  const civilAdminCaller: AuthenticatedCaller = {
+    id: 'admin_civil_1',
+    email: 'admin.civil@college.edu',
+    name: 'Civil Academic Admin',
+    role: 'department_admin',
+    department_id: 'dept_civil',
+    department_name: 'Civil Engineering',
+    admin_assignments: [makeAdminAssignment('admin_civil_1', 'dept_civil', 'academic')],
+  };
+
+  const waterAdminCaller: AuthenticatedCaller = {
+    id: 'admin_water_1',
+    email: 'admin.water@college.edu',
+    name: 'Water Maintenance Admin',
+    role: 'department_admin',
+    department_id: 'dept_water',
+    department_name: 'Water Supply',
+    admin_assignments: [makeAdminAssignment('admin_water_1', 'dept_water', 'maintenance')],
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_comp_student_1',
+    email: 'aarav@college.edu',
+    name: 'Aarav Patel',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Water Admin blocked from reviewing academic phone change (403 FORBIDDEN)
+  const waterCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    waterCtx.context,
+    waterAdminCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'approved' },
+    { databases }
+  );
+  assert.equal(waterCtx.getResponse().statusCode, 403);
+  assert.equal(waterCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Cross-department Academic Admin blocked (403 FORBIDDEN)
+  const crossCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    crossCtx.context,
+    civilAdminCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'approved' },
+    { databases }
+  );
+  assert.equal(crossCtx.getResponse().statusCode, 403);
+  assert.equal(crossCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 3. Student blocked from reviewing (403 FORBIDDEN)
+  const studentRevCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    studentRevCtx.context,
+    studentCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'approved' },
+    { databases }
+  );
+  assert.equal(studentRevCtx.getResponse().statusCode, 403);
+
+  // 4. Rejection without reason blocked (400 REASON_REQUIRED)
+  const noReasonCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    noReasonCtx.context,
+    compAdminCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'rejected', decision_reason: '' },
+    { databases }
+  );
+  assert.equal(noReasonCtx.getResponse().statusCode, 400);
+  assert.equal(noReasonCtx.getResponse().body.code, 'REASON_REQUIRED');
+
+  // 5. Valid approval by student's assigned academic Department Admin
+  const approveCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    approveCtx.context,
+    compAdminCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'approved' },
+    { databases }
+  );
+  assert.equal(approveCtx.getResponse().statusCode, 200);
+  const data = approveCtx.getResponse().body.data as { request: { status: string; permission_consumed: boolean } };
+  assert.equal(data.request.status, 'approved');
+  assert.equal(data.request.permission_consumed, false);
+
+  // Verify audit log for review_phone_change
+  const auditDocs = collections.get('audit_logs') || [];
+  const reviewAudit = auditDocs.find((a) => a.action === 'review_phone_change');
+  assert.ok(reviewAudit, 'Audit log for review_phone_change must be recorded');
+  assert.equal(reviewAudit.actor_id, compAdminCaller.id);
+
+  // 6. Reviewing already-reviewed request returns 400
+  const reReviewCtx = createComplaintMockContext();
+  await handleReviewPhoneChange(
+    reReviewCtx.context,
+    compAdminCaller,
+    { request_id: 'pcr_pending_comp_1', decision: 'approved' },
+    { databases }
+  );
+  assert.equal(reReviewCtx.getResponse().statusCode, 400);
+  assert.equal(reReviewCtx.getResponse().body.code, 'REQUEST_ALREADY_REVIEWED');
+});
+
+test('Day 5: handleCompletePhoneChange - One-time permission consumption and failure-safety', async () => {
+  const initialProfiles = [
+    {
+      $id: 'prof_comp_student_1',
+      user_id: 'usr_comp_student_1',
+      name: 'Aarav Patel',
+      enrollment_no: '246510307001',
+      student_department_id: 'dept_comp',
+      phone_number: '9876543210',
+      role: 'student',
+      name_locked: true,
+      enrollment_locked: true,
+      phone_locked: true,
+      $permissions: [],
+    } as unknown as Models.Document,
+  ];
+
+  const initialRequests = [
+    {
+      $id: 'pcr_approved_1',
+      student_user_id: 'usr_comp_student_1',
+      academic_department_id: 'dept_comp',
+      old_phone_number: '9876543210',
+      requested_phone_number: '9123456789',
+      reason: 'SIM card damaged.',
+      status: 'approved',
+      permission_consumed: false,
+      $permissions: [],
+    } as unknown as Models.Document,
+    {
+      $id: 'pcr_consumed_1',
+      student_user_id: 'usr_comp_student_1',
+      academic_department_id: 'dept_comp',
+      old_phone_number: '9876543210',
+      requested_phone_number: '9123456789',
+      reason: 'Already completed change.',
+      status: 'completed',
+      permission_consumed: true,
+      $permissions: [],
+    } as unknown as Models.Document,
+  ];
+
+  const { databases, collections } = createComplaintInMemoryDb({
+    profiles: initialProfiles,
+    phone_change_requests: initialRequests,
+    audit_logs: [],
+  });
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_comp_student_1',
+    email: 'aarav@college.edu',
+    name: 'Aarav Patel',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const otherStudentCaller: AuthenticatedCaller = {
+    id: 'usr_other_student_1',
+    email: 'other@college.edu',
+    name: 'Other Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Non-matching student gets 404 (Oracle Elimination / IDOR prevention)
+  const idorCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    idorCtx.context,
+    otherStudentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9123456789' },
+    { databases }
+  );
+  assert.equal(idorCtx.getResponse().statusCode, 404);
+  assert.equal(idorCtx.getResponse().body.code, 'NOT_FOUND');
+
+  // 2. Already consumed request returns 403 PERMISSION_NOT_AVAILABLE
+  const consumedCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    consumedCtx.context,
+    studentCaller,
+    { request_id: 'pcr_consumed_1', new_phone_number: '9123456789' },
+    { databases }
+  );
+  assert.equal(consumedCtx.getResponse().statusCode, 403);
+  assert.equal(consumedCtx.getResponse().body.code, 'PERMISSION_NOT_AVAILABLE');
+
+  // 3. New phone equals old phone returns 400 SAME_PHONE_NUMBER
+  const samePhoneCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    samePhoneCtx.context,
+    studentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9876543210' },
+    { databases }
+  );
+  assert.equal(samePhoneCtx.getResponse().statusCode, 400);
+  assert.equal(samePhoneCtx.getResponse().body.code, 'SAME_PHONE_NUMBER');
+
+  // 4. FAILURE SAFETY SIMULATION:
+  // If the profile document update fails, permission MUST NOT be consumed and old phone must remain active!
+  const failingDatabases: DatabaseClientLike = {
+    ...databases,
+    async updateDocument(dbId, collectionId, documentId, data) {
+      if (collectionId === 'profiles') {
+        throw new Error('Database disk write failure on profiles');
+      }
+      return databases.updateDocument(dbId, collectionId, documentId, data);
+    },
+  };
+
+  const failCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    failCtx.context,
+    studentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9123456789' },
+    { databases: failingDatabases }
+  );
+  assert.equal(failCtx.getResponse().statusCode, 500);
+  assert.equal(failCtx.getResponse().body.code, 'PROFILE_SAVE_FAILED');
+
+  // Verify permission was NOT consumed on failure:
+  const requestAfterFail = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+  assert.equal(requestAfterFail.permission_consumed, false, 'Permission must remain unconsumed after profile write failure');
+  assert.equal(requestAfterFail.status, 'approved', 'Request status must remain approved so student can retry');
+
+  // Verify profile phone was NOT modified:
+  const profileAfterFail = (collections.get('profiles') || [])[0];
+  assert.equal(profileAfterFail.phone_number, '9876543210', 'Old phone number must remain active after profile write failure');
+
+  // 4b. Step 2 Failure & Automatic Rollback Simulation:
+  // If updating phone_change_requests throws, profiles update must be rolled back to old phone!
+  const step2FailingDatabases: DatabaseClientLike = {
+    ...databases,
+    async updateDocument(dbId, collectionId, documentId, data) {
+      if (collectionId === 'phone_change_requests' && data && (data as Record<string, unknown>).status === 'completed') {
+        throw new Error('Database network timeout on phone_change_requests completion');
+      }
+      return databases.updateDocument(dbId, collectionId, documentId, data);
+    },
+  };
+
+  const step2FailCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    step2FailCtx.context,
+    studentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9123456789' },
+    { databases: step2FailingDatabases }
+  );
+  assert.equal(step2FailCtx.getResponse().statusCode, 500);
+  assert.equal(step2FailCtx.getResponse().body.code, 'REQUEST_COMPLETION_FAILED');
+
+  // Verify permission remains unconsumed and profile rolled back:
+  const requestAfterStep2Fail = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+  assert.equal(requestAfterStep2Fail.permission_consumed, false, 'Permission must remain unconsumed after Step 2 write failure');
+  assert.equal(requestAfterStep2Fail.status, 'approved', 'Request status must remain approved so student can retry');
+
+  const profileAfterStep2Fail = (collections.get('profiles') || [])[0];
+  assert.equal(profileAfterStep2Fail.phone_number, '9876543210', 'Profile phone number must be rolled back to old phone number');
+
+  // 5. Successful completion (Happy path)
+  const successCtx = createComplaintMockContext();
+  await handleCompletePhoneChange(
+    successCtx.context,
+    studentCaller,
+    { request_id: 'pcr_approved_1', new_phone_number: '9123456789' },
+    { databases }
+  );
+  assert.equal(successCtx.getResponse().statusCode, 200);
+
+  // Verify profile updated and locked
+  const updatedProfile = (collections.get('profiles') || [])[0];
+  assert.equal(updatedProfile.phone_number, '9123456789');
+  assert.equal(updatedProfile.phone_locked, true);
+
+  // Verify request marked completed and consumed
+  const updatedReq = await databases.getDocument('campusvoice', 'phone_change_requests', 'pcr_approved_1');
+  assert.equal(updatedReq.status, 'completed');
+  assert.equal(updatedReq.permission_consumed, true);
+
+  // Verify audit log with masked phone
+  const auditDocs = collections.get('audit_logs') || [];
+  const compAudit = auditDocs.find((a) => a.action === 'complete_phone_change');
+  assert.ok(compAudit, 'Audit log for complete_phone_change must be recorded');
+  const detailsStr = String(compAudit.details || '');
+  assert.ok(detailsStr.includes('****'), 'Audit log must mask phone number');
+});
+
+test('Day 5: handleListPhoneChangeRequests - Scoped listing by role and Water/Sanitation rejection', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    phone_change_requests: [
+      {
+        $id: 'pcr_comp_1',
+        student_user_id: 'usr_comp_student_1',
+        academic_department_id: 'dept_comp',
+        status: 'pending',
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'pcr_civil_1',
+        student_user_id: 'usr_civil_student_1',
+        academic_department_id: 'dept_civil',
+        status: 'pending',
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_comp_student_1',
+    email: 'comp@college.edu',
+    name: 'Comp Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const compAdminCaller: AuthenticatedCaller = {
+    id: 'admin_comp_1',
+    email: 'admin.comp@college.edu',
+    name: 'Computer Admin',
+    role: 'department_admin',
+    department_id: 'dept_comp',
+    department_name: 'Computer Engineering',
+    admin_assignments: [makeAdminAssignment('admin_comp_1', 'dept_comp', 'academic')],
+  };
+
+  const waterAdminCaller: AuthenticatedCaller = {
+    id: 'admin_water_1',
+    email: 'admin.water@college.edu',
+    name: 'Water Admin',
+    role: 'department_admin',
+    department_id: 'dept_water',
+    department_name: 'Water Supply',
+    admin_assignments: [makeAdminAssignment('admin_water_1', 'dept_water', 'maintenance')],
+  };
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Student sees only their own request
+  const studListCtx = createComplaintMockContext();
+  await handleListPhoneChangeRequests(studListCtx.context, studentCaller, {}, { databases });
+  assert.equal(studListCtx.getResponse().statusCode, 200);
+  const studData = studListCtx.getResponse().body.data as { requests: Array<{ student_user_id: string }> };
+  assert.ok(studData.requests.every((r) => r.student_user_id === studentCaller.id));
+
+  // 2. Academic Admin sees only their academic department
+  const compAdminListCtx = createComplaintMockContext();
+  await handleListPhoneChangeRequests(compAdminListCtx.context, compAdminCaller, {}, { databases });
+  assert.equal(compAdminListCtx.getResponse().statusCode, 200);
+  const compData = compAdminListCtx.getResponse().body.data as { requests: Array<{ academic_department_id: string }> };
+  assert.ok(compData.requests.every((r) => r.academic_department_id === 'dept_comp'));
+
+  // 3. Water maintenance admin receives 403 FORBIDDEN
+  const waterListCtx = createComplaintMockContext();
+  await handleListPhoneChangeRequests(waterListCtx.context, waterAdminCaller, {}, { databases });
+  assert.equal(waterListCtx.getResponse().statusCode, 403);
+  assert.equal(waterListCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 4. Principal sees all requests
+  const prinListCtx = createComplaintMockContext();
+  await handleListPhoneChangeRequests(prinListCtx.context, principalCaller, {}, { databases });
+  assert.equal(prinListCtx.getResponse().statusCode, 200);
+  const prinData = prinListCtx.getResponse().body.data as { total: number };
+  assert.equal(prinData.total, 2);
+});
+
+test('Day 5: handleGetPrincipalDashboard - 6-department breakdown, delay metrics, and Principal status mutation prohibition', async () => {
+  const past6Days = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+  const past1Day = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { databases } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_delayed_water_1',
+        student_user_id: 'usr_student_1',
+        student_name: 'Student 1',
+        student_enrollment_no: '246510307001',
+        student_department_id: 'dept_comp',
+        maintenance_department_id: 'dept_water',
+        title: 'Water filter broken',
+        location: 'Ground Floor',
+        description: 'No clean drinking water.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past6Days,
+        last_meaningful_update_at: past6Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_fresh_comp_1',
+        student_user_id: 'usr_student_2',
+        student_name: 'Student 2',
+        student_enrollment_no: '246510307002',
+        student_department_id: 'dept_comp',
+        maintenance_department_id: 'dept_comp',
+        title: 'Monitor flickering',
+        location: 'Lab 2',
+        description: 'Screen flickers when typing.',
+        priority: 'low',
+        status: 'In Progress',
+        support_count: 2,
+        created_at: past1Day,
+        last_meaningful_update_at: past1Day,
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    complaint_warnings: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student_1',
+    email: 'student@college.edu',
+    name: 'Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Student blocked from principal dashboard (403 FORBIDDEN)
+  const studDashCtx = createComplaintMockContext();
+  await handleGetPrincipalDashboard(studDashCtx.context, studentCaller, { databases });
+  assert.equal(studDashCtx.getResponse().statusCode, 403);
+
+  // 2. Principal receives 200 OK with all 6 canonical department metrics
+  const prinDashCtx = createComplaintMockContext();
+  await handleGetPrincipalDashboard(prinDashCtx.context, principalCaller, { databases });
+  assert.equal(prinDashCtx.getResponse().statusCode, 200);
+
+  const dashData = prinDashCtx.getResponse().body.data as {
+    metrics: PrincipalMetrics;
+    delayed_complaints: Array<{ complaint: { $id: string }; days_delayed: number; is_warning_eligible: boolean }>;
+  };
+
+  // Verify 6 departments represented in breakdown
+  const breakdown = dashData.metrics.department_breakdown;
+  assert.ok(breakdown.dept_comp, 'Computer dept metrics must exist');
+  assert.ok(breakdown.dept_civil, 'Civil dept metrics must exist');
+  assert.ok(breakdown.dept_elec, 'Electrical dept metrics must exist');
+  assert.ok(breakdown.dept_mech, 'Mechanical dept metrics must exist');
+  assert.ok(breakdown.dept_water, 'Water dept metrics must exist');
+  assert.ok(breakdown.dept_sanit, 'Sanitation dept metrics must exist');
+
+  // Verify delayed complaint identified
+  assert.equal(dashData.delayed_complaints.length, 1);
+  assert.equal(dashData.delayed_complaints[0].complaint.$id, 'cmpl_delayed_water_1');
+  assert.ok(dashData.delayed_complaints[0].days_delayed >= 5);
+  assert.equal(dashData.delayed_complaints[0].is_warning_eligible, true);
+
+  // 3. Principal cannot change complaint status in handleUpdateAdminComplaint (403 FORBIDDEN)
+  const prinStatusCtx = createComplaintMockContext();
+  await handleUpdateAdminComplaint(
+    prinStatusCtx.context,
+    principalCaller,
+    {
+      complaint_id: 'cmpl_delayed_water_1',
+      status: 'Resolved',
+      official_response: 'Principal attempting status change.',
+    },
+    { databases }
+  );
+  assert.equal(prinStatusCtx.getResponse().statusCode, 403);
+  assert.equal(prinStatusCtx.getResponse().body.code, 'FORBIDDEN');
+});
+
+test('Day 6: handleAssignAdmin, handleRevokeAdmin, handleListAdminAssignments - Admin Assignment & Dynamic Role Management', async () => {
+  const { databases, collections } = createComplaintInMemoryDb({
+    department_admins: [],
+    profiles: [
+      {
+        $id: 'usr_target_1',
+        name: 'Faculty User',
+        email: 'faculty.civil@college.edu',
+        role: 'student',
+      } as unknown as Models.Document,
+    ],
+    audit_logs: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student_1',
+    email: 'student@college.edu',
+    name: 'Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Non-principal caller blocked with 403 FORBIDDEN
+  const studAssignCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    studAssignCtx.context,
+    studentCaller,
+    { email: 'prof@college.edu', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(studAssignCtx.getResponse().statusCode, 403);
+  assert.equal(studAssignCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Validation failures: invalid email, invalid department, invalid scope
+  const badEmailCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badEmailCtx.context,
+    principalCaller,
+    { email: 'not-an-email', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(badEmailCtx.getResponse().statusCode, 400);
+  assert.equal(badEmailCtx.getResponse().body.code, 'INVALID_EMAIL');
+
+  const badDeptCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badDeptCtx.context,
+    principalCaller,
+    { email: 'prof@college.edu', department_id: 'dept_invented', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(badDeptCtx.getResponse().statusCode, 400);
+  assert.equal(badDeptCtx.getResponse().body.code, 'INVALID_DEPARTMENT');
+
+  const badScopeCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    badScopeCtx.context,
+    principalCaller,
+    { email: 'prof@college.edu', department_id: 'dept_civil', scope: 'super_scope' },
+    { databases }
+  );
+  assert.equal(badScopeCtx.getResponse().statusCode, 400);
+  assert.equal(badScopeCtx.getResponse().body.code, 'INVALID_SCOPE');
+
+  // 3. Mandatory Security Invariant: Water and Sanitation CANNOT be assigned academic scope
+  const waterAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    waterAcadCtx.context,
+    principalCaller,
+    { email: 'water.admin@college.edu', department_id: 'dept_water', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(waterAcadCtx.getResponse().statusCode, 400);
+  assert.equal(waterAcadCtx.getResponse().body.code, 'INVALID_DEPARTMENT_SCOPE');
+
+  const sanitAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    sanitAcadCtx.context,
+    principalCaller,
+    { email: 'sanit.admin@college.edu', department_id: 'dept_sanit', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(sanitAcadCtx.getResponse().statusCode, 400);
+  assert.equal(sanitAcadCtx.getResponse().body.code, 'INVALID_DEPARTMENT_SCOPE');
+
+  // 4. Valid maintenance assignment for Water succeeds
+  const waterMaintCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    waterMaintCtx.context,
+    principalCaller,
+    { email: 'water.admin@college.edu', department_id: 'dept_water', scope: 'maintenance' },
+    { databases }
+  );
+  assert.equal(waterMaintCtx.getResponse().statusCode, 201);
+  const waterAssDoc = waterMaintCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(waterAssDoc.assignment.department_id, 'dept_water');
+  assert.equal(waterAssDoc.assignment.scope, 'maintenance');
+  assert.equal(waterAssDoc.assignment.is_active, true);
+
+  // 5. Valid academic assignment for Civil succeeds and updates profile role
+  const civilAcadCtx = createComplaintMockContext();
+  await handleAssignAdmin(
+    civilAcadCtx.context,
+    principalCaller,
+    { email: 'faculty.civil@college.edu', user_id: 'usr_target_1', department_id: 'dept_civil', scope: 'academic' },
+    { databases }
+  );
+  assert.equal(civilAcadCtx.getResponse().statusCode, 201);
+  const civilAssDoc = civilAcadCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(civilAssDoc.assignment.department_id, 'dept_civil');
+  assert.equal(civilAssDoc.assignment.scope, 'academic');
+
+  // Verify profile role updated to department_admin
+  const targetProf = collections.get('profiles')?.find((p) => p.$id === 'usr_target_1');
+  assert.equal(targetProf?.role, 'department_admin');
+
+  // Verify audit log appended
+  const auditLogs = collections.get('audit_logs') || [];
+  assert.ok(auditLogs.some((l) => l.action === 'assign_department_admin'));
+
+  // 6. Principal lists admin assignments
+  const listCtx = createComplaintMockContext();
+  await handleListAdminAssignments(listCtx.context, principalCaller, { databases });
+  assert.equal(listCtx.getResponse().statusCode, 200);
+  const listData = listCtx.getResponse().body.data as { assignments: DepartmentAdminAssignment[]; total: number };
+  assert.equal(listData.total, 2);
+
+  // 7. Student blocked from listing assignments
+  const studListCtx = createComplaintMockContext();
+  await handleListAdminAssignments(studListCtx.context, studentCaller, { databases });
+  assert.equal(studListCtx.getResponse().statusCode, 403);
+
+  // 8. Revoke admin assignment
+  const revokeCtx = createComplaintMockContext();
+  await handleRevokeAdmin(
+    revokeCtx.context,
+    principalCaller,
+    { assignment_id: civilAssDoc.assignment.$id },
+    { databases }
+  );
+  assert.equal(revokeCtx.getResponse().statusCode, 200);
+  const revokedData = revokeCtx.getResponse().body.data as { assignment: DepartmentAdminAssignment };
+  assert.equal(revokedData.assignment.is_active, false);
+
+  // Verify user profile role reverted to student (since no other active admin assignments exist)
+  const updatedTargetProf = collections.get('profiles')?.find((p) => p.$id === 'usr_target_1');
+  assert.equal(updatedTargetProf?.role, 'student');
+
+  // Verify audit log appended for revocation
+  assert.ok(collections.get('audit_logs')?.some((l) => l.action === 'revoke_department_admin'));
+});
+
+test('Day 6: handleIssueWarning & handleRespondToWarning - 5-Day Delay Milestones, Multiple Warnings & Responses', async () => {
+  const past7Days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const past2Days = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { databases, collections } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_delayed_elec',
+        student_user_id: 'usr_s1',
+        student_name: 'Student 1',
+        student_enrollment_no: '246510309001',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Wiring fault in Lab',
+        location: 'EE Block',
+        description: 'Exposed wires sparking.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_fresh_elec',
+        student_user_id: 'usr_s2',
+        student_name: 'Student 2',
+        student_enrollment_no: '246510309002',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Tube light broken',
+        location: 'Room 101',
+        description: 'Light not turning on.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past2Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_resolved_elec',
+        student_user_id: 'usr_s3',
+        student_name: 'Student 3',
+        student_enrollment_no: '246510309003',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Switchboard repaired',
+        location: 'Room 102',
+        description: 'Repaired previously.',
+        priority: 'medium',
+        status: 'Resolved',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    complaint_warnings: [],
+    audit_logs: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const elecAdminCaller: AuthenticatedCaller = {
+    id: 'usr_admin_elec',
+    email: 'elec.admin@college.edu',
+    name: 'Electrical Admin',
+    role: 'department_admin',
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+    admin_assignments: [
+      {
+        $id: 'da_elec',
+        user_id: 'usr_admin_elec',
+        email: 'elec.admin@college.edu',
+        department_id: 'dept_elec',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: past7Days,
+      },
+    ],
+  };
+
+  const mechAdminCaller: AuthenticatedCaller = {
+    id: 'usr_admin_mech',
+    email: 'mech.admin@college.edu',
+    name: 'Mechanical Admin',
+    role: 'department_admin',
+    department_id: 'dept_mech',
+    department_name: 'Mechanical',
+    admin_assignments: [
+      {
+        $id: 'da_mech',
+        user_id: 'usr_admin_mech',
+        email: 'mech.admin@college.edu',
+        department_id: 'dept_mech',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: past7Days,
+      },
+    ],
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_s1',
+    email: 's1@college.edu',
+    name: 'Student 1',
+    role: 'student',
+    department_id: 'dept_elec',
+    department_name: 'Electrical',
+  };
+
+  // 1. Non-principal cannot issue warning (403 FORBIDDEN)
+  const nonPrinWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    nonPrinWarnCtx.context,
+    studentCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'Why has this not been resolved yet?' },
+    { databases }
+  );
+  assert.equal(nonPrinWarnCtx.getResponse().statusCode, 403);
+
+  // 2. Cannot warn on fresh complaint (<= 5 days) -> 400 NOT_DELAY_ELIGIBLE
+  const freshWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    freshWarnCtx.context,
+    principalCaller,
+    { complaint_id: 'cmpl_fresh_elec', warning_reason: 'Please attend to this complaint immediately.' },
+    { databases }
+  );
+  assert.equal(freshWarnCtx.getResponse().statusCode, 400);
+  assert.equal(freshWarnCtx.getResponse().body.code, 'NOT_DELAY_ELIGIBLE');
+
+  // 3. Cannot warn on Resolved complaint -> 400 CANNOT_WARN_RESOLVED
+  const resolvedWarnCtx = createComplaintMockContext();
+  await handleIssueWarning(
+    resolvedWarnCtx.context,
+    principalCaller,
+    { complaint_id: 'cmpl_resolved_elec', warning_reason: 'Complaint is already resolved.' },
+    { databases }
+  );
+  assert.equal(resolvedWarnCtx.getResponse().statusCode, 400);
+  assert.equal(resolvedWarnCtx.getResponse().body.code, 'CANNOT_WARN_RESOLVED');
+
+  // 4. Principal successfully issues warning on delayed complaint
+  const validWarnCtx1 = createComplaintMockContext();
+  await handleIssueWarning(
+    validWarnCtx1.context,
+    principalCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'First formal warning: 7 days without resolution.' },
+    { databases }
+  );
+  assert.equal(validWarnCtx1.getResponse().statusCode, 201);
+  const warnData1 = validWarnCtx1.getResponse().body.data as { warning: ComplaintWarning };
+  assert.equal(warnData1.warning.complaint_id, 'cmpl_delayed_elec');
+  assert.equal(warnData1.warning.days_delayed >= 5, true);
+
+  // 5. Multiple warnings allowed while unresolved
+  const validWarnCtx2 = createComplaintMockContext();
+  await handleIssueWarning(
+    validWarnCtx2.context,
+    principalCaller,
+    { complaint_id: 'cmpl_delayed_elec', warning_reason: 'Second formal warning: Urgent action required.' },
+    { databases }
+  );
+  assert.equal(validWarnCtx2.getResponse().statusCode, 201);
+  const warnData2 = validWarnCtx2.getResponse().body.data as { warning: ComplaintWarning };
+  assert.notEqual(warnData1.warning.$id, warnData2.warning.$id);
+
+  // Verify warnings count in DB
+  const warningsList = collections.get('complaint_warnings') || [];
+  assert.equal(warningsList.length, 2);
+
+  // 6. Admin responds to warning
+  // Cross-department admin blocked with 403 FORBIDDEN
+  const wrongAdminRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    wrongAdminRespCtx.context,
+    mechAdminCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Attempting cross-department response.' },
+    { databases }
+  );
+  assert.equal(wrongAdminRespCtx.getResponse().statusCode, 403);
+
+  // Student blocked with 403 FORBIDDEN
+  const studRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    studRespCtx.context,
+    studentCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Student attempting response.' },
+    { databases }
+  );
+  assert.equal(studRespCtx.getResponse().statusCode, 403);
+
+  // Assigned maintenance admin responds successfully
+  const validRespCtx = createComplaintMockContext();
+  await handleRespondToWarning(
+    validRespCtx.context,
+    elecAdminCaller,
+    { warning_id: warnData1.warning.$id, admin_response: 'Parts ordered from supplier; replacement scheduled for tomorrow.' },
+    { databases }
+  );
+  assert.equal(validRespCtx.getResponse().statusCode, 200);
+  const updatedWarn = validRespCtx.getResponse().body.data as { warning: ComplaintWarning };
+  assert.equal(updatedWarn.warning.admin_response, 'Parts ordered from supplier; replacement scheduled for tomorrow.');
+  assert.ok(updatedWarn.warning.responded_at);
+
+  // Verify audit logs appended
+  const auditLogs = collections.get('audit_logs') || [];
+  assert.ok(auditLogs.some((l) => l.action === 'issue_warning'));
+  assert.ok(auditLogs.some((l) => l.action === 'respond_to_warning'));
+});
+
+test('Day 6: handleGetAuditHistory - Append-Only Audit History Retrieval', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    audit_logs: [
+      {
+        $id: 'al_1',
+        action: 'issue_warning',
+        actor_id: 'usr_principal_1',
+        actor_role: 'principal',
+        target_resource_id: 'cw_1',
+        target_resource_type: 'complaint_warning',
+        details: JSON.stringify({ reason: 'Delayed complaint' }),
+        created_at: '2026-11-19T10:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'al_2',
+        action: 'respond_to_warning',
+        actor_id: 'usr_admin_1',
+        actor_role: 'department_admin',
+        target_resource_id: 'cw_1',
+        target_resource_type: 'complaint_warning',
+        details: JSON.stringify({ response: 'Acknowledged' }),
+        created_at: '2026-11-19T11:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'al_3',
+        action: 'assign_department_admin',
+        actor_id: 'usr_principal_1',
+        actor_role: 'principal',
+        target_resource_id: 'da_1',
+        target_resource_type: 'department_admin',
+        details: JSON.stringify({ department_id: 'dept_civil', scope: 'academic' }),
+        created_at: '2026-11-19T12:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_1',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student_1',
+    email: 'student@college.edu',
+    name: 'Student',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. Student blocked with 403 FORBIDDEN
+  const studAuditCtx = createComplaintMockContext();
+  await handleGetAuditHistory(studAuditCtx.context, studentCaller, {}, { databases });
+  assert.equal(studAuditCtx.getResponse().statusCode, 403);
+
+  // 2. Principal retrieves all audit logs
+  const prinAuditCtx = createComplaintMockContext();
+  await handleGetAuditHistory(prinAuditCtx.context, principalCaller, {}, { databases });
+  assert.equal(prinAuditCtx.getResponse().statusCode, 200);
+  const auditData = prinAuditCtx.getResponse().body.data as { audit_logs: AuditLog[]; total: number };
+  assert.equal(auditData.total, 3);
+  assert.equal(auditData.audit_logs.length, 3);
+  assert.equal(auditData.audit_logs[0].action, 'issue_warning');
+
+  // 3. Action filtering support
+  const filteredCtx = createComplaintMockContext();
+  await handleGetAuditHistory(filteredCtx.context, principalCaller, { action: 'issue_warning' }, { databases });
+  assert.equal(filteredCtx.getResponse().statusCode, 200);
+  const filteredData = filteredCtx.getResponse().body.data as { audit_logs: AuditLog[]; total: number };
+  assert.equal(filteredData.audit_logs.length, 1);
+  assert.equal(filteredData.audit_logs[0].action, 'issue_warning');
+});
+
+test('Day 7 Audit Fix: handleListComplaints returns accurate has_supported for caller and respects native pagination', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    profiles: [
+      {
+        $id: 'prof_peer_civil',
+        user_id: 'usr_peer_civil',
+        student_department_id: 'dept_civil',
+        name: 'Civil Peer',
+        enrollment_no: '246510306002',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        phone_number: '9876543210',
+      } as unknown as Models.Document,
+    ],
+    complaints: [
+      {
+        $id: 'cmpl_civil_1',
+        student_user_id: 'usr_creator_civil',
+        student_name: 'Creator Civil',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Broken desk in civil lab',
+        location: 'Room 101',
+        description: 'Multiple desks broken in room 101.',
+        priority: 'medium',
+        status: 'Pending',
+        support_count: 2,
+        created_at: '2026-11-19T00:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_civil_2',
+        student_user_id: 'usr_creator_civil_2',
+        student_name: 'Creator 2',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Fan not working in civil seminar',
+        location: 'Seminar Hall',
+        description: 'Ceiling fan is making loud noises.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1,
+        created_at: '2026-11-19T01:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+    complaint_supports: [
+      {
+        $id: 'supp_1',
+        complaint_id: 'cmpl_civil_1',
+        user_id: 'usr_peer_civil',
+        status: 'active',
+        created_at: '2026-11-19T02:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_peer_civil',
+    email: 'peer.civil@college.edu',
+    name: 'Civil Peer',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const ctx = createComplaintMockContext();
+  await handleListComplaints(ctx.context, peerCaller, { page: 1, limit: 10 }, { databases });
+
+  assert.equal(ctx.getResponse().statusCode, 200);
+  const data = ctx.getResponse().body.data as { complaints: Complaint[]; total: number };
+  assert.equal(data.complaints.length, 2);
+
+  const cmpl1 = data.complaints.find((c) => c.$id === 'cmpl_civil_1');
+  const cmpl2 = data.complaints.find((c) => c.$id === 'cmpl_civil_2');
+
+  assert.ok(cmpl1);
+  assert.ok(cmpl2);
+  assert.equal(cmpl1.has_supported, true, 'User actively supported cmpl_civil_1');
+  assert.equal(cmpl2.has_supported, false, 'User has not supported cmpl_civil_2');
+});
+
+test('Day 7 Audit Fix: handleGetComplaint and handleGetSupportState self-heal support count from supports collection', async () => {
+  const peerSupportDocId = crypto
+    .createHash('sha256')
+    .update('cmpl_stale_count:usr_peer_civil')
+    .digest('hex')
+    .slice(0, 32);
+
+  const { databases } = createComplaintInMemoryDb({
+    profiles: [
+      {
+        $id: 'prof_peer_civil',
+        user_id: 'usr_peer_civil',
+        student_department_id: 'dept_civil',
+        name: 'Civil Peer',
+        enrollment_no: '246510306002',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        phone_number: '9876543210',
+      } as unknown as Models.Document,
+    ],
+    complaints: [
+      {
+        $id: 'cmpl_stale_count',
+        student_user_id: 'usr_creator_civil',
+        student_name: 'Creator',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Stale support count test',
+        location: 'Room 202',
+        description: 'Testing self-healing support count.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1, // Stale count: only creator recorded here
+        created_at: '2026-11-19T00:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+    complaint_supports: [
+      {
+        $id: peerSupportDocId,
+        complaint_id: 'cmpl_stale_count',
+        user_id: 'usr_peer_civil',
+        status: 'active',
+        created_at: '2026-11-19T02:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'supp_active_2',
+        complaint_id: 'cmpl_stale_count',
+        user_id: 'usr_peer_civil_2',
+        status: 'active',
+        created_at: '2026-11-19T03:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_peer_civil',
+    email: 'peer.civil@college.edu',
+    name: 'Civil Peer',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. handleGetComplaint reconciles support_count to 1 + 2 = 3
+  const getCtx = createComplaintMockContext();
+  await handleGetComplaint(getCtx.context, peerCaller, { complaint_id: 'cmpl_stale_count' }, { databases });
+  assert.equal(getCtx.getResponse().statusCode, 200);
+  const getData = getCtx.getResponse().body.data as { complaint: Complaint; has_supported: boolean };
+  assert.equal(getData.complaint.support_count, 3, 'Support count must self-heal to 1 (creator) + 2 (active supports)');
+  assert.equal(getData.has_supported, true);
+
+  // 2. handleGetSupportState also returns 3 and has_supported: true
+  const stateCtx = createComplaintMockContext();
+  await handleGetSupportState(stateCtx.context, peerCaller, { complaint_id: 'cmpl_stale_count' }, { databases });
+  assert.equal(stateCtx.getResponse().statusCode, 200);
+  const stateData = stateCtx.getResponse().body.data as { support_count: number; has_supported: boolean };
+  assert.equal(stateData.support_count, 3, 'Support state must return self-healed count 3');
+  assert.equal(stateData.has_supported, true);
+});
+
+test('Day 7 Audit Fix: Principal dashboard aggregates metrics and delayed complaints via index-backed queries without in-memory scan', async () => {
+  const past7Days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const past2Days = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { databases } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_delayed_elec_1',
+        student_user_id: 'usr_stud_elec',
+        student_name: 'Electrical Student',
+        student_enrollment_no: '246510309001',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Wiring sparked in lab',
+        location: 'Lab 3',
+        description: 'Dangerous sparking wires near bench 4.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_fresh_mech_1',
+        student_user_id: 'usr_stud_mech',
+        student_name: 'Mechanical Student',
+        student_enrollment_no: '246510319001',
+        student_department_id: 'dept_mech',
+        maintenance_department_id: 'dept_mech',
+        title: 'Lathe machine unaligned',
+        location: 'Workshop B',
+        description: 'Machine cuts off center.',
+        priority: 'medium',
+        status: 'In Progress',
+        support_count: 2,
+        created_at: past2Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_resolved_civil_1',
+        student_user_id: 'usr_stud_civil',
+        student_name: 'Civil Student',
+        student_enrollment_no: '246510306001',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Broken window in room 12',
+        location: 'Room 12',
+        description: 'Fixed yesterday.',
+        priority: 'low',
+        status: 'Resolved',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    complaint_warnings: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_governor',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const prinCtx = createComplaintMockContext();
+  await handleGetPrincipalDashboard(prinCtx.context, principalCaller, { databases });
+  assert.equal(prinCtx.getResponse().statusCode, 200);
+
+  const dashBody = prinCtx.getResponse().body as {
+    success: boolean;
+    data: {
+      metrics: PrincipalMetrics;
+      delayed_complaints: Array<{ complaint: { $id: string }; days_delayed: number; is_warning_eligible: boolean }>;
+      recent_complaints: Complaint[];
+    };
+  };
+
+  assert.equal(dashBody.success, true);
+  const { metrics, delayed_complaints, recent_complaints } = dashBody.data;
+
+  // Total complaints = 1 Pending + 1 In Progress + 1 Resolved = 3
+  assert.equal(metrics.total_complaints, 3);
+  assert.equal(metrics.total_pending, 1);
+  assert.equal(metrics.total_in_progress, 1);
+  assert.equal(metrics.total_resolved, 1);
+  assert.equal(metrics.total_delayed, 1);
+
+  // Department breakdowns verified
+  assert.equal(metrics.department_breakdown.dept_elec.pending, 1);
+  assert.equal(metrics.department_breakdown.dept_elec.delayed, 1);
+  assert.equal(metrics.department_breakdown.dept_mech.in_progress, 1);
+  assert.equal(metrics.department_breakdown.dept_mech.delayed, 0);
+  assert.equal(metrics.department_breakdown.dept_civil.resolved, 1);
+
+  // Delayed complaints list contains only the unresolved overdue item
+  assert.equal(delayed_complaints.length, 1);
+  assert.equal(delayed_complaints[0].complaint.$id, 'cmpl_delayed_elec_1');
+  assert.ok(delayed_complaints[0].days_delayed >= 5);
+  assert.equal(delayed_complaints[0].is_warning_eligible, true);
+
+  // Recent complaints list is returned
+  assert.ok(recent_complaints.length > 0);
+});
+
 

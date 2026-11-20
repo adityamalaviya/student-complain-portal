@@ -1,6 +1,6 @@
 import { ExecutionMethod } from 'appwrite';
 import { functions, APPWRITE_CONFIG } from '../appwrite/client';
-import { createJWT } from '../appwrite/auth';
+import { createJWT, clearCachedJWT } from '../appwrite/auth';
 import type {
   ApiResponse,
   Department,
@@ -13,6 +13,8 @@ import type {
   PhoneChangeRequest,
   ComplaintWarning,
   PrincipalDashboardData,
+  DepartmentAdminAssignment,
+  AuditLog,
 } from '../../types';
 import type {
   OnboardingInput,
@@ -60,6 +62,9 @@ export async function executeFunction<T>(
     }
 
     if (execution.responseStatusCode >= 400 || !parsedResponse.success) {
+      if (execution.responseStatusCode === 401 || parsedResponse.code === 'UNAUTHORIZED') {
+        clearCachedJWT();
+      }
       return {
         success: false,
         error: parsedResponse.error || `Request failed with status ${execution.responseStatusCode}`,
@@ -376,4 +381,62 @@ export async function apiRespondToWarning(
     warning_id: input.warning_id,
     admin_response: input.admin_response,
   });
+}
+
+// ----------------------------------------------------
+// Admin Assignment & Governance Operations (Day 6)
+// ----------------------------------------------------
+
+export interface AssignAdminInput {
+  email: string;
+  department_id: string;
+  scope: 'academic' | 'maintenance';
+  user_id?: string;
+}
+
+export async function apiListAdminAssignments(): Promise<
+  ApiResponse<{ assignments: DepartmentAdminAssignment[]; total: number }>
+> {
+  return executeFunction<{ assignments: DepartmentAdminAssignment[]; total: number }>(
+    'list-admin-assignments'
+  );
+}
+
+export async function apiAssignAdmin(
+  input: AssignAdminInput
+): Promise<ApiResponse<{ assignment: DepartmentAdminAssignment }>> {
+  return executeFunction<{ assignment: DepartmentAdminAssignment }>('assign-admin', {
+    email: input.email,
+    department_id: input.department_id,
+    scope: input.scope,
+    ...(input.user_id ? { user_id: input.user_id } : {}),
+  });
+}
+
+export async function apiRevokeAdmin(
+  assignment_id: string
+): Promise<ApiResponse<{ assignment: DepartmentAdminAssignment }>> {
+  return executeFunction<{ assignment: DepartmentAdminAssignment }>('revoke-admin', {
+    assignment_id,
+  });
+}
+
+// ----------------------------------------------------
+// System Audit Trail Operations (Day 6)
+// ----------------------------------------------------
+
+export interface GetAuditHistoryParams {
+  action?: string;
+  actor_id?: string;
+  target_resource_id?: string;
+  limit?: number;
+}
+
+export async function apiGetAuditHistory(
+  params: GetAuditHistoryParams = {}
+): Promise<ApiResponse<{ audit_logs: AuditLog[]; total: number }>> {
+  return executeFunction<{ audit_logs: AuditLog[]; total: number }>(
+    'get-audit-history',
+    params as Record<string, unknown>
+  );
 }

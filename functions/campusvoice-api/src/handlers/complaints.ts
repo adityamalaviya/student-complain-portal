@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { ID, Query, type Models } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from '../db.js';
+import { appendAuditLog } from './audit.js';
 import {
   PHONE_NUMBER_REGEX,
   isAcademicDepartment,
@@ -21,6 +22,7 @@ import type {
   Complaint,
   ComplaintAttachmentData,
   ComplaintTimeline,
+  ComplaintWarning,
   PriorityLevel,
   TimelineEntryType,
   UserProfile,
@@ -969,11 +971,6 @@ export async function handleCreateComplaint(
       profile.department_name ||
       maintenanceDept.name;
 
-    const enrollmentDeptCode =
-      typeof profile.enrollment_no === 'string' && profile.enrollment_no.length === 12
-        ? profile.enrollment_no.slice(7, 9)
-        : undefined;
-
     const complaintData = {
       student_user_id: profile.user_id,
       student_name: profile.name,
@@ -988,7 +985,6 @@ export async function handleCreateComplaint(
       support_count: 1,
       last_meaningful_update_at: now,
       department_name: effectiveDepartmentName,
-      ...(enrollmentDeptCode ? { department_code: enrollmentDeptCode } : {}),
       ...(attachmentFileId ? { attachment_file_id: attachmentFileId } : {}),
       created_at: now,
       updated_at: now,
@@ -1021,6 +1017,26 @@ export async function handleCreateComplaint(
 
     log(
       `[complaints] Created complaint ${doc.$id} by student ${profile.user_id} (academic=${profile.student_department_id}, maintenance=${maintenanceDept.id})`
+    );
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'complaint_created',
+        actor_id: profile.user_id,
+        actor_role: 'student',
+        target_resource_id: doc.$id,
+        target_resource_type: 'complaint',
+        details: {
+          student_department_id: profile.student_department_id,
+          maintenance_department_id: maintenanceDept.id,
+          priority,
+          has_attachment: Boolean(attachmentFileId),
+        },
+      },
+      log
     );
 
     const createdComplaint: Complaint = projectComplaint(
@@ -1129,14 +1145,15 @@ export async function handleListComplaints(
     const page = typeof data.page === 'number' && data.page > 0 ? data.page : 1;
     const limit = typeof data.limit === 'number' && data.limit > 0 && data.limit <= 50 ? data.limit : 20;
 
-    const complaintsDocuments: Models.Document[] = [];
-    let offset = 0;
-    let totalDocuments = 0;
-    do {
+    let pageSlice: Complaint[] = [];
+    let total = 0;
+
+    if (search.length === 0) {
+      const offset = (page - 1) * limit;
       const queries = [
         Query.equal('student_department_id', profile.student_department_id),
         Query.orderDesc('$createdAt'),
-        Query.limit(100),
+        Query.limit(limit),
         Query.offset(offset),
       ];
       if (normalizedStatus) {
@@ -1147,32 +1164,71 @@ export async function handleListComplaints(
         config.complaintsCollectionId,
         queries
       );
-      complaintsDocuments.push(...result.documents);
-      totalDocuments = result.total;
-      offset += result.documents.length;
-      if (result.documents.length === 0) break;
-    } while (complaintsDocuments.length < totalDocuments);
+      total = result.total;
+      pageSlice = result.documents
+        .map((doc) => mapDocToComplaint(doc))
+        .filter((c) => c.student_department_id === profile.student_department_id);
+    } else {
+      // With local search filter: limit scan to maximum 100 recent documents to prevent timeout
+      const queries = [
+        Query.equal('student_department_id', profile.student_department_id),
+        Query.orderDesc('$createdAt'),
+        Query.limit(100),
+      ];
+      if (normalizedStatus) {
+        queries.push(Query.equal('status', normalizedStatus));
+      }
+      const result = await databases.listDocuments(
+        config.databaseId,
+        config.complaintsCollectionId,
+        queries
+      );
+      let complaints = result.documents
+        .map((doc) => mapDocToComplaint(doc))
+        .filter((c) => c.student_department_id === profile.student_department_id);
 
-    // shortcut: local search scans the scoped result set; add indexed search when volume requires it.
-    let complaints = complaintsDocuments
-      .map((doc) => mapDocToComplaint(doc))
-      .filter((c) => c.student_department_id === profile.student_department_id);
-
-    if (search.length > 0) {
       complaints = complaints.filter(
         (c) =>
           c.title.toLowerCase().includes(search) ||
           c.location.toLowerCase().includes(search) ||
           c.description.toLowerCase().includes(search)
       );
+      total = complaints.length;
+      const startIndex = (page - 1) * limit;
+      pageSlice = complaints.slice(startIndex, startIndex + limit);
     }
 
-    const total = complaints.length;
-    const startIndex = (page - 1) * limit;
-    const pageSlice = complaints.slice(startIndex, startIndex + limit);
+    const pageComplaintIds = pageSlice
+      .map((c) => c.$id)
+      .filter((id): id is string => Boolean(id));
+
+    const userSupportedComplaintIds = new Set<string>();
+    if (pageComplaintIds.length > 0) {
+      try {
+        const supportQuery = [
+          Query.equal('complaint_id', pageComplaintIds),
+          Query.equal('user_id', caller.id),
+          Query.equal('status', 'active'),
+          Query.limit(limit),
+        ];
+        const userSupports = await databases.listDocuments(
+          config.databaseId,
+          config.supportsCollectionId,
+          supportQuery
+        );
+        for (const sDoc of userSupports.documents) {
+          const cId = readStringField(sDoc, 'complaint_id');
+          if (cId) userSupportedComplaintIds.add(cId);
+        }
+      } catch {
+        // Non-blocking: fallback to empty set if support collection query fails
+      }
+    }
+
     const summaryMap = await fetchLatestTimelineSummariesForComplaints(databases, config, pageSlice);
     const paginatedComplaints = pageSlice.map((c) => {
       const isCreator = c.student_user_id === caller.id;
+      const hasSupported = isCreator || (c.$id ? userSupportedComplaintIds.has(c.$id) : false);
       const summary = c.$id ? summaryMap.get(c.$id) : undefined;
       const projected = projectComplaint(c, {
         includePrivateDetails: isCreator,
@@ -1183,6 +1239,7 @@ export async function handleListComplaints(
       });
       return {
         ...projected,
+        has_supported: hasSupported,
         is_delayed: isDelayed({
           status: c.status,
           created_at: c.created_at || '',
@@ -1347,6 +1404,26 @@ export async function handleGetComplaint(
       rawTimeline
     );
 
+    let trueSupportCount = complaint.support_count;
+    try {
+      const activeSupports = await databases.listDocuments(
+        config.databaseId,
+        config.supportsCollectionId,
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
+      );
+      trueSupportCount = 1 + activeSupports.total;
+      if (trueSupportCount !== complaint.support_count) {
+        await databases.updateDocument(
+          config.databaseId,
+          config.complaintsCollectionId,
+          complaintId,
+          { support_count: trueSupportCount }
+        ).catch(() => undefined);
+      }
+    } catch {
+      // Non-blocking
+    }
+
     const projectedComplaint = projectComplaint(complaint, {
       includePrivateDetails,
       isOwnComplaint,
@@ -1382,12 +1459,36 @@ export async function handleGetComplaint(
       hasSupported = false;
     }
 
+    let warnings: ComplaintWarning[] = [];
+    if (includePrivateDetails) {
+      try {
+        const warningsResult = await databases.listDocuments(
+          config.databaseId,
+          config.warningsCollectionId,
+          [Query.equal('complaint_id', complaintId), Query.orderAsc('created_at')]
+        );
+        warnings = warningsResult.documents.map((wDoc) => ({
+          $id: wDoc.$id,
+          complaint_id: readStringField(wDoc, 'complaint_id'),
+          issued_by_principal_id: readStringField(wDoc, 'issued_by_principal_id'),
+          warning_reason: readStringField(wDoc, 'warning_reason'),
+          days_delayed: readNumberField(wDoc, 'days_delayed') ?? 0,
+          admin_response: readStringField(wDoc, 'admin_response') || undefined,
+          responded_at: readStringField(wDoc, 'responded_at') || undefined,
+          created_at: readStringField(wDoc, 'created_at') || wDoc.$createdAt,
+        }));
+      } catch {
+        warnings = [];
+      }
+    }
+
     return res.json(
       {
         success: true,
         data: {
           complaint: {
             ...projectedComplaint,
+            support_count: trueSupportCount,
             is_delayed: isDelayed({
               status: complaint.status,
               created_at: complaint.created_at || (doc.$createdAt as string) || '',
@@ -1400,6 +1501,7 @@ export async function handleGetComplaint(
           },
           timeline: projectedTimeline,
           has_supported: hasSupported,
+          warnings,
         },
       },
       200
@@ -1608,7 +1710,7 @@ export async function handleSupportComplaint(
       const activeSupports = await databases.listDocuments(
         config.databaseId,
         config.supportsCollectionId,
-        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(100)]
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
       );
       newCount = 1 + activeSupports.total;
       await databases.updateDocument(
@@ -1636,6 +1738,24 @@ export async function handleSupportComplaint(
     }
 
     log(`[complaints] User ${caller.id} supported complaint ${complaintId} (new count: ${newCount})`);
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'support_added',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          new_support_count: newCount,
+          is_resupport: Boolean(existingDoc),
+        },
+      },
+      log
+    );
 
     return res.json(
       {
@@ -1830,7 +1950,7 @@ export async function handleRemoveSupport(
       const activeSupports = await databases.listDocuments(
         config.databaseId,
         config.supportsCollectionId,
-        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(100)]
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
       );
       newCount = 1 + activeSupports.total;
       await databases.updateDocument(
@@ -1852,6 +1972,23 @@ export async function handleRemoveSupport(
     }
 
     log(`[complaints] User ${caller.id} removed support from complaint ${complaintId} (new count: ${newCount})`);
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'support_removed',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          new_support_count: newCount,
+        },
+      },
+      log
+    );
 
     return res.json(
       {
@@ -2014,11 +2151,31 @@ export async function handleGetSupportState(
       hasSupported = false;
     }
 
+    let trueSupportCount = complaint.support_count;
+    try {
+      const activeSupports = await databases.listDocuments(
+        config.databaseId,
+        config.supportsCollectionId,
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
+      );
+      trueSupportCount = 1 + activeSupports.total;
+      if (trueSupportCount !== complaint.support_count) {
+        await databases.updateDocument(
+          config.databaseId,
+          config.complaintsCollectionId,
+          complaintId,
+          { support_count: trueSupportCount }
+        ).catch(() => undefined);
+      }
+    } catch {
+      // Non-blocking
+    }
+
     return res.json(
       {
         success: true,
         data: {
-          support_count: complaint.support_count,
+          support_count: trueSupportCount,
           has_supported: hasSupported,
         },
       },
@@ -2491,6 +2648,26 @@ export async function handleUpdateAdminComplaint(
       `[admin] Admin ${caller.id} recorded ${noteEntryType} on complaint ${complaintId} (status: ${existingStatus} -> ${normalizedStatus})`
     );
 
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'complaint_status_changed',
+        actor_id: caller.id,
+        actor_role: 'department_admin',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          old_status: existingStatus,
+          new_status: normalizedStatus,
+          is_substantive: requestedSubstantive,
+          maintenance_department_id: existing.maintenance_department_id,
+        },
+      },
+      log
+    );
+
     return res.json(
       {
         success: true,
@@ -2822,6 +2999,24 @@ export async function handleRequestClarification(
 
     log(`[complaints] Admin ${caller.id} requested clarification on complaint ${complaintId}`);
 
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'clarification_requested',
+        actor_id: caller.id,
+        actor_role: 'department_admin',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          maintenance_department_id: complaint.maintenance_department_id,
+          question_preview: question.slice(0, 100),
+        },
+      },
+      log
+    );
+
     const timelineEntry: ComplaintTimeline = {
       $id: timelineDoc.$id,
       complaint_id: complaintId,
@@ -2964,6 +3159,23 @@ export async function handleReplyClarification(
     );
 
     log(`[complaints] Creator ${caller.id} replied to clarification on complaint ${complaintId}`);
+
+    await appendAuditLog(
+      databases,
+      config.databaseId,
+      config.auditLogsCollectionId,
+      {
+        action: 'clarification_replied',
+        actor_id: caller.id,
+        actor_role: 'student',
+        target_resource_id: complaintId,
+        target_resource_type: 'complaint',
+        details: {
+          reply_preview: reply.slice(0, 100),
+        },
+      },
+      log
+    );
 
     const timelineEntry: ComplaintTimeline = {
       $id: timelineDoc.$id,

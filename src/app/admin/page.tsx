@@ -32,6 +32,7 @@ import {
   ComplaintPriorityBadge,
   DepartmentBadge,
   AdminResolutionModal,
+  PhoneRejectModal,
   type AdminResolutionSubmitResult,
   LoadingSkeleton,
   EmptyState,
@@ -81,6 +82,7 @@ export default function AdminDashboardPage(): React.ReactElement {
   const [isReviewSubmitting, setIsReviewSubmitting] = useState<boolean>(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
+  const [rejectModalRequest, setRejectModalRequest] = useState<PhoneChangeRequest | null>(null);
 
   // Authorization Guard: Admin only
   useEffect(() => {
@@ -161,26 +163,50 @@ export default function AdminDashboardPage(): React.ReactElement {
     }
   }, [profile, isAdmin, isAcademicAdmin, adminDeptAlt?.id, phoneFilter]);
 
-  const handleQuickReviewPhone = async (
-    requestId: string,
-    decision: 'approved' | 'rejected'
-  ): Promise<void> => {
+  const handleQuickApprovePhone = async (requestId: string): Promise<void> => {
     setIsReviewSubmitting(true);
     setReviewError(null);
     setReviewSuccess(null);
     try {
       const res = await apiReviewPhoneChange({
         request_id: requestId,
-        decision,
+        decision: 'approved',
       });
       if (res.success) {
-        setReviewSuccess(`Request successfully marked as ${decision}.`);
+        setReviewSuccess('Request successfully marked as approved.');
         await fetchPhoneRequests();
       } else {
-        setReviewError(res.error || `Failed to ${decision} request.`);
+        setReviewError(res.error || 'Failed to approve request.');
       }
     } catch {
-      setReviewError(`Network error while trying to ${decision} request.`);
+      setReviewError('Network error while trying to approve request.');
+    } finally {
+      setIsReviewSubmitting(false);
+    }
+  };
+
+  const handleConfirmRejectPhone = async (requestId: string, reason: string): Promise<void> => {
+    setIsReviewSubmitting(true);
+    setReviewError(null);
+    setReviewSuccess(null);
+    try {
+      const res = await apiReviewPhoneChange({
+        request_id: requestId,
+        decision: 'rejected',
+        decision_reason: reason,
+      });
+      if (res.success) {
+        setReviewSuccess('Request successfully marked as rejected.');
+        setRejectModalRequest(null);
+        await fetchPhoneRequests();
+      } else {
+        setReviewError(res.error || 'Failed to reject request.');
+        throw new Error(res.error || 'Failed to reject request.');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Network error while rejecting request.';
+      setReviewError(msg);
+      throw err;
     } finally {
       setIsReviewSubmitting(false);
     }
@@ -524,6 +550,18 @@ export default function AdminDashboardPage(): React.ReactElement {
                             <span>Delayed ({delayInfo.days_delayed}d)</span>
                           </span>
                         )}
+                        {((complaint as { warning_count?: number }).warning_count ?? 0) > 0 && (
+                          <Link
+                            href={`/complaints/${complaint.$id}`}
+                            className="inline-flex items-center gap-1 rounded bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800 transition hover:bg-red-200 dark:bg-red-950/60 dark:text-red-300"
+                          >
+                            <WarningCircle size={12} weight="bold" />
+                            <span>
+                              {(complaint as { warning_count?: number }).warning_count} Warning
+                              {((complaint as { warning_count?: number }).warning_count ?? 0) > 1 ? 's' : ''}
+                            </span>
+                          </Link>
+                        )}
                         {complaint.priority === 'high' && (
                           <ComplaintPriorityBadge priority="high" size="sm" />
                         )}
@@ -676,7 +714,7 @@ export default function AdminDashboardPage(): React.ReactElement {
                           <button
                             type="button"
                             disabled={isReviewSubmitting}
-                            onClick={() => handleQuickReviewPhone(reqId, 'approved')}
+                            onClick={() => handleQuickApprovePhone(reqId)}
                             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
                           >
                             <CheckCircle size={14} weight="bold" />
@@ -685,7 +723,7 @@ export default function AdminDashboardPage(): React.ReactElement {
                           <button
                             type="button"
                             disabled={isReviewSubmitting}
-                            onClick={() => handleQuickReviewPhone(reqId, 'rejected')}
+                            onClick={() => setRejectModalRequest(req)}
                             className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
                           >
                             <XCircle size={14} weight="bold" />
@@ -716,6 +754,15 @@ export default function AdminDashboardPage(): React.ReactElement {
           setSelectedComplaint(null);
         }}
         onSubmit={handleResolutionSubmit}
+      />
+
+      {/* Centered Phone Change Rejection Modal */}
+      <PhoneRejectModal
+        isOpen={Boolean(rejectModalRequest)}
+        request={rejectModalRequest}
+        onClose={() => setRejectModalRequest(null)}
+        onSubmit={handleConfirmRejectPhone}
+        isSubmitting={isReviewSubmitting}
       />
 
       {/* Footer */}
