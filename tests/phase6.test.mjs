@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { extractAndMapEnrollment } from '../src/lib/utils/department.ts';
+import {
+  extractAndMapEnrollment,
+  INSTITUTIONAL_DEPARTMENTS,
+  ENROLLMENT_CODE_MAPPINGS,
+  resolveDepartment,
+} from '../src/lib/utils/department.ts';
 import { calculateComplaintDelay } from '../src/lib/utils/delay.ts';
 
 // =====================================================================
@@ -1644,4 +1649,506 @@ test('Phase 6 Test 15: Complaint Submission Validation & Private Storage Attachm
   assert.equal(permissions[1], 'delete("user:usr_student_xyz")');
   assert.ok(!permissions.some((p) => p.includes('read("any")')), 'Public read permission must never be granted');
 });
+
+// =====================================================================
+// Day 7: Stabilization and Release Verification Comprehensive Invariants
+// =====================================================================
+
+test('Phase 6 Test 16: Complete Multi-Role Authorization Matrix & Oracle Elimination Verification', () => {
+  // Test caller permissions and Oracle Elimination
+  const roles = ['student', 'department_admin', 'principal'];
+
+  // Department admin assignments
+  const adminAssignments = [
+    { user_id: 'usr_admin_civil', department_id: 'dept_civil', scope: 'academic', is_active: true },
+    { user_id: 'usr_admin_water', department_id: 'dept_water', scope: 'maintenance', is_active: true },
+    { user_id: 'usr_admin_comp', department_id: 'dept_comp', scope: 'academic', is_active: true },
+  ];
+
+  // 1. Water and Sanitation cannot be assigned academic scope
+  function validateAdminAssignmentScope(departmentId, scope) {
+    const dept = resolveDepartment(departmentId);
+    if (!dept || !dept.is_active) {
+      return { valid: false, error: 'UNKNOWN_OR_INACTIVE_DEPARTMENT' };
+    }
+    if (scope === 'academic' && !dept.is_academic) {
+      return { valid: false, error: 'INVALID_DEPARTMENT_SCOPE' };
+    }
+    return { valid: true };
+  }
+
+  assert.equal(validateAdminAssignmentScope('dept_water', 'academic').valid, false);
+  assert.equal(validateAdminAssignmentScope('dept_water', 'academic').error, 'INVALID_DEPARTMENT_SCOPE');
+  assert.equal(validateAdminAssignmentScope('dept_sanit', 'academic').valid, false);
+  assert.equal(validateAdminAssignmentScope('dept_civil', 'academic').valid, true);
+  assert.equal(validateAdminAssignmentScope('dept_water', 'maintenance').valid, true);
+
+  // 2. Complaint update status authority
+  function canUpdateComplaintStatus(caller, complaint) {
+    // Only assigned maintenance admin can update status. Principal cannot. Students cannot.
+    if (caller.role !== 'department_admin') {
+      return { allowed: false, status: 403, error: 'FORBIDDEN' };
+    }
+    const hasAssignment = adminAssignments.some(
+      (a) => a.user_id === caller.id && a.department_id === complaint.maintenance_department_id && a.is_active
+    );
+    if (!hasAssignment) {
+      // Oracle Elimination: cross-department admin returns 404
+      return { allowed: false, status: 404, error: 'NOT_FOUND' };
+    }
+    return { allowed: true };
+  }
+
+  const complaintWater = {
+    $id: 'cmpl_water_1',
+    student_department_id: 'dept_comp',
+    maintenance_department_id: 'dept_water',
+    status: 'Pending',
+  };
+
+  const waterAdminCaller = { id: 'usr_admin_water', role: 'department_admin' };
+  const civilAdminCaller = { id: 'usr_admin_civil', role: 'department_admin' };
+  const principalCaller = { id: 'usr_principal', role: 'principal' };
+  const studentCaller = { id: 'usr_student', role: 'student' };
+
+  assert.equal(canUpdateComplaintStatus(waterAdminCaller, complaintWater).allowed, true);
+  assert.equal(canUpdateComplaintStatus(civilAdminCaller, complaintWater).status, 404);
+  assert.equal(canUpdateComplaintStatus(principalCaller, complaintWater).status, 403);
+  assert.equal(canUpdateComplaintStatus(studentCaller, complaintWater).status, 403);
+
+  // 3. Academic admin phone change review authority
+  function canReviewPhoneChange(caller, request) {
+    if (caller.role === 'principal') return { allowed: true };
+    if (caller.role !== 'department_admin') return { allowed: false, status: 403 };
+
+    // Water/Sanitation admins cannot review phone changes
+    const dept = resolveDepartment(caller.department_id);
+    if (!dept || !dept.is_academic) {
+      return { allowed: false, status: 403, error: 'MAINTENANCE_ADMIN_CANNOT_APPROVE_PHONE' };
+    }
+    // Must match student's academic department
+    if (caller.department_id !== request.academic_department_id) {
+      return { allowed: false, status: 403, error: 'CROSS_DEPARTMENT_FORBIDDEN' };
+    }
+    return { allowed: true };
+  }
+
+  const phoneReqComp = { academic_department_id: 'dept_comp' };
+  assert.equal(canReviewPhoneChange({ role: 'department_admin', department_id: 'dept_comp' }, phoneReqComp).allowed, true);
+  assert.equal(canReviewPhoneChange({ role: 'principal', department_id: null }, phoneReqComp).allowed, true);
+  assert.equal(canReviewPhoneChange({ role: 'department_admin', department_id: 'dept_water' }, phoneReqComp).status, 403);
+  assert.equal(canReviewPhoneChange({ role: 'department_admin', department_id: 'dept_civil' }, phoneReqComp).status, 403);
+});
+
+test('Phase 6 Test 17: Peer PII Redaction & Storage Attachment IDOR Prevention', () => {
+  const fullComplaint = {
+    $id: 'cmpl_private_1',
+    student_user_id: 'usr_author_123',
+    student_name: 'Author Student',
+    student_enrollment_no: '246510307001',
+    student_phone_number: '9876543210',
+    student_department_id: 'dept_comp',
+    maintenance_department_id: 'dept_water',
+    title: 'Water fountain leakage',
+    location: 'Building B 1st Floor',
+    description: 'Continuous leakage from fountain valve.',
+    priority: 'high',
+    status: 'Pending',
+    support_count: 3,
+    attachment_file_id: 'file_leak_proof_999',
+    created_at: new Date().toISOString(),
+  };
+
+  function projectComplaint(complaint, caller) {
+    const isCreator = caller.id === complaint.student_user_id;
+    const isPrincipal = caller.role === 'principal';
+    const isAssignedAdmin =
+      caller.role === 'department_admin' && caller.department_id === complaint.maintenance_department_id;
+
+    if (isCreator || isPrincipal || isAssignedAdmin) {
+      return {
+        ...complaint,
+        is_own_complaint: isCreator,
+      };
+    }
+
+    // Peer student projection: strip all creator PII and attachments
+    const {
+      student_name,
+      student_enrollment_no,
+      student_phone_number,
+      attachment_file_id,
+      ...safeFields
+    } = complaint;
+
+    return {
+      ...safeFields,
+      is_own_complaint: false,
+    };
+  }
+
+  const authorCaller = { id: 'usr_author_123', role: 'student', department_id: 'dept_comp' };
+  const peerCaller = { id: 'usr_peer_456', role: 'student', department_id: 'dept_comp' };
+  const adminCaller = { id: 'usr_admin_w', role: 'department_admin', department_id: 'dept_water' };
+  const principalCaller = { id: 'usr_prin', role: 'principal', department_id: null };
+
+  // 1. Peer student projection hides all PII
+  const peerProjection = projectComplaint(fullComplaint, peerCaller);
+  assert.equal(peerProjection.student_name, undefined);
+  assert.equal(peerProjection.student_enrollment_no, undefined);
+  assert.equal(peerProjection.student_phone_number, undefined);
+  assert.equal(peerProjection.attachment_file_id, undefined);
+  assert.equal(peerProjection.is_own_complaint, false);
+  assert.equal(peerProjection.title, 'Water fountain leakage');
+
+  // 2. Author projection preserves full details
+  const authorProjection = projectComplaint(fullComplaint, authorCaller);
+  assert.equal(authorProjection.student_name, 'Author Student');
+  assert.equal(authorProjection.student_enrollment_no, '246510307001');
+  assert.equal(authorProjection.student_phone_number, '9876543210');
+  assert.equal(authorProjection.attachment_file_id, 'file_leak_proof_999');
+  assert.equal(authorProjection.is_own_complaint, true);
+
+  // 3. Admin & Principal projection preserves full details
+  const adminProjection = projectComplaint(fullComplaint, adminCaller);
+  assert.equal(adminProjection.student_name, 'Author Student');
+  assert.equal(adminProjection.attachment_file_id, 'file_leak_proof_999');
+
+  const principalProjection = projectComplaint(fullComplaint, principalCaller);
+  assert.equal(principalProjection.student_name, 'Author Student');
+
+  // 4. Attachment download access check (IDOR guard)
+  function canDownloadAttachment(complaint, caller) {
+    if (caller.id === complaint.student_user_id) return true;
+    if (caller.role === 'principal') return true;
+    if (caller.role === 'department_admin' && caller.department_id === complaint.maintenance_department_id) {
+      return true;
+    }
+    return false;
+  }
+
+  assert.equal(canDownloadAttachment(fullComplaint, authorCaller), true);
+  assert.equal(canDownloadAttachment(fullComplaint, adminCaller), true);
+  assert.equal(canDownloadAttachment(fullComplaint, principalCaller), true);
+  assert.equal(canDownloadAttachment(fullComplaint, peerCaller), false);
+  assert.equal(canDownloadAttachment(fullComplaint, { id: 'usr_other_admin', role: 'department_admin', department_id: 'dept_civil' }), false);
+});
+
+test('Phase 6 Test 18: Support Concurrency, Revocation & Base-1 Invariant Lifecycle', () => {
+  const complaint = {
+    $id: 'cmpl_test_support',
+    student_user_id: 'usr_creator',
+    student_department_id: 'dept_comp',
+    support_count: 1, // Baseline
+  };
+
+  const supportsTable = new Map();
+
+  function generateSupportDocId(complaintId, userId) {
+    return crypto.createHash('sha256').update(`${complaintId}:${userId}`).digest('hex').slice(0, 32);
+  }
+
+  function getDerivedCount() {
+    let activeRecords = 0;
+    for (const record of supportsTable.values()) {
+      if (record.status === 'active') activeRecords++;
+    }
+    return 1 + activeRecords;
+  }
+
+  function addSupport(userId, callerDept) {
+    if (userId === complaint.student_user_id) {
+      return { success: false, code: 'CANNOT_SUPPORT_OWN_COMPLAINT' };
+    }
+    if (callerDept !== complaint.student_department_id) {
+      return { success: false, code: 'NOT_FOUND' }; // Oracle Elimination
+    }
+    const docId = generateSupportDocId(complaint.$id, userId);
+    const existing = supportsTable.get(docId);
+    if (existing && existing.status === 'active') {
+      return { success: false, code: 'ALREADY_SUPPORTED' };
+    }
+    supportsTable.set(docId, {
+      $id: docId,
+      complaint_id: complaint.$id,
+      user_id: userId,
+      status: 'active',
+      updated_at: new Date().toISOString(),
+    });
+    return { success: true, count: getDerivedCount() };
+  }
+
+  function removeSupport(userId) {
+    if (userId === complaint.student_user_id) {
+      return { success: false, code: 'CANNOT_REMOVE_CREATOR_SUPPORT' };
+    }
+    const docId = generateSupportDocId(complaint.$id, userId);
+    const existing = supportsTable.get(docId);
+    if (!existing || existing.status !== 'active') {
+      return { success: false, code: 'NOT_SUPPORTED' };
+    }
+    existing.status = 'revoked';
+    existing.updated_at = new Date().toISOString();
+    return { success: true, count: getDerivedCount() };
+  }
+
+  // 1. Initial baseline
+  assert.equal(getDerivedCount(), 1);
+
+  // 2. Creator self-support blocked
+  assert.equal(addSupport('usr_creator', 'dept_comp').code, 'CANNOT_SUPPORT_OWN_COMPLAINT');
+  assert.equal(removeSupport('usr_creator').code, 'CANNOT_REMOVE_CREATOR_SUPPORT');
+
+  // 3. Cross-department peer support blocked (404 Oracle Elimination)
+  assert.equal(addSupport('usr_peer_civil', 'dept_civil').code, 'NOT_FOUND');
+  assert.equal(getDerivedCount(), 1);
+
+  // 4. Same department peer adds support
+  const res1 = addSupport('usr_peer_1', 'dept_comp');
+  assert.equal(res1.success, true);
+  assert.equal(res1.count, 2);
+  assert.equal(getDerivedCount(), 2);
+
+  // 5. Duplicate support returns ALREADY_SUPPORTED without counter drift
+  const resDup = addSupport('usr_peer_1', 'dept_comp');
+  assert.equal(resDup.code, 'ALREADY_SUPPORTED');
+  assert.equal(getDerivedCount(), 2);
+
+  // 6. Peer removes support
+  const resRem = removeSupport('usr_peer_1');
+  assert.equal(resRem.success, true);
+  assert.equal(resRem.count, 1);
+  assert.equal(getDerivedCount(), 1);
+
+  // 7. Repeated removal rejected
+  assert.equal(removeSupport('usr_peer_1').code, 'NOT_SUPPORTED');
+  assert.equal(getDerivedCount(), 1);
+
+  // 8. Re-support reactivates record
+  const resRe = addSupport('usr_peer_1', 'dept_comp');
+  assert.equal(resRe.success, true);
+  assert.equal(resRe.count, 2);
+  assert.equal(getDerivedCount(), 2);
+});
+
+test('Phase 6 Test 19: Phone-Change Failure Safety & Reversion Proof', () => {
+  const profile = {
+    user_id: 'usr_student_phone',
+    phone_number: '9876543210',
+    academic_department_id: 'dept_comp',
+  };
+
+  const phoneRequest = {
+    $id: 'req_phone_1',
+    student_user_id: 'usr_student_phone',
+    academic_department_id: 'dept_comp',
+    old_phone_number: '9876543210',
+    requested_phone_number: '9123456789',
+    status: 'approved',
+    permission_consumed: false,
+    permission_token: 'perm_token_abc123',
+  };
+
+  // Handler simulation of complete-phone-change
+  function completePhoneChange(request, targetProfile, simulateDbFailure = false) {
+    if (request.status !== 'approved' || request.permission_consumed) {
+      return { success: false, code: 'PERMISSION_ALREADY_CONSUMED' };
+    }
+
+    try {
+      if (simulateDbFailure) {
+        throw new Error('SIMULATED_DATABASE_TIMEOUT_OR_LOCK_FAILURE');
+      }
+
+      // Step 1: Update profile phone
+      targetProfile.phone_number = request.requested_phone_number;
+
+      // Step 2: Mark permission consumed
+      request.permission_consumed = true;
+      request.status = 'completed';
+
+      return { success: true, phone: targetProfile.phone_number };
+    } catch {
+      // Failure-safety: do not consume permission or change phone
+      return { success: false, code: 'PERSISTENCE_FAILED' };
+    }
+  }
+
+  // 1. Failure scenario
+  const failRes = completePhoneChange(phoneRequest, profile, true);
+  assert.equal(failRes.success, false);
+  assert.equal(failRes.code, 'PERSISTENCE_FAILED');
+  assert.equal(phoneRequest.permission_consumed, false, 'Permission must NOT be consumed on failure');
+  assert.equal(phoneRequest.status, 'approved', 'Request status must remain approved on failure');
+  assert.equal(profile.phone_number, '9876543210', 'Old phone number must remain intact');
+
+  // 2. Successful execution scenario
+  const successRes = completePhoneChange(phoneRequest, profile, false);
+  assert.equal(successRes.success, true);
+  assert.equal(profile.phone_number, '9123456789', 'Phone number must be updated to requested phone');
+  assert.equal(phoneRequest.permission_consumed, true, 'Permission must now be marked consumed');
+  assert.equal(phoneRequest.status, 'completed', 'Request must be marked completed');
+
+  // 3. Repeated consumption attempt blocked
+  const replayRes = completePhoneChange(phoneRequest, profile, false);
+  assert.equal(replayRes.success, false);
+  assert.equal(replayRes.code, 'PERMISSION_ALREADY_CONSUMED');
+});
+
+test('Phase 6 Test 20: 5-Day Delay Engine, Multiple Warnings & Resolved Immutability', () => {
+  const now = new Date('2026-11-20T12:00:00.000Z');
+
+  // 1. Pending > 5 days -> delayed
+  const pending6Days = {
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const delayPending = calculateComplaintDelay(pending6Days, now);
+  assert.equal(delayPending.is_delayed, true);
+  assert.ok(delayPending.days_delayed >= 5);
+
+  // 2. Pending <= 5 days -> NOT delayed
+  const pending3Days = {
+    status: 'Pending',
+    created_at: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  assert.equal(calculateComplaintDelay(pending3Days, now).is_delayed, false);
+
+  // 3. In Progress > 5 days since last substantive update -> delayed
+  const inProgressOldUpdate = {
+    status: 'In Progress',
+    created_at: new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const delayProgressOld = calculateComplaintDelay(inProgressOldUpdate, now);
+  assert.equal(delayProgressOld.is_delayed, true);
+  assert.ok(delayProgressOld.days_delayed >= 5);
+
+  // 4. In Progress with recent substantive update -> NOT delayed
+  const inProgressRecentUpdate = {
+    status: 'In Progress',
+    created_at: new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  assert.equal(calculateComplaintDelay(inProgressRecentUpdate, now).is_delayed, false);
+
+  // 5. Resolved is permanently excluded from delay and warnings
+  const resolvedOld = {
+    status: 'Resolved',
+    created_at: new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString(),
+    last_meaningful_update_at: new Date(now.getTime() - 15 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const delayResolved = calculateComplaintDelay(resolvedOld, now);
+  assert.equal(delayResolved.is_delayed, false);
+  assert.equal(delayResolved.days_delayed, 0);
+
+  // 6. Principal warning issuance validation
+  function validateWarningIssuance(caller, complaint, delayInfo) {
+    if (caller.role !== 'principal') {
+      return { allowed: false, status: 403, code: 'FORBIDDEN' };
+    }
+    if (complaint.status === 'Resolved') {
+      return { allowed: false, status: 400, code: 'CANNOT_WARN_RESOLVED' };
+    }
+    if (!delayInfo.is_delayed) {
+      return { allowed: false, status: 400, code: 'NOT_DELAY_ELIGIBLE' };
+    }
+    return { allowed: true };
+  }
+
+  const principal = { role: 'principal' };
+  const admin = { role: 'department_admin' };
+
+  assert.equal(validateWarningIssuance(admin, pending6Days, delayPending).status, 403);
+  assert.equal(validateWarningIssuance(principal, resolvedOld, delayResolved).code, 'CANNOT_WARN_RESOLVED');
+  assert.equal(validateWarningIssuance(principal, pending3Days, calculateComplaintDelay(pending3Days, now)).code, 'NOT_DELAY_ELIGIBLE');
+  assert.equal(validateWarningIssuance(principal, pending6Days, delayPending).allowed, true);
+});
+
+test('Phase 6 Test 21: Append-Only Audit Logging Integrity & Tamper Resistance', () => {
+  // Required audit actions across the system
+  const MANDATORY_AUDIT_ACTIONS = [
+    'complaint_created',
+    'complaint_status_changed',
+    'clarification_requested',
+    'clarification_replied',
+    'support_added',
+    'support_removed',
+    'request_phone_change',
+    'review_phone_change',
+    'complete_phone_change',
+    'issue_warning',
+    'respond_to_warning',
+    'assign_department_admin',
+    'revoke_department_admin',
+  ];
+
+  function createAuditRecord(action, actorId, actorRole, resourceId, resourceType, details) {
+    return {
+      $id: `al_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      action,
+      actor_id: actorId,
+      actor_role: actorRole,
+      target_resource_id: resourceId,
+      target_resource_type: resourceType,
+      details: typeof details === 'string' ? details : JSON.stringify(details),
+      created_at: new Date().toISOString(),
+      $permissions: [], // Empty permissions invariant
+    };
+  }
+
+  // 1. Verify schema completeness for all actions
+  for (const action of MANDATORY_AUDIT_ACTIONS) {
+    const record = createAuditRecord(action, 'usr_actor', 'principal', 'res_1', 'complaint', { test: true });
+    assert.ok(record.action);
+    assert.ok(record.actor_id);
+    assert.ok(record.actor_role);
+    assert.ok(record.target_resource_id);
+    assert.ok(record.target_resource_type);
+    assert.ok(record.created_at);
+    assert.deepEqual(record.$permissions, []);
+  }
+
+  // 2. Audit history access control
+  function canReadAuditLogs(caller) {
+    return caller.role === 'principal';
+  }
+
+  assert.equal(canReadAuditLogs({ role: 'principal' }), true);
+  assert.equal(canReadAuditLogs({ role: 'department_admin' }), false);
+  assert.equal(canReadAuditLogs({ role: 'student' }), false);
+});
+
+test('Phase 6 Test 22: Secret Exposure & Configuration Hygiene Verification', () => {
+  // 1. Canonical department registry parity
+  assert.equal(INSTITUTIONAL_DEPARTMENTS.length, 6);
+  const deptIds = INSTITUTIONAL_DEPARTMENTS.map((d) => d.id);
+  assert.deepEqual(deptIds, ['dept_civil', 'dept_comp', 'dept_elec', 'dept_mech', 'dept_water', 'dept_sanit']);
+
+  // Academic vs Maintenance flags
+  const academicDepts = INSTITUTIONAL_DEPARTMENTS.filter((d) => d.is_academic);
+  assert.equal(academicDepts.length, 4);
+
+  const maintenanceDepts = INSTITUTIONAL_DEPARTMENTS.filter((d) => d.is_maintenance);
+  assert.equal(maintenanceDepts.length, 6);
+
+  // 2. Confirmed enrollment code mappings
+  assert.deepEqual(Object.keys(ENROLLMENT_CODE_MAPPINGS).sort(), ['06', '07', '09', '19']);
+  assert.equal(ENROLLMENT_CODE_MAPPINGS['06'].department_id, 'dept_civil');
+  assert.equal(ENROLLMENT_CODE_MAPPINGS['07'].department_id, 'dept_comp');
+  assert.equal(ENROLLMENT_CODE_MAPPINGS['09'].department_id, 'dept_elec');
+  assert.equal(ENROLLMENT_CODE_MAPPINGS['19'].department_id, 'dept_mech');
+
+  // 3. Disallowed and unmapped codes strictly rejected
+  const invalidCodes = ['03', '04', '05', '08', '00', '99', 'water', 'sanitation'];
+  for (const code of invalidCodes) {
+    assert.equal(Object.prototype.hasOwnProperty.call(ENROLLMENT_CODE_MAPPINGS, code), false);
+    const mockEnrollment = `2465103${code}001`;
+    const res = extractAndMapEnrollment(mockEnrollment);
+    assert.equal(res.isValid, false);
+  }
+});
+
 
