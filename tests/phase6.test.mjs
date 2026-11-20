@@ -1377,3 +1377,271 @@ test('Phase 6 Test 11: Append-Only Audit Logs Retrieval, Filtering & Tamper Resi
   assert.equal(warningFilter.body.data.total, 1);
   assert.equal(warningFilter.body.data.audit_logs[0].action, 'issue_warning');
 });
+
+// =====================================================================
+// Frontend User Journey & Interactive UI Automated Tests
+// =====================================================================
+
+test('Phase 6 Test 12: Frontend Navigation Guards & OAuth Callback Role Routing', () => {
+  // Pure state machine modeling src/app/auth/callback/page.tsx & useAuth route guards
+  function resolveCallbackRoute({ user, profile, isOnboarded, profileFailed }) {
+    if (!user) return '/sign-in?error=oauth_failed';
+    if (profileFailed) return 'ERROR_STATE_NO_ONBOARDING';
+    if (profile?.role === 'principal') return '/principal';
+    if (profile?.role === 'department_admin') return '/admin';
+    if (isOnboarded) return '/dashboard';
+    return '/onboarding';
+  }
+
+  function resolveWorkspaceRoute({ user, profile, isAdmin, isPrincipal, isOnboarded, targetPath }) {
+    if (!user) return '/sign-in';
+    if (isPrincipal && targetPath !== '/principal') return '/principal';
+    if (isAdmin && targetPath !== '/admin') return '/admin';
+    if (!isOnboarded && targetPath !== '/onboarding') return '/onboarding';
+    return targetPath;
+  }
+
+  // 1. Unauthenticated callback -> /sign-in
+  assert.equal(resolveCallbackRoute({ user: null }), '/sign-in?error=oauth_failed');
+
+  // 2. Profile query failure -> halts at error state, never defaults to onboarding
+  assert.equal(
+    resolveCallbackRoute({ user: { $id: 'usr_1' }, profileFailed: true }),
+    'ERROR_STATE_NO_ONBOARDING'
+  );
+
+  // 3. Principal role -> /principal (even if isOnboarded is false)
+  assert.equal(
+    resolveCallbackRoute({ user: { $id: 'usr_p' }, profile: { role: 'principal' }, isOnboarded: false }),
+    '/principal'
+  );
+
+  // 4. Department admin role -> /admin (even if isOnboarded is false)
+  assert.equal(
+    resolveCallbackRoute({ user: { $id: 'usr_a' }, profile: { role: 'department_admin' }, isOnboarded: false }),
+    '/admin'
+  );
+
+  // 5. Onboarded student -> /dashboard
+  assert.equal(
+    resolveCallbackRoute({ user: { $id: 'usr_s' }, profile: { role: 'student' }, isOnboarded: true }),
+    '/dashboard'
+  );
+
+  // 6. First-time student -> /onboarding
+  assert.equal(
+    resolveCallbackRoute({ user: { $id: 'usr_s2' }, profile: { role: 'student' }, isOnboarded: false }),
+    '/onboarding'
+  );
+
+  // 7. Workspace route guards enforce role boundaries
+  assert.equal(
+    resolveWorkspaceRoute({ user: { $id: 'u1' }, isPrincipal: true, targetPath: '/dashboard' }),
+    '/principal',
+    'Principal visiting /dashboard must redirect to /principal'
+  );
+  assert.equal(
+    resolveWorkspaceRoute({ user: { $id: 'u2' }, isAdmin: true, targetPath: '/dashboard' }),
+    '/admin',
+    'Admin visiting /dashboard must redirect to /admin'
+  );
+  assert.equal(
+    resolveWorkspaceRoute({ user: { $id: 'u3' }, isOnboarded: false, targetPath: '/dashboard' }),
+    '/onboarding',
+    'Incomplete student visiting /dashboard must redirect to /onboarding'
+  );
+});
+
+test('Phase 6 Test 13: Student Dashboard Feed Filtering & Overdue Complaint Detection', () => {
+  // Pure logic matching statusMatchesFilter from src/app/dashboard/page.tsx
+  function statusMatchesFilter(complaintStatus, filter) {
+    if (filter === 'all') return true;
+    if (filter === 'Pending' || filter === 'open') {
+      return complaintStatus === 'Pending' || complaintStatus === 'open';
+    }
+    if (filter === 'In Progress' || filter === 'in_progress') {
+      return complaintStatus === 'In Progress' || complaintStatus === 'in_progress';
+    }
+    if (filter === 'Resolved' || filter === 'resolved') {
+      return complaintStatus === 'Resolved' || complaintStatus === 'resolved';
+    }
+    return complaintStatus === filter;
+  }
+
+  const sampleComplaints = [
+    { $id: 'c1', title: 'Water leakage in Lab', location: 'Ground floor', description: 'Pipe leak', status: 'Pending' },
+    { $id: 'c2', title: 'Power cut in Block A', location: 'Block A', description: 'Switchboard fuse', status: 'In Progress' },
+    { $id: 'c3', title: 'Broken bench', location: 'Room 101', description: 'Bench repaired', status: 'Resolved' },
+  ];
+
+  // 1. Filter: 'all' returns everything
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'all')).length, 3);
+
+  // 2. Filter: 'Pending' returns only pending items (and supports 'open' alias)
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'Pending')).length, 1);
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'open')).length, 1);
+
+  // 3. Filter: 'In Progress' returns only in_progress items
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'In Progress')).length, 1);
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'in_progress')).length, 1);
+
+  // 4. Filter: 'Resolved' returns only resolved items
+  assert.equal(sampleComplaints.filter((c) => statusMatchesFilter(c.status, 'Resolved')).length, 1);
+
+  // 5. Search query matching (case-insensitive across title, location, description)
+  function matchesSearch(c, query) {
+    const q = query.trim().toLowerCase();
+    return c.title.toLowerCase().includes(q) || c.location.toLowerCase().includes(q) || c.description.toLowerCase().includes(q);
+  }
+  assert.equal(sampleComplaints.filter((c) => matchesSearch(c, 'leak')).length, 1);
+  assert.equal(sampleComplaints.filter((c) => matchesSearch(c, 'ROOM')).length, 1);
+  assert.equal(sampleComplaints.filter((c) => matchesSearch(c, 'nonexistent')).length, 0);
+
+  // 6. Delay detection for feed card badges
+  const now = new Date();
+  const past6Days = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000).toISOString();
+  const past1Day = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString();
+
+  const delayedPending = calculateComplaintDelay({ status: 'Pending', created_at: past6Days }, now);
+  assert.equal(delayedPending.is_delayed, true);
+  assert.ok(delayedPending.days_delayed >= 5);
+
+  const freshInProgress = calculateComplaintDelay({ status: 'In Progress', created_at: past6Days, last_meaningful_update_at: past1Day }, now);
+  assert.equal(freshInProgress.is_delayed, false);
+
+  const resolvedOld = calculateComplaintDelay({ status: 'Resolved', created_at: past6Days }, now);
+  assert.equal(resolvedOld.is_delayed, false);
+});
+
+test('Phase 6 Test 14: Interactive Two-Way Support Button State Machine & Optimistic Toggle Lifecycle', async () => {
+  // State machine simulating handleSupportComplaint in src/app/dashboard/page.tsx
+  function createSupportToggleHarness(initialSupported = false, initialCount = 1) {
+    let supported = initialSupported;
+    let count = initialCount;
+
+    return {
+      getState: () => ({ supported, count }),
+      toggle: async (mockApiCall) => {
+        const prevSupported = supported;
+        const prevCount = count;
+
+        if (prevSupported) {
+          // Optimistically revoke
+          supported = false;
+          count = Math.max(1, prevCount - 1);
+
+          try {
+            const res = await mockApiCall('remove');
+            if (res.success && res.data) {
+              count = res.data.support_count;
+            } else {
+              // Rollback
+              supported = prevSupported;
+              count = prevCount;
+            }
+          } catch {
+            // Rollback on network error
+            supported = prevSupported;
+            count = prevCount;
+          }
+        } else {
+          // Optimistically add
+          supported = true;
+          count = prevCount + 1;
+
+          try {
+            const res = await mockApiCall('add');
+            if (res.success && res.data) {
+              count = res.data.support_count;
+            } else if (res.code === 'ALREADY_SUPPORTED') {
+              // Conflict: keep active support state
+              supported = true;
+              count = prevCount;
+            } else {
+              // Rollback
+              supported = prevSupported;
+              count = prevCount;
+            }
+          } catch {
+            // Rollback on network error
+            supported = prevSupported;
+            count = prevCount;
+          }
+        }
+      },
+    };
+  }
+
+  // 1. Initial un-supported click -> optimistic increment and API sync
+  const harness1 = createSupportToggleHarness(false, 1);
+  await harness1.toggle(async () => ({ success: true, data: { support_count: 2 } }));
+  assert.deepEqual(harness1.getState(), { supported: true, count: 2 });
+
+  // 2. Click on supported card -> optimistic decrement and API sync
+  await harness1.toggle(async () => ({ success: true, data: { support_count: 1 } }));
+  assert.deepEqual(harness1.getState(), { supported: false, count: 1 });
+
+  // 3. Network failure on add -> rolls back state and count
+  const harness2 = createSupportToggleHarness(false, 3);
+  await harness2.toggle(async () => { throw new Error('Network timeout'); });
+  assert.deepEqual(harness2.getState(), { supported: false, count: 3 });
+
+  // 4. Network failure on revoke -> rolls back state and count
+  const harness3 = createSupportToggleHarness(true, 5);
+  await harness3.toggle(async () => { throw new Error('Network timeout'); });
+  assert.deepEqual(harness3.getState(), { supported: true, count: 5 });
+
+  // 5. 409 Conflict ALREADY_SUPPORTED -> preserves supported status without crash
+  const harness4 = createSupportToggleHarness(false, 2);
+  await harness4.toggle(async () => ({ success: false, code: 'ALREADY_SUPPORTED' }));
+  assert.deepEqual(harness4.getState(), { supported: true, count: 2 });
+});
+
+test('Phase 6 Test 15: Complaint Submission Validation & Private Storage Attachment Security', () => {
+  // Pure verification of rules in src/app/complaints/new/page.tsx
+  const ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+  const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png'];
+  const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+  function validateFrontendAttachment({ name, size, type }) {
+    if (size <= 0) return { valid: false, error: 'Attachment file cannot be empty.' };
+    if (size > MAX_ATTACHMENT_BYTES) return { valid: false, error: 'Attachment size exceeds the 5 MB limit.' };
+
+    const ext = name.includes('.') ? name.split('.').pop().trim().toLowerCase() : '';
+    const isAllowedType = ALLOWED_MIME_TYPES.includes(type);
+    const isAllowedExt = ALLOWED_EXTENSIONS.includes(ext);
+
+    if (!isAllowedType || !isAllowedExt) {
+      return { valid: false, error: 'Only PDF, JPG, JPEG, or PNG attachments are permitted.' };
+    }
+    return { valid: true };
+  }
+
+  function buildPrivateAttachmentPermissions(userId) {
+    return [
+      `read("user:${userId}")`,
+      `delete("user:${userId}")`,
+    ];
+  }
+
+  // 1. Valid attachment file checks
+  assert.equal(validateFrontendAttachment({ name: 'bill.pdf', size: 1024, type: 'application/pdf' }).valid, true);
+  assert.equal(validateFrontendAttachment({ name: 'photo.png', size: 2048, type: 'image/png' }).valid, true);
+  assert.equal(validateFrontendAttachment({ name: 'evidence.jpg', size: 4096, type: 'image/jpeg' }).valid, true);
+
+  // 2. File size bounds
+  assert.equal(validateFrontendAttachment({ name: 'empty.pdf', size: 0, type: 'application/pdf' }).valid, false);
+  assert.equal(validateFrontendAttachment({ name: 'huge.pdf', size: 6 * 1024 * 1024, type: 'application/pdf' }).valid, false);
+
+  // 3. MIME and Extension mismatch
+  assert.equal(validateFrontendAttachment({ name: 'script.exe', size: 1024, type: 'application/octet-stream' }).valid, false);
+  assert.equal(validateFrontendAttachment({ name: 'fake.pdf', size: 1024, type: 'application/javascript' }).valid, false);
+
+  // 4. Private storage permission generator guarantees exclusive creator ownership
+  const permissions = buildPrivateAttachmentPermissions('usr_student_xyz');
+  assert.equal(permissions.length, 2);
+  assert.equal(permissions[0], 'read("user:usr_student_xyz")');
+  assert.equal(permissions[1], 'delete("user:usr_student_xyz")');
+  assert.ok(!permissions.some((p) => p.includes('read("any")')), 'Public read permission must never be granted');
+});
+

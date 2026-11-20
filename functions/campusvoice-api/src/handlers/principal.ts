@@ -115,36 +115,6 @@ export async function handleGetPrincipalDashboard(
   }
 
   try {
-    // 1. Query complaints across all departments (up to 500)
-    const complaintsResult = await databases.listDocuments(
-      config.databaseId,
-      config.complaintsCollectionId,
-      [Query.orderDesc('$createdAt'), Query.limit(500)]
-    );
-
-    // 2. Query all warnings
-    let allWarnings: Models.Document[] = [];
-    try {
-      const warningsResult = await databases.listDocuments(
-        config.databaseId,
-        config.warningsCollectionId,
-        [Query.orderDesc('created_at'), Query.limit(500)]
-      );
-      allWarnings = warningsResult.documents;
-    } catch {
-      allWarnings = [];
-    }
-
-    // Index warnings by complaint_id
-    const warningsByComplaint = new Map<string, ComplaintWarning[]>();
-    for (const wDoc of allWarnings) {
-      const model = toWarningModel(wDoc);
-      const list = warningsByComplaint.get(model.complaint_id) || [];
-      list.push(model);
-      warningsByComplaint.set(model.complaint_id, list);
-    }
-
-    // 3. Compute Metrics & Breakdown for all 6 Canonical Departments
     const breakdown: PrincipalMetrics['department_breakdown'] = {};
     for (const dept of INSTITUTIONAL_DEPARTMENTS) {
       breakdown[dept.id] = {
@@ -156,11 +126,88 @@ export async function handleGetPrincipalDashboard(
       };
     }
 
+    // 1. Parallel index-backed count queries per department and status (Query.limit(1) for scale)
+    const countQueries = INSTITUTIONAL_DEPARTMENTS.flatMap((dept) => [
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'Pending'),
+        Query.limit(1),
+      ]),
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'In Progress'),
+        Query.limit(1),
+      ]),
+      databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+        Query.equal('maintenance_department_id', dept.id),
+        Query.equal('status', 'Resolved'),
+        Query.limit(1),
+      ]),
+    ]);
+
+    // 2. Parallel queries for recent feed, warnings, and active unresolved issues
+    const [countResults, recentComplaintsRes, warningsResult, pendingRes, inProgressRes] =
+      await Promise.all([
+        Promise.all(countQueries),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.orderDesc('$createdAt'),
+          Query.limit(50),
+        ]),
+        databases
+          .listDocuments(config.databaseId, config.warningsCollectionId, [
+            Query.orderDesc('created_at'),
+            Query.limit(100),
+          ])
+          .catch(() => ({ total: 0, documents: [] as Models.Document[] })),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.equal('status', 'Pending'),
+          Query.limit(100),
+        ]),
+        databases.listDocuments(config.databaseId, config.complaintsCollectionId, [
+          Query.equal('status', 'In Progress'),
+          Query.limit(100),
+        ]),
+      ]);
+
+    // 3. Populate department counts and institutional metrics
     let totalPending = 0;
     let totalInProgress = 0;
     let totalResolved = 0;
-    let totalDelayed = 0;
 
+    for (let i = 0; i < INSTITUTIONAL_DEPARTMENTS.length; i++) {
+      const dept = INSTITUTIONAL_DEPARTMENTS[i];
+      const pendingCount = countResults[i * 3]?.total ?? 0;
+      const inProgCount = countResults[i * 3 + 1]?.total ?? 0;
+      const resolvedCount = countResults[i * 3 + 2]?.total ?? 0;
+      const deptTotal = pendingCount + inProgCount + resolvedCount;
+
+      breakdown[dept.id] = {
+        total: deptTotal,
+        pending: pendingCount,
+        in_progress: inProgCount,
+        resolved: resolvedCount,
+        delayed: 0,
+      };
+
+      totalPending += pendingCount;
+      totalInProgress += inProgCount;
+      totalResolved += resolvedCount;
+    }
+
+    const totalComplaints = totalPending + totalInProgress + totalResolved;
+    const allWarnings = warningsResult.documents;
+
+    // Index warnings by complaint_id
+    const warningsByComplaint = new Map<string, ComplaintWarning[]>();
+    for (const wDoc of allWarnings) {
+      const model = toWarningModel(wDoc);
+      const list = warningsByComplaint.get(model.complaint_id) || [];
+      list.push(model);
+      warningsByComplaint.set(model.complaint_id, list);
+    }
+
+    // 4. Identify 5-day overdue grievances among active unresolved complaints
+    let totalDelayed = 0;
     const delayedComplaintsList: Array<{
       complaint: Complaint;
       days_delayed: number;
@@ -170,27 +217,19 @@ export async function handleGetPrincipalDashboard(
     }> = [];
 
     const now = new Date();
+    const seenComplaintIds = new Set<string>();
+    const unresolvedDocs = [...pendingRes.documents, ...inProgressRes.documents];
 
-    for (const doc of complaintsResult.documents) {
+    for (const doc of unresolvedDocs) {
+      const complaintId = doc.$id;
+      if (seenComplaintIds.has(complaintId)) continue;
+      seenComplaintIds.add(complaintId);
+
       const complaint = toComplaintModel(doc);
-      const status = complaint.status;
       const deptId = complaint.maintenance_department_id as DepartmentId;
 
       if (!breakdown[deptId]) {
         breakdown[deptId] = { total: 0, pending: 0, in_progress: 0, resolved: 0, delayed: 0 };
-      }
-
-      breakdown[deptId].total += 1;
-
-      if (status === 'Pending') {
-        totalPending += 1;
-        breakdown[deptId].pending += 1;
-      } else if (status === 'In Progress') {
-        totalInProgress += 1;
-        breakdown[deptId].in_progress += 1;
-      } else if (status === 'Resolved') {
-        totalResolved += 1;
-        breakdown[deptId].resolved += 1;
       }
 
       // Check 5-day delay eligibility using authoritative isDelayed
@@ -203,11 +242,11 @@ export async function handleGetPrincipalDashboard(
           (doc.$createdAt as string) ||
           '',
       });
+
       if (isComplaintDelayed) {
         totalDelayed += 1;
         breakdown[deptId].delayed += 1;
 
-        const complaintId = complaint.$id || doc.$id;
         const delayInfo = calculateComplaintDelay(complaint, now);
         const complaintWarnings = complaintId ? warningsByComplaint.get(complaintId) || [] : [];
         delayedComplaintsList.push({
@@ -215,18 +254,18 @@ export async function handleGetPrincipalDashboard(
           days_delayed: delayInfo.days_delayed,
           warning_count: complaintWarnings.length,
           warnings: complaintWarnings,
-          is_warning_eligible: status !== 'Resolved',
+          is_warning_eligible: complaint.status !== 'Resolved',
         });
       }
     }
 
     const metrics: PrincipalMetrics = {
-      total_complaints: complaintsResult.total,
+      total_complaints: totalComplaints,
       total_pending: totalPending,
       total_in_progress: totalInProgress,
       total_resolved: totalResolved,
       total_delayed: totalDelayed,
-      total_warnings_issued: allWarnings.length,
+      total_warnings_issued: warningsResult.total,
       department_breakdown: breakdown,
     };
 
@@ -236,7 +275,7 @@ export async function handleGetPrincipalDashboard(
         data: {
           metrics,
           delayed_complaints: delayedComplaintsList,
-          recent_complaints: complaintsResult.documents.slice(0, 50).map(toComplaintModel),
+          recent_complaints: recentComplaintsRes.documents.map(toComplaintModel),
           recent_warnings: allWarnings.slice(0, 50).map(toWarningModel),
         },
       },

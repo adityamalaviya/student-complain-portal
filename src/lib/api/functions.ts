@@ -1,6 +1,6 @@
 import { ExecutionMethod } from 'appwrite';
 import { functions, APPWRITE_CONFIG } from '../appwrite/client';
-import { createJWT } from '../appwrite/auth';
+import { createJWT, clearCachedJWT } from '../appwrite/auth';
 import type {
   ApiResponse,
   Department,
@@ -62,6 +62,9 @@ export async function executeFunction<T>(
     }
 
     if (execution.responseStatusCode >= 400 || !parsedResponse.success) {
+      if (execution.responseStatusCode === 401 || parsedResponse.code === 'UNAUTHORIZED') {
+        clearCachedJWT();
+      }
       return {
         success: false,
         error: parsedResponse.error || `Request failed with status ${execution.responseStatusCode}`,

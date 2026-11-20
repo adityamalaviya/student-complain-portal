@@ -5960,8 +5960,278 @@ test('Day 6: handleGetAuditHistory - Append-Only Audit History Retrieval', async
   assert.equal(filteredData.audit_logs[0].action, 'issue_warning');
 });
 
+test('Day 7 Audit Fix: handleListComplaints returns accurate has_supported for caller and respects native pagination', async () => {
+  const { databases } = createComplaintInMemoryDb({
+    profiles: [
+      {
+        $id: 'prof_peer_civil',
+        user_id: 'usr_peer_civil',
+        student_department_id: 'dept_civil',
+        name: 'Civil Peer',
+        enrollment_no: '246510306002',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        phone_number: '9876543210',
+      } as unknown as Models.Document,
+    ],
+    complaints: [
+      {
+        $id: 'cmpl_civil_1',
+        student_user_id: 'usr_creator_civil',
+        student_name: 'Creator Civil',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Broken desk in civil lab',
+        location: 'Room 101',
+        description: 'Multiple desks broken in room 101.',
+        priority: 'medium',
+        status: 'Pending',
+        support_count: 2,
+        created_at: '2026-11-19T00:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_civil_2',
+        student_user_id: 'usr_creator_civil_2',
+        student_name: 'Creator 2',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Fan not working in civil seminar',
+        location: 'Seminar Hall',
+        description: 'Ceiling fan is making loud noises.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1,
+        created_at: '2026-11-19T01:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+    complaint_supports: [
+      {
+        $id: 'supp_1',
+        complaint_id: 'cmpl_civil_1',
+        user_id: 'usr_peer_civil',
+        status: 'active',
+        created_at: '2026-11-19T02:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
 
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_peer_civil',
+    email: 'peer.civil@college.edu',
+    name: 'Civil Peer',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
 
+  const ctx = createComplaintMockContext();
+  await handleListComplaints(ctx.context, peerCaller, { page: 1, limit: 10 }, { databases });
 
+  assert.equal(ctx.getResponse().statusCode, 200);
+  const data = ctx.getResponse().body.data as { complaints: Complaint[]; total: number };
+  assert.equal(data.complaints.length, 2);
+
+  const cmpl1 = data.complaints.find((c) => c.$id === 'cmpl_civil_1');
+  const cmpl2 = data.complaints.find((c) => c.$id === 'cmpl_civil_2');
+
+  assert.ok(cmpl1);
+  assert.ok(cmpl2);
+  assert.equal(cmpl1.has_supported, true, 'User actively supported cmpl_civil_1');
+  assert.equal(cmpl2.has_supported, false, 'User has not supported cmpl_civil_2');
+});
+
+test('Day 7 Audit Fix: handleGetComplaint and handleGetSupportState self-heal support count from supports collection', async () => {
+  const peerSupportDocId = crypto
+    .createHash('sha256')
+    .update('cmpl_stale_count:usr_peer_civil')
+    .digest('hex')
+    .slice(0, 32);
+
+  const { databases } = createComplaintInMemoryDb({
+    profiles: [
+      {
+        $id: 'prof_peer_civil',
+        user_id: 'usr_peer_civil',
+        student_department_id: 'dept_civil',
+        name: 'Civil Peer',
+        enrollment_no: '246510306002',
+        role: 'student',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        phone_number: '9876543210',
+      } as unknown as Models.Document,
+    ],
+    complaints: [
+      {
+        $id: 'cmpl_stale_count',
+        student_user_id: 'usr_creator_civil',
+        student_name: 'Creator',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Stale support count test',
+        location: 'Room 202',
+        description: 'Testing self-healing support count.',
+        priority: 'low',
+        status: 'Pending',
+        support_count: 1, // Stale count: only creator recorded here
+        created_at: '2026-11-19T00:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+    complaint_supports: [
+      {
+        $id: peerSupportDocId,
+        complaint_id: 'cmpl_stale_count',
+        user_id: 'usr_peer_civil',
+        status: 'active',
+        created_at: '2026-11-19T02:00:00.000Z',
+      } as unknown as Models.Document,
+      {
+        $id: 'supp_active_2',
+        complaint_id: 'cmpl_stale_count',
+        user_id: 'usr_peer_civil_2',
+        status: 'active',
+        created_at: '2026-11-19T03:00:00.000Z',
+      } as unknown as Models.Document,
+    ],
+  });
+
+  const peerCaller: AuthenticatedCaller = {
+    id: 'usr_peer_civil',
+    email: 'peer.civil@college.edu',
+    name: 'Civil Peer',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  // 1. handleGetComplaint reconciles support_count to 1 + 2 = 3
+  const getCtx = createComplaintMockContext();
+  await handleGetComplaint(getCtx.context, peerCaller, { complaint_id: 'cmpl_stale_count' }, { databases });
+  assert.equal(getCtx.getResponse().statusCode, 200);
+  const getData = getCtx.getResponse().body.data as { complaint: Complaint; has_supported: boolean };
+  assert.equal(getData.complaint.support_count, 3, 'Support count must self-heal to 1 (creator) + 2 (active supports)');
+  assert.equal(getData.has_supported, true);
+
+  // 2. handleGetSupportState also returns 3 and has_supported: true
+  const stateCtx = createComplaintMockContext();
+  await handleGetSupportState(stateCtx.context, peerCaller, { complaint_id: 'cmpl_stale_count' }, { databases });
+  assert.equal(stateCtx.getResponse().statusCode, 200);
+  const stateData = stateCtx.getResponse().body.data as { support_count: number; has_supported: boolean };
+  assert.equal(stateData.support_count, 3, 'Support state must return self-healed count 3');
+  assert.equal(stateData.has_supported, true);
+});
+
+test('Day 7 Audit Fix: Principal dashboard aggregates metrics and delayed complaints via index-backed queries without in-memory scan', async () => {
+  const past7Days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const past2Days = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { databases } = createComplaintInMemoryDb({
+    complaints: [
+      {
+        $id: 'cmpl_delayed_elec_1',
+        student_user_id: 'usr_stud_elec',
+        student_name: 'Electrical Student',
+        student_enrollment_no: '246510309001',
+        student_department_id: 'dept_elec',
+        maintenance_department_id: 'dept_elec',
+        title: 'Wiring sparked in lab',
+        location: 'Lab 3',
+        description: 'Dangerous sparking wires near bench 4.',
+        priority: 'high',
+        status: 'Pending',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past7Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_fresh_mech_1',
+        student_user_id: 'usr_stud_mech',
+        student_name: 'Mechanical Student',
+        student_enrollment_no: '246510319001',
+        student_department_id: 'dept_mech',
+        maintenance_department_id: 'dept_mech',
+        title: 'Lathe machine unaligned',
+        location: 'Workshop B',
+        description: 'Machine cuts off center.',
+        priority: 'medium',
+        status: 'In Progress',
+        support_count: 2,
+        created_at: past2Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+      {
+        $id: 'cmpl_resolved_civil_1',
+        student_user_id: 'usr_stud_civil',
+        student_name: 'Civil Student',
+        student_enrollment_no: '246510306001',
+        student_department_id: 'dept_civil',
+        maintenance_department_id: 'dept_civil',
+        title: 'Broken window in room 12',
+        location: 'Room 12',
+        description: 'Fixed yesterday.',
+        priority: 'low',
+        status: 'Resolved',
+        support_count: 1,
+        created_at: past7Days,
+        last_meaningful_update_at: past2Days,
+        $permissions: [],
+      } as unknown as Models.Document,
+    ],
+    complaint_warnings: [],
+  });
+
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal_governor',
+    email: 'principal@college.edu',
+    name: 'College Principal',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const prinCtx = createComplaintMockContext();
+  await handleGetPrincipalDashboard(prinCtx.context, principalCaller, { databases });
+  assert.equal(prinCtx.getResponse().statusCode, 200);
+
+  const dashBody = prinCtx.getResponse().body as {
+    success: boolean;
+    data: {
+      metrics: PrincipalMetrics;
+      delayed_complaints: Array<{ complaint: { $id: string }; days_delayed: number; is_warning_eligible: boolean }>;
+      recent_complaints: Complaint[];
+    };
+  };
+
+  assert.equal(dashBody.success, true);
+  const { metrics, delayed_complaints, recent_complaints } = dashBody.data;
+
+  // Total complaints = 1 Pending + 1 In Progress + 1 Resolved = 3
+  assert.equal(metrics.total_complaints, 3);
+  assert.equal(metrics.total_pending, 1);
+  assert.equal(metrics.total_in_progress, 1);
+  assert.equal(metrics.total_resolved, 1);
+  assert.equal(metrics.total_delayed, 1);
+
+  // Department breakdowns verified
+  assert.equal(metrics.department_breakdown.dept_elec.pending, 1);
+  assert.equal(metrics.department_breakdown.dept_elec.delayed, 1);
+  assert.equal(metrics.department_breakdown.dept_mech.in_progress, 1);
+  assert.equal(metrics.department_breakdown.dept_mech.delayed, 0);
+  assert.equal(metrics.department_breakdown.dept_civil.resolved, 1);
+
+  // Delayed complaints list contains only the unresolved overdue item
+  assert.equal(delayed_complaints.length, 1);
+  assert.equal(delayed_complaints[0].complaint.$id, 'cmpl_delayed_elec_1');
+  assert.ok(delayed_complaints[0].days_delayed >= 5);
+  assert.equal(delayed_complaints[0].is_warning_eligible, true);
+
+  // Recent complaints list is returned
+  assert.ok(recent_complaints.length > 0);
+});
 
 

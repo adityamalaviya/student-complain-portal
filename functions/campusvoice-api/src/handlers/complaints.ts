@@ -1145,14 +1145,15 @@ export async function handleListComplaints(
     const page = typeof data.page === 'number' && data.page > 0 ? data.page : 1;
     const limit = typeof data.limit === 'number' && data.limit > 0 && data.limit <= 50 ? data.limit : 20;
 
-    const complaintsDocuments: Models.Document[] = [];
-    let offset = 0;
-    let totalDocuments = 0;
-    do {
+    let pageSlice: Complaint[] = [];
+    let total = 0;
+
+    if (search.length === 0) {
+      const offset = (page - 1) * limit;
       const queries = [
         Query.equal('student_department_id', profile.student_department_id),
         Query.orderDesc('$createdAt'),
-        Query.limit(100),
+        Query.limit(limit),
         Query.offset(offset),
       ];
       if (normalizedStatus) {
@@ -1163,32 +1164,71 @@ export async function handleListComplaints(
         config.complaintsCollectionId,
         queries
       );
-      complaintsDocuments.push(...result.documents);
-      totalDocuments = result.total;
-      offset += result.documents.length;
-      if (result.documents.length === 0) break;
-    } while (complaintsDocuments.length < totalDocuments);
+      total = result.total;
+      pageSlice = result.documents
+        .map((doc) => mapDocToComplaint(doc))
+        .filter((c) => c.student_department_id === profile.student_department_id);
+    } else {
+      // With local search filter: limit scan to maximum 100 recent documents to prevent timeout
+      const queries = [
+        Query.equal('student_department_id', profile.student_department_id),
+        Query.orderDesc('$createdAt'),
+        Query.limit(100),
+      ];
+      if (normalizedStatus) {
+        queries.push(Query.equal('status', normalizedStatus));
+      }
+      const result = await databases.listDocuments(
+        config.databaseId,
+        config.complaintsCollectionId,
+        queries
+      );
+      let complaints = result.documents
+        .map((doc) => mapDocToComplaint(doc))
+        .filter((c) => c.student_department_id === profile.student_department_id);
 
-    // shortcut: local search scans the scoped result set; add indexed search when volume requires it.
-    let complaints = complaintsDocuments
-      .map((doc) => mapDocToComplaint(doc))
-      .filter((c) => c.student_department_id === profile.student_department_id);
-
-    if (search.length > 0) {
       complaints = complaints.filter(
         (c) =>
           c.title.toLowerCase().includes(search) ||
           c.location.toLowerCase().includes(search) ||
           c.description.toLowerCase().includes(search)
       );
+      total = complaints.length;
+      const startIndex = (page - 1) * limit;
+      pageSlice = complaints.slice(startIndex, startIndex + limit);
     }
 
-    const total = complaints.length;
-    const startIndex = (page - 1) * limit;
-    const pageSlice = complaints.slice(startIndex, startIndex + limit);
+    const pageComplaintIds = pageSlice
+      .map((c) => c.$id)
+      .filter((id): id is string => Boolean(id));
+
+    const userSupportedComplaintIds = new Set<string>();
+    if (pageComplaintIds.length > 0) {
+      try {
+        const supportQuery = [
+          Query.equal('complaint_id', pageComplaintIds),
+          Query.equal('user_id', caller.id),
+          Query.equal('status', 'active'),
+          Query.limit(limit),
+        ];
+        const userSupports = await databases.listDocuments(
+          config.databaseId,
+          config.supportsCollectionId,
+          supportQuery
+        );
+        for (const sDoc of userSupports.documents) {
+          const cId = readStringField(sDoc, 'complaint_id');
+          if (cId) userSupportedComplaintIds.add(cId);
+        }
+      } catch {
+        // Non-blocking: fallback to empty set if support collection query fails
+      }
+    }
+
     const summaryMap = await fetchLatestTimelineSummariesForComplaints(databases, config, pageSlice);
     const paginatedComplaints = pageSlice.map((c) => {
       const isCreator = c.student_user_id === caller.id;
+      const hasSupported = isCreator || (c.$id ? userSupportedComplaintIds.has(c.$id) : false);
       const summary = c.$id ? summaryMap.get(c.$id) : undefined;
       const projected = projectComplaint(c, {
         includePrivateDetails: isCreator,
@@ -1199,6 +1239,7 @@ export async function handleListComplaints(
       });
       return {
         ...projected,
+        has_supported: hasSupported,
         is_delayed: isDelayed({
           status: c.status,
           created_at: c.created_at || '',
@@ -1363,6 +1404,26 @@ export async function handleGetComplaint(
       rawTimeline
     );
 
+    let trueSupportCount = complaint.support_count;
+    try {
+      const activeSupports = await databases.listDocuments(
+        config.databaseId,
+        config.supportsCollectionId,
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
+      );
+      trueSupportCount = 1 + activeSupports.total;
+      if (trueSupportCount !== complaint.support_count) {
+        await databases.updateDocument(
+          config.databaseId,
+          config.complaintsCollectionId,
+          complaintId,
+          { support_count: trueSupportCount }
+        ).catch(() => undefined);
+      }
+    } catch {
+      // Non-blocking
+    }
+
     const projectedComplaint = projectComplaint(complaint, {
       includePrivateDetails,
       isOwnComplaint,
@@ -1427,6 +1488,7 @@ export async function handleGetComplaint(
         data: {
           complaint: {
             ...projectedComplaint,
+            support_count: trueSupportCount,
             is_delayed: isDelayed({
               status: complaint.status,
               created_at: complaint.created_at || (doc.$createdAt as string) || '',
@@ -1648,7 +1710,7 @@ export async function handleSupportComplaint(
       const activeSupports = await databases.listDocuments(
         config.databaseId,
         config.supportsCollectionId,
-        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(100)]
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
       );
       newCount = 1 + activeSupports.total;
       await databases.updateDocument(
@@ -1888,7 +1950,7 @@ export async function handleRemoveSupport(
       const activeSupports = await databases.listDocuments(
         config.databaseId,
         config.supportsCollectionId,
-        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(100)]
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
       );
       newCount = 1 + activeSupports.total;
       await databases.updateDocument(
@@ -2089,11 +2151,31 @@ export async function handleGetSupportState(
       hasSupported = false;
     }
 
+    let trueSupportCount = complaint.support_count;
+    try {
+      const activeSupports = await databases.listDocuments(
+        config.databaseId,
+        config.supportsCollectionId,
+        [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
+      );
+      trueSupportCount = 1 + activeSupports.total;
+      if (trueSupportCount !== complaint.support_count) {
+        await databases.updateDocument(
+          config.databaseId,
+          config.complaintsCollectionId,
+          complaintId,
+          { support_count: trueSupportCount }
+        ).catch(() => undefined);
+      }
+    } catch {
+      // Non-blocking
+    }
+
     return res.json(
       {
         success: true,
         data: {
-          support_count: complaint.support_count,
+          support_count: trueSupportCount,
           has_supported: hasSupported,
         },
       },

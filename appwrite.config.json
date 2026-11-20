@@ -48,9 +48,9 @@
     "functions": [
         {
             "$id": "6ada7151003399e4bab7",
-            "name": "student-complain-portal",
+            "name": "campusvoice-api",
             "runtime": "node-18.0",
-            "path": "functions/student-complain-portal",
+            "path": "functions/campusvoice-api",
             "previewDomainTarget": "region",
             "previewDomainLabel": "student-complain-portal",
             "entrypoint": "dist/index.js",
