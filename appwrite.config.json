@@ -63,7 +63,7 @@
             "schedule": "",
             "interval": 0,
             "timeout": 15,
-            "commands": "npm install",
+            "commands": "npm install --include=dev && npm run build",
             "scopes": [
                 "sessions.read",
                 "sessions.write",

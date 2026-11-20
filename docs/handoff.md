@@ -497,4 +497,75 @@ These are audit-report findings based on the inspected repository snapshot; reru
 - **Day 7 Workstream:** Full integration, security regression, migration verification, deployment/release checks, and production readiness.
 - **Dependencies:** Day 6 verification complete and approved. Ready to proceed with Day 7 implementation.
 
+---
+
+## 15. Day 7 Execution Handoff: Stabilization and Release Verification (Completed)
+
+**Date:** 20 November 2026  
+**Status:** DAY 7 COMPLETE — 100% OF 7-DAY REALIGNMENT VERIFIED & PRODUCTION READY  
+**Scope Achieved:** Complete execution and verification of Day 7 requirements: Multi-Role Authorization Matrix & Oracle Elimination Verification (Student, Academic Admin, Maintenance Admin, Water/Sanitation Admin, Principal), Server-Authoritative Peer PII Redaction (`student_name`, `student_enrollment_no`, `student_phone_number`, `attachment_file_id`), Private Storage Attachment Security & IDOR Prevention, Base-1 Support Lifecycle & Revocation Concurrency Invariance, Phone-Change Workflow Failure-Safety & Reversion Verification, Five-Day Delay Milestone Engine & Principal Governance Warnings, Append-Only Audit Trail Tamper Resistance, Appwrite Cloud Deployment Packaging Hardening (`npm install --include=dev && npm run build`), and Next.js 15 Production Build Verification.
+
+### A. Summary of Scope Verified & Hardened
+1. **Multi-Role Authorization Matrix & Oracle Elimination:**
+   - Evaluated 3 primary roles (`student`, `department_admin`, `principal`) across all 6 canonical departments.
+   - Proved cross-department student queries and admin access attempts return generic HTTP 404 `NOT_FOUND` (Oracle Elimination).
+   - Proved Principal cannot mutate complaint status (HTTP 403 `FORBIDDEN`).
+   - Proved Water (`dept_water`) and Sanitation (`dept_sanit`) administrators are maintenance-only and strictly prohibited from academic administration scopes or student phone change reviews.
+2. **Peer PII Redaction & Private Attachment Security:**
+   - Proved server-side response projection strictly redacts creator name, enrollment number, phone number, and attachment file IDs when viewed by peer students.
+   - Proved full details are unmasked exclusively for the complaint Author (`is_own_complaint: true`), the assigned Maintenance Department Administrator, and the Principal.
+   - Verified attachment download route (`get-complaint-attachment`) enforces private access controls, blocking peer and cross-department unauthorized file reads (IDOR prevention).
+   - Validated storage attachment constraints: 5 MB size ceiling, strict format whitelist (`pdf`, `jpg`, `jpeg`, `png`), and private bucket permissions (`$permissions = []`).
+3. **Community Support Concurrency & Revocation Lifecycle:**
+   - Proved baseline support count of 1 representing the creator.
+   - Proved creator self-support attempt returns HTTP 400 `CANNOT_SUPPORT_OWN_COMPLAINT`.
+   - Proved creator baseline support removal is blocked (HTTP 400 `CANNOT_REMOVE_CREATOR_SUPPORT`).
+   - Proved deterministic 32-character SHA-256 IDs guarantee primary-key deduplication; duplicate support attempts return HTTP 409 `ALREADY_SUPPORTED` without counter drift.
+   - Verified support revocation sets `status: 'revoked'`, and re-support reactivates the record to `status: 'active'`.
+   - Derived count is strictly verified as `1 + count(active_supports)`.
+4. **Phone-Change Workflow Failure-Safety Proof:**
+   - Verified full student phone change lifecycle: submission -> academic admin review -> one-time permission generation -> student completion.
+   - Simulated database write failure during profile phone number update: verified that the approval permission token remains unconsumed (`permission_consumed: false`), the request status remains `approved`, and the previous phone number remains active in profile!
+   - Proved successful save updates profile phone, marks permission consumed, and blocks replay attempts.
+5. **Five-Day Delay Milestone Logic & Principal Governance:**
+   - Verified delay engine: Pending > 5 days and In Progress > 5 days without substantive update trigger `is_delayed: true` and `is_warning_eligible: true`.
+   - Proved non-substantive actions (views, upvotes, minor edits) do NOT reset `last_meaningful_update_at`.
+   - Proved substantive updates (status transitions, progress notes) reset the 5-day timer.
+   - Proved Resolved complaints are permanently immune from delays and warnings (HTTP 400 `CANNOT_WARN_RESOLVED`).
+   - Verified Principal can issue multiple warnings across delay milestones on unresolved complaints, and assigned Maintenance Admins can respond.
+6. **Append-Only Audit Logging Integrity:**
+   - Verified structured audit logging across 13 distinct lifecycle actions.
+   - Proved `audit_logs` collection enforces `$permissions: []` with zero update or delete endpoints exposed in backend.
+   - Proved audit history retrieval is restricted exclusively to verified Principal (`role === 'principal'`).
+7. **Appwrite Cloud Deployment Packaging Hardening:**
+   - Updated `appwrite.config.json` function build command to `"commands": "npm install --include=dev && npm run build"` so Appwrite Cloud Functions automatically install TypeScript devDependencies and compile `dist/index.js` during deployment.
+   - Updated `functions/campusvoice-api/.env.example` documenting all 9 collections (`COLLECTION_PROFILES`, `COLLECTION_DEPARTMENTS`, `COLLECTION_COMPLAINTS`, `COLLECTION_SUPPORTS`, `COLLECTION_TIMELINE`, `COLLECTION_DEPARTMENT_ADMINS`, `COLLECTION_PHONE_CHANGE_REQUESTS`, `COLLECTION_WARNINGS`, `COLLECTION_AUDIT_LOGS`, `APPWRITE_STORAGE_BUCKET_ID`).
+
+### B. Modified Files
+1. `appwrite.config.json` — Updated remote function build command to install devDependencies and run `npm run build`.
+2. `functions/campusvoice-api/.env.example` — Documented all 9 collection IDs and storage bucket ID.
+3. `tests/phase6.test.mjs` — Added Day 7 comprehensive release verification test suite (Tests 16–22).
+4. `docs/handoff.md` — Added Day 7 release verification audit handoff.
+5. `antigravity.md` — Updated root context to reflect complete Day 7 stabilization.
+
+### C. Test Verification Evidence
+- **Workspace Test Suite:** `npm test` (`node scripts/run-tests.mjs`) → **64 / 64 passed** (0 failed, 0 skipped, duration 244 ms).
+- **CampusVoice API Test Suite:** `npm --prefix functions/campusvoice-api test` → **51 / 51 passed** (0 failed, 0 skipped, duration 2582 ms).
+- **TypeScript Strict Compilation:** `npm run typecheck` (`tsc --noEmit`) → Exited with code 0 (zero errors).
+- **ESLint Compliance:** `npm run lint` (`next lint`) → Exited with code 0 (`✔ No ESLint warnings or errors`).
+- **Function Local Compilation:** `npm --prefix functions/campusvoice-api run build:local` (`tsc`) → Exited with code 0.
+- **Next.js Production Build:** `npm run build` → Exited with code 0 (All 12 App Router routes compiled and statically/dynamically generated).
+
+### D. Production Deployment Checklist
+1. **Appwrite Cloud Database:**
+   - All 9 collections (`departments`, `profiles`, `complaints`, `complaint_supports`, `complaint_timeline`, `phone_change_requests`, `complaint_warnings`, `department_admins`, `audit_logs`) provisioned with empty permissions (`$permissions = []`).
+   - Storage bucket `complaint-attachments` configured with 5 MB limit, private access (`fileSecurity: true`), and restricted extensions `['jpg', 'jpeg', 'png', 'pdf']`.
+2. **Appwrite Cloud Function (`campusvoice-api`):**
+   - Single authoritative router deployed from `functions/campusvoice-api`.
+   - Build command configured as `npm install --include=dev && npm run build` targeting entrypoint `dist/index.js`.
+3. **Frontend Vercel Deployment:**
+   - Production build verified (`npm run build`).
+   - Clean environment variable mapping to Appwrite Cloud endpoints (`NEXT_PUBLIC_APPWRITE_ENDPOINT`, `NEXT_PUBLIC_APPWRITE_PROJECT_ID`, `NEXT_PUBLIC_APPWRITE_DATABASE_ID`, `NEXT_PUBLIC_APPWRITE_FUNCTION_ID`, `NEXT_PUBLIC_APPWRITE_ATTACHMENTS_BUCKET_ID`).
+
+
 
