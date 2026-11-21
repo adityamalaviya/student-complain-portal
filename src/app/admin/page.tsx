@@ -58,7 +58,7 @@ export default function AdminDashboardPage(): React.ReactElement {
   const router = useRouter();
   const { user, profile, loading, isAdmin, signOutUser } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<'pending' | 'resolved' | 'all'>('pending');
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'in_progress' | 'resolved'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
@@ -107,6 +107,8 @@ export default function AdminDashboardPage(): React.ReactElement {
       const params: ListAdminComplaintsParams = { page, limit: 20 };
       if (activeTab === 'pending') {
         params.status = 'Pending';
+      } else if (activeTab === 'in_progress') {
+        params.status = 'In Progress';
       } else if (activeTab === 'resolved') {
         params.status = 'Resolved';
       }
@@ -293,6 +295,7 @@ export default function AdminDashboardPage(): React.ReactElement {
   const openCount = metrics?.total_open ?? 0;
   const inProgressCount = metrics?.total_in_progress ?? 0;
   const resolvedCount = metrics?.total_resolved ?? 0;
+  const allCount = openCount + inProgressCount + resolvedCount;
   const pendingPhoneCount = pendingPhoneRequests.length;
 
   return (
@@ -404,7 +407,9 @@ export default function AdminDashboardPage(): React.ReactElement {
                 Department Grievances
               </h1>
               <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 sm:text-sm dark:text-slate-400">
-                <span>{openCount + inProgressCount} pending review</span>
+                <span>{openCount} pending review</span>
+                <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+                <span>{inProgressCount} in progress</span>
                 <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-700" />
                 <span>{resolvedCount} resolved this semester</span>
                 <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-700" />
@@ -412,8 +417,26 @@ export default function AdminDashboardPage(): React.ReactElement {
               </p>
             </div>
 
-            {/* Filter Tabs */}
+            {/* Filter Tabs (All Statuses, Pending, In Progress, Resolved) */}
             <div className="flex items-center gap-6 border-b border-slate-200 text-xs font-semibold sm:text-sm dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('all');
+                  setPage(1);
+                }}
+                className={`relative -mb-px pb-2.5 transition ${
+                  activeTab === 'all'
+                    ? 'border-b-2 border-blue-700 font-bold text-blue-700 dark:border-blue-400 dark:text-blue-400'
+                    : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                }`}
+              >
+                <span>All Statuses</span>
+                <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  {allCount}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -428,7 +451,25 @@ export default function AdminDashboardPage(): React.ReactElement {
               >
                 <span>Pending</span>
                 <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                  {openCount + inProgressCount}
+                  {openCount}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('in_progress');
+                  setPage(1);
+                }}
+                className={`relative -mb-px pb-2.5 transition ${
+                  activeTab === 'in_progress'
+                    ? 'border-b-2 border-blue-700 font-bold text-blue-700 dark:border-blue-400 dark:text-blue-400'
+                    : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                }`}
+              >
+                <span>In Progress</span>
+                <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  {inProgressCount}
                 </span>
               </button>
 
@@ -448,21 +489,6 @@ export default function AdminDashboardPage(): React.ReactElement {
                 <span className="ml-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                   {resolvedCount}
                 </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('all');
-                  setPage(1);
-                }}
-                className={`relative -mb-px pb-2.5 transition ${
-                  activeTab === 'all'
-                    ? 'border-b-2 border-blue-700 font-bold text-blue-700 dark:border-blue-400 dark:text-blue-400'
-                    : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
-                }`}
-              >
-                <span>All Records</span>
               </button>
             </div>
           </div>
@@ -509,7 +535,13 @@ export default function AdminDashboardPage(): React.ReactElement {
             <div className="p-8">
               <EmptyState
                 title="Queue is completely clear"
-                description={`No ${activeTab === 'all' ? '' : activeTab} grievances currently require action in ${profile.department_name}.`}
+                description={
+                  activeTab === 'all'
+                    ? `No grievances currently recorded in ${profile.department_name}.`
+                    : activeTab === 'in_progress'
+                    ? `No in-progress grievances currently require action in ${profile.department_name}.`
+                    : `No ${activeTab} grievances currently require action in ${profile.department_name}.`
+                }
               />
             </div>
           ) : (
