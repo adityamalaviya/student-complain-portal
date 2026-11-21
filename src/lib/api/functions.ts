@@ -50,6 +50,36 @@ export async function executeFunction<T>(
       headers
     );
 
+    if (execution.status === 'failed' || execution.responseStatusCode >= 400) {
+      if (execution.responseStatusCode === 401) {
+        clearCachedJWT();
+      }
+      let errorMsg = `Serverless function execution failed with status ${execution.responseStatusCode} (${execution.status})`;
+      let errorCode = 'FUNCTION_ERROR';
+
+      if (execution.responseBody && execution.responseBody.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(execution.responseBody) as Record<string, unknown>;
+          if (parsed && typeof parsed.error === 'string') {
+            errorMsg = parsed.error;
+          }
+          if (parsed && typeof parsed.code === 'string') {
+            errorCode = parsed.code;
+          }
+        } catch {
+          errorMsg = execution.responseBody;
+        }
+      } else if (execution.errors && execution.errors.trim().length > 0) {
+        errorMsg = execution.errors;
+      }
+
+      return {
+        success: false,
+        error: errorMsg,
+        code: errorCode,
+      };
+    }
+
     let parsedResponse: ApiResponse<T>;
     try {
       parsedResponse = JSON.parse(execution.responseBody) as ApiResponse<T>;
@@ -61,8 +91,8 @@ export async function executeFunction<T>(
       };
     }
 
-    if (execution.responseStatusCode >= 400 || !parsedResponse.success) {
-      if (execution.responseStatusCode === 401 || parsedResponse.code === 'UNAUTHORIZED') {
+    if (!parsedResponse.success) {
+      if (parsedResponse.code === 'UNAUTHORIZED') {
         clearCachedJWT();
       }
       return {
