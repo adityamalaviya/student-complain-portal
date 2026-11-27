@@ -1,7 +1,7 @@
 import { ID, Query } from 'node-appwrite';
 import { resolveActiveAdminAssignmentsFromDocs } from '../auth.js';
 import { getAppwriteConfig, getServerClient } from '../db.js';
-import { INSTITUTIONAL_DEPARTMENTS, PHONE_NUMBER_REGEX, STUDENT_NAME_REGEX, extractAndMapEnrollment, isAcademicDepartment, readBooleanField, readStringField, resolveDepartment, resolveLegacyDepartmentCode, toDepartmentModel, } from '../departments.js';
+import { INSTITUTIONAL_DEPARTMENTS, PHONE_NUMBER_REGEX, STUDENT_NAME_REGEX, extractAndMapEnrollment, getCanonicalDepartmentCode, isAcademicDepartment, readBooleanField, readStringField, resolveDepartment, resolveLegacyDepartmentCode, toDepartmentModel, } from '../departments.js';
 import { hasCompleteStudentProfileFields, isIncompleteLockedProfileStub, readProfileLockSummary, } from '../stateMachines.js';
 function isDocumentLike(value) {
     return typeof value === 'object' && value !== null && typeof value.$id === 'string';
@@ -591,22 +591,57 @@ export async function handleListDepartments(context, deps) {
                     });
                 }
                 const merged = [];
+                const seenCodes = new Set();
+                const seenNames = new Set();
                 for (const canDept of canonicalDepartments) {
+                    const canonicalCode = getCanonicalDepartmentCode(canDept.$id);
                     if (dbById.has(canDept.$id)) {
                         const docDept = dbById.get(canDept.$id);
                         if (docDept.is_active) {
-                            merged.push(docDept);
+                            const code = docDept.code || canonicalCode || '';
+                            const resolvedDept = {
+                                ...docDept,
+                                ...(code ? { code } : {}),
+                            };
+                            merged.push(resolvedDept);
+                            if (code)
+                                seenCodes.add(code.toUpperCase());
+                            seenNames.add(resolvedDept.name.toLowerCase().trim());
                         }
                         dbById.delete(canDept.$id);
                     }
                     else {
-                        merged.push(canDept);
+                        const resolvedDept = {
+                            ...canDept,
+                            ...(canonicalCode ? { code: canonicalCode } : {}),
+                        };
+                        merged.push(resolvedDept);
+                        if (canonicalCode)
+                            seenCodes.add(canonicalCode.toUpperCase());
+                        seenNames.add(resolvedDept.name.toLowerCase().trim());
                     }
                 }
                 for (const customDept of dbById.values()) {
-                    if (customDept.is_active) {
-                        merged.push(customDept);
+                    if (!customDept.is_active)
+                        continue;
+                    // Exclude legacy unmigrated documents ('06', '07', '09', '19', 'water', 'sanitation')
+                    if (['06', '07', '09', '19', 'water', 'sanitation', 'dept_water', 'dept_sanit'].includes(customDept.$id.toLowerCase())) {
+                        continue;
                     }
+                    // Exclude if code duplicates a canonical department
+                    if (customDept.code && seenCodes.has(customDept.code.toUpperCase())) {
+                        continue;
+                    }
+                    // Exclude if normalized name duplicates a canonical department (e.g. "Civil Department" duplicates "Civil")
+                    const normalizedName = customDept.name.toLowerCase().trim();
+                    const isDuplicateName = Array.from(seenNames).some((name) => normalizedName === name || normalizedName === `${name} department` || name === `${normalizedName} department`);
+                    if (isDuplicateName) {
+                        continue;
+                    }
+                    merged.push(customDept);
+                    if (customDept.code)
+                        seenCodes.add(customDept.code.toUpperCase());
+                    seenNames.add(normalizedName);
                 }
                 return res.json({
                     success: true,
