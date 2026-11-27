@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   CircleNotch,
   SignOut,
@@ -9,29 +8,32 @@ import {
   Users,
   Scroll,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard } from '@/lib/hooks';
 import {
   apiGetPrincipalDashboard,
   apiListAdminAssignments,
   apiRevokeAdmin,
   apiGetAuditHistory,
+  apiListDepartments,
+  apiDeleteDepartment,
 } from '@/lib/api';
 import type {
   PrincipalDashboardData,
   DepartmentAdminAssignment,
   AuditLog,
+  Department,
 } from '@/types';
 import {
   PrincipalGrievanceOverviewTab,
   PrincipalAdminAssignmentsTab,
   PrincipalAuditTrailTab,
-  AssignAdminModal,
+  CreateEditDepartmentModal,
   IssueWarningModal,
 } from '@/components';
 
 export default function PrincipalDashboardPage(): React.ReactElement {
-  const router = useRouter();
   const { user, profile, loading, isPrincipal, signOutUser } = useAuth();
+  useAuthGuard('principal');
 
   // Tab Navigation State
   const [activeTab, setActiveTab] = useState<'overview' | 'admins' | 'audit'>('overview');
@@ -51,28 +53,29 @@ export default function PrincipalDashboardPage(): React.ReactElement {
     daysDelayed: number;
   } | null>(null);
 
-  // Admin Assignments State
+  // Admin Assignments & Departments State
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [isLoadingDepartments, setIsLoadingDepartments] = useState<boolean>(false);
+  const [departmentsError, setDepartmentsError] = useState<string | null>(null);
+
   const [adminAssignments, setAdminAssignments] = useState<DepartmentAdminAssignment[]>([]);
   const [isLoadingAdmins, setIsLoadingAdmins] = useState<boolean>(false);
   const [adminsError, setAdminsError] = useState<string | null>(null);
-  const [isAssignModalOpen, setIsAssignModalOpen] = useState<boolean>(false);
+
+  // Department Modal State
+  const [isDepartmentModalOpen, setIsDepartmentModalOpen] = useState<boolean>(false);
+  const [departmentModalMode, setDepartmentModalMode] = useState<'create' | 'edit'>('create');
+  const [selectedDepartment, setSelectedDepartment] = useState<Department | null>(null);
+  const [selectedDeptAdminEmail, setSelectedDeptAdminEmail] = useState<string>('');
+  const [selectedDeptScopes, setSelectedDeptScopes] = useState<
+    { maintenance: boolean; academic: boolean } | undefined
+  >(undefined);
 
   // Audit Logs State
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoadingAudit, setIsLoadingAudit] = useState<boolean>(false);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditActionFilter, setAuditActionFilter] = useState<string>('all');
-
-  // Auth Guard
-  useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push('/sign-in');
-      } else if (!isPrincipal) {
-        router.push('/dashboard');
-      }
-    }
-  }, [loading, user, isPrincipal, router]);
 
   // Fetch Dashboard Metrics & Delayed Grievances
   const fetchDashboardData = useCallback(async (): Promise<void> => {
@@ -89,6 +92,24 @@ export default function PrincipalDashboardPage(): React.ReactElement {
       setFetchError(err instanceof Error ? err.message : 'Network error loading dashboard.');
     } finally {
       setIsLoadingDashboard(false);
+    }
+  }, []);
+
+  // Fetch Departments
+  const fetchDepartments = useCallback(async (): Promise<void> => {
+    setIsLoadingDepartments(true);
+    setDepartmentsError(null);
+    try {
+      const res = await apiListDepartments();
+      if (res.success && res.data) {
+        setDepartments(res.data.departments || []);
+      } else {
+        setDepartmentsError(res.error || 'Failed to load departments.');
+      }
+    } catch (err) {
+      setDepartmentsError(err instanceof Error ? err.message : 'Network error loading departments.');
+    } finally {
+      setIsLoadingDepartments(false);
     }
   }, []);
 
@@ -135,17 +156,62 @@ export default function PrincipalDashboardPage(): React.ReactElement {
   useEffect(() => {
     if (user && isPrincipal) {
       fetchDashboardData();
+      fetchDepartments();
     }
-  }, [user, isPrincipal, fetchDashboardData]);
+  }, [user, isPrincipal, fetchDashboardData, fetchDepartments]);
 
   // Tab Change Data Fetch
   useEffect(() => {
     if (activeTab === 'admins') {
+      fetchDepartments();
       fetchAdminAssignments();
     } else if (activeTab === 'audit') {
       fetchAuditLogs();
     }
-  }, [activeTab, fetchAdminAssignments, fetchAuditLogs]);
+  }, [activeTab, fetchDepartments, fetchAdminAssignments, fetchAuditLogs]);
+
+  // Department Modal Handlers
+  const handleOpenCreateDepartment = (): void => {
+    setDepartmentModalMode('create');
+    setSelectedDepartment(null);
+    setSelectedDeptAdminEmail('');
+    setSelectedDeptScopes(undefined);
+    setIsDepartmentModalOpen(true);
+  };
+
+  const handleOpenEditDepartment = (dept: Department): void => {
+    setDepartmentModalMode('edit');
+    setSelectedDepartment(dept);
+    const activeForDept = adminAssignments.filter(
+      (a) => a.department_id === dept.$id && a.is_active
+    );
+    const primaryAdmin = activeForDept[0]?.email || '';
+    const hasAcademic =
+      activeForDept.some((a) => a.scope === 'academic') || (dept.is_academic ?? false);
+    const hasMaintenance =
+      activeForDept.some((a) => a.scope === 'maintenance') || (dept.is_maintenance ?? true);
+    setSelectedDeptAdminEmail(primaryAdmin);
+    setSelectedDeptScopes({ maintenance: hasMaintenance, academic: hasAcademic });
+    setIsDepartmentModalOpen(true);
+  };
+
+  const handleDeleteDepartment = async (
+    departmentId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await apiDeleteDepartment(departmentId);
+      if (res.success) {
+        await Promise.all([fetchDepartments(), fetchAdminAssignments()]);
+        return { success: true };
+      }
+      return { success: false, error: res.error || 'Failed to delete department.' };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Network error deleting department.',
+      };
+    }
+  };
 
   // Revoke Handler for Tab
   const handleRevokeAssignment = async (
@@ -270,11 +336,6 @@ export default function PrincipalDashboardPage(): React.ReactElement {
           >
             <Users size={18} weight={activeTab === 'admins' ? 'bold' : 'regular'} />
             <span>Admin Assignments</span>
-            {adminAssignments.length > 0 && (
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                {adminAssignments.filter((a) => a.is_active).length}
-              </span>
-            )}
           </button>
 
           <button
@@ -295,6 +356,7 @@ export default function PrincipalDashboardPage(): React.ReactElement {
         {activeTab === 'overview' && (
           <PrincipalGrievanceOverviewTab
             dashboardData={dashboardData}
+            departments={departments}
             isLoading={isLoadingDashboard}
             error={fetchError}
             departmentFilter={departmentFilter}
@@ -307,14 +369,20 @@ export default function PrincipalDashboardPage(): React.ReactElement {
           />
         )}
 
-        {/* Tab 2: Admin Assignments */}
+        {/* Tab 2: Admin Assignments & Departments */}
         {activeTab === 'admins' && (
           <PrincipalAdminAssignmentsTab
+            departments={departments}
             assignments={adminAssignments}
-            isLoading={isLoadingAdmins}
-            error={adminsError}
-            onRefresh={fetchAdminAssignments}
-            onOpenAssignModal={() => setIsAssignModalOpen(true)}
+            isLoading={isLoadingDepartments || isLoadingAdmins}
+            error={departmentsError || adminsError}
+            onRefresh={() => {
+              fetchDepartments();
+              fetchAdminAssignments();
+            }}
+            onOpenCreateModal={handleOpenCreateDepartment}
+            onOpenEditModal={handleOpenEditDepartment}
+            onDeleteDepartment={handleDeleteDepartment}
             onRevoke={handleRevokeAssignment}
           />
         )}
@@ -332,11 +400,18 @@ export default function PrincipalDashboardPage(): React.ReactElement {
         )}
       </main>
 
-      {/* Assign Administrator Modal */}
-      <AssignAdminModal
-        isOpen={isAssignModalOpen}
-        onClose={() => setIsAssignModalOpen(false)}
-        onSuccess={fetchAdminAssignments}
+      {/* Create / Edit Department Modal */}
+      <CreateEditDepartmentModal
+        isOpen={isDepartmentModalOpen}
+        mode={departmentModalMode}
+        department={selectedDepartment}
+        initialAdminEmail={selectedDeptAdminEmail}
+        initialScopes={selectedDeptScopes}
+        onClose={() => setIsDepartmentModalOpen(false)}
+        onSuccess={() => {
+          fetchDepartments();
+          fetchAdminAssignments();
+        }}
       />
 
       {/* Issue Warning Modal */}

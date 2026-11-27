@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   extractAndMapEnrollment,
   INSTITUTIONAL_DEPARTMENTS,
@@ -8,6 +10,19 @@ import {
   resolveDepartment,
 } from '../src/lib/utils/department.ts';
 import { calculateComplaintDelay } from '../src/lib/utils/delay.ts';
+import { normalizePhoneInput } from '../src/lib/utils/phone.ts';
+import {
+  canSelectComplaintStatus,
+  getClarificationState,
+  getPhoneChangeWorkflowState,
+  getWarningState,
+  groupAdminAssignments,
+  hasScopeAccess,
+  isProfileOnboarded,
+  normalizeComplaintStatus,
+  resolveRouteGuardRedirect,
+  validateAttachmentFile,
+} from '../src/lib/utils/stateMachines.ts';
 
 // =====================================================================
 // Phase 6: Testing & Hardening Comprehensive Verification Suite
@@ -2151,4 +2166,314 @@ test('Phase 6 Test 22: Secret Exposure & Configuration Hygiene Verification', ()
   }
 });
 
+test('Regression: normalizePhoneInput handles formatted pastes without early truncation', () => {
+  assert.equal(normalizePhoneInput('+91 9876543210'), '9876543210');
+  assert.equal(normalizePhoneInput('+91-98765-43210'), '9876543210');
+  assert.equal(normalizePhoneInput('919876543210'), '9876543210');
+  assert.equal(normalizePhoneInput('09876543210'), '9876543210');
+  assert.equal(normalizePhoneInput('98765 43210'), '9876543210');
+  // Typing an 11th digit at the end keeps the first 10 digits
+  assert.equal(normalizePhoneInput('91234567895', '9123456789'), '9123456789');
+  // Replacing an existing 10-digit value by pasting a formatted +91 number works
+  assert.equal(normalizePhoneInput('+91 9876543210', '9123456789'), '9876543210');
+});
 
+test('Regression: UI defect fixes across dashboard, complaint detail, sign-in, and phone update modal', () => {
+  const root = process.cwd();
+  const read = (rel) => fs.readFileSync(path.resolve(root, rel), 'utf8');
+
+  const dashboardSrc = read('src/app/dashboard/page.tsx');
+  const cardSrc = read('src/components/ComplaintCard.tsx');
+  const supportBtnSrc = read('src/components/ComplaintSupportButton.tsx');
+  const filterBarSrc = read('src/components/SearchAndFilterBar.tsx');
+  const detailSrc = read('src/app/complaints/[id]/page.tsx');
+  const signInSrc = read('src/app/sign-in/page.tsx');
+  const phoneModalSrc = read('src/components/PhoneChangeModal.tsx');
+  const onboardingSrc = read('src/app/onboarding/page.tsx');
+
+  // 1. Self-support disabled and guarded on /dashboard
+  assert.ok(cardSrc.includes('disabled={isOwnComplaint}'));
+  assert.ok(cardSrc.includes('Creator baseline support cannot be removed'));
+  assert.ok(supportBtnSrc.includes('disabledReason'));
+  assert.ok(dashboardSrc.includes('!c.is_own_complaint'));
+  assert.ok(dashboardSrc.includes('if (target?.is_own_complaint'));
+
+  // 2. Sign-in Helpdesk opens accessible modal (no dead #helpdesk link)
+  assert.equal(signInSrc.includes('href="#helpdesk"'), false);
+  assert.ok(signInSrc.includes('role="dialog"'));
+  assert.ok(signInSrc.includes('aria-label="Close helpdesk dialog"'));
+
+  // 3. Mobile 375px layout & filter pills wrap without clipping, mobile Phone Update trigger present
+  assert.ok(dashboardSrc.includes('aria-label="Update Phone Number"'));
+  assert.ok(filterBarSrc.includes('flex-wrap items-center gap-1.5'));
+  assert.equal(filterBarSrc.includes('overflow-x-auto'), false);
+
+  // 4. PhoneChangeModal accessibility (Escape key & X aria-label)
+  assert.ok(phoneModalSrc.includes("e.key === 'Escape'"));
+  assert.ok(phoneModalSrc.includes('aria-label="Close modal"'));
+
+  // 5. Singular vs plural support text on /complaints/[id]
+  assert.ok(detailSrc.includes("supportCount === 1 ? 'student supports' : 'students support'"));
+  assert.equal(detailSrc.includes('{supportCount}</strong> students support this issue'), false);
+
+  // 6. Paste truncation order fixed (no maxLength={10} on phone inputs)
+  assert.equal(phoneModalSrc.includes('maxLength={10}'), false);
+  assert.equal(onboardingSrc.includes('maxLength={10}'), false);
+  assert.ok(phoneModalSrc.includes('normalizePhoneInput'));
+  assert.ok(onboardingSrc.includes('normalizePhoneInput'));
+
+  // 7. Submit buttons in PhoneChangeModal stay clickable so error banner shows for mouse/touch users
+  assert.equal(phoneModalSrc.includes('reason.trim().length < 10}'), false);
+  assert.equal(phoneModalSrc.includes('!PHONE_REGEX.test(newPhoneNumber)'), false);
+});
+
+
+
+test('Regression: Explicit frontend state machines enforce transitions, route guards, attachment MIME-ext parity, and audit actions', () => {
+  // 1. Complaint status transitions
+  assert.equal(canSelectComplaintStatus('Pending', 'Pending'), true);
+  assert.equal(canSelectComplaintStatus('In Progress', 'Pending'), false);
+  assert.equal(canSelectComplaintStatus('Resolved', 'Pending'), false);
+  assert.equal(canSelectComplaintStatus('Resolved', 'In Progress'), false);
+  assert.equal(canSelectComplaintStatus('Resolved', 'Resolved'), true);
+  assert.equal(normalizeComplaintStatus('in_progress'), 'In Progress');
+
+  // 2. Turn-based clarification state
+  assert.equal(getClarificationState([]), 'none');
+  assert.equal(getClarificationState([{ entry_type: 'clarification_request' }]), 'awaiting_reply');
+  assert.equal(
+    getClarificationState([
+      { entry_type: 'clarification_request' },
+      { entry_type: 'clarification_reply' },
+    ]),
+    'replied'
+  );
+  assert.equal(
+    getClarificationState([
+      { entry_type: 'clarification_request' },
+      { entry_type: 'clarification_reply' },
+      { entry_type: 'clarification_request' },
+    ]),
+    'awaiting_reply'
+  );
+
+  // 3. Warning & Phone change states
+  assert.equal(getWarningState({}), 'awaiting_response');
+  assert.equal(getWarningState({ admin_response: 'Dispatched' }), 'responded');
+  assert.equal(getWarningState({ responded_at: '2026-11-10T00:00:00Z' }), 'responded');
+  assert.equal(getPhoneChangeWorkflowState(null), 'no_active_request');
+  assert.equal(getPhoneChangeWorkflowState({ status: 'pending', permission_consumed: false }), 'pending_review');
+  assert.equal(getPhoneChangeWorkflowState({ status: 'approved', permission_consumed: false }), 'approved_ready');
+  assert.equal(getPhoneChangeWorkflowState({ status: 'rejected', permission_consumed: false }, false), 'rejected');
+  assert.equal(getPhoneChangeWorkflowState({ status: 'rejected', permission_consumed: false }, true), 'no_active_request');
+
+  // 4. Profile onboarding & scope checks
+  assert.equal(
+    isProfileOnboarded({
+      user_id: 'u1',
+      name: 'Stu',
+      enrollment_no: '246510307011',
+      student_department_id: 'dept_comp',
+      phone_number: '9876543210',
+      role: 'student',
+      profile_status: 'complete',
+      name_locked: true,
+      enrollment_locked: true,
+      phone_locked: true,
+      created_at: '',
+      updated_at: '',
+    }),
+    true
+  );
+  assert.equal(
+    isProfileOnboarded({
+      user_id: 'u1',
+      name: 'Stu',
+      enrollment_no: '246510307011',
+      student_department_id: 'dept_comp',
+      phone_number: '9876543210',
+      role: 'student',
+      profile_status: 'rejected',
+      name_locked: true,
+      enrollment_locked: true,
+      phone_locked: true,
+      created_at: '',
+      updated_at: '',
+    }),
+    false
+  );
+  assert.equal(
+    hasScopeAccess(
+      [{ $id: '1', user_id: 'a', email: 'a@x', department_id: 'dept_comp', scope: 'maintenance', is_active: true, assigned_by: 'p', created_at: '' }],
+      'academic'
+    ),
+    false
+  );
+  assert.equal(
+    hasScopeAccess(
+      [{ $id: '1', user_id: 'a', email: 'a@x', department_id: 'dept_comp', scope: 'maintenance', is_active: true, assigned_by: 'p', created_at: '' }],
+      'maintenance'
+    ),
+    true
+  );
+
+  // 5. Attachment MIME-extension parity
+  assert.equal(validateAttachmentFile({ name: 'proof.pdf', size: 1024, type: 'application/pdf' }).valid, true);
+  assert.equal(validateAttachmentFile({ name: 'proof.exe', size: 1024, type: 'application/pdf' }).valid, false);
+  assert.equal(validateAttachmentFile({ name: 'big.png', size: 6 * 1024 * 1024, type: 'image/png' }).valid, false);
+
+  // 6. Route guard resolution (preserves page on transient error without losing auth)
+  assert.equal(
+    resolveRouteGuardRedirect('student', {
+      userPresent: true,
+      profile: null,
+      isOnboarded: false,
+      isAdmin: false,
+      isPrincipal: false,
+      hasError: true,
+    }),
+    null
+  );
+  assert.equal(
+    resolveRouteGuardRedirect('guest_or_redirect', {
+      userPresent: true,
+      profile: null,
+      isOnboarded: false,
+      isAdmin: false,
+      isPrincipal: true,
+      hasError: false,
+    }),
+    '/principal'
+  );
+
+  // 7. Source-code integration guards for fixed UI/auth components
+  const root = process.cwd();
+  const read = (rel) => fs.readFileSync(path.resolve(root, rel), 'utf8');
+  const modalSrc = read('src/components/AdminResolutionModal.tsx');
+  const detailSrc = read('src/app/complaints/[id]/page.tsx');
+  const adminSrc = read('src/app/admin/page.tsx');
+  const auditTabSrc = read('src/components/principal/PrincipalAuditTrailTab.tsx');
+  const authClientSrc = read('src/lib/appwrite/auth.ts');
+
+  assert.ok(modalSrc.includes('canSelectComplaintStatus'));
+  assert.ok(modalSrc.includes("selectedCanonicalStatus === 'In Progress'"));
+  assert.ok(detailSrc.includes("complaint.status !== 'Resolved'"));
+  assert.ok(detailSrc.includes('getClarificationState'));
+  assert.ok(detailSrc.includes("isPrincipal ? '/principal'"));
+  assert.ok(adminSrc.includes('hasMaintenanceScope'));
+  assert.ok(adminSrc.includes('hasAcademicScope'));
+  assert.ok(adminSrc.includes('page * 20 >= totalCount'));
+  assert.ok(adminSrc.includes("'completed'"));
+  assert.ok(auditTabSrc.includes('complaint_status_changed'));
+  assert.ok(auditTabSrc.includes('complaint_created'));
+  assert.equal(auditTabSrc.includes('update_complaint_status'), false);
+  assert.ok(authClientSrc.includes('jwtGeneration'));
+});
+
+test('Regression: PrincipalAdminAssignmentsTab groups dual-scope assignments into Both', () => {
+  const grouped = groupAdminAssignments([
+    {
+      $id: 'a1',
+      user_id: 'u1',
+      email: 'hod.comp@college.edu',
+      department_id: 'dept_comp',
+      scope: 'academic',
+      is_active: true,
+      assigned_by: 'p1',
+      created_at: '2026-11-20T09:00:00.000Z',
+    },
+    {
+      $id: 'a2',
+      user_id: 'u1',
+      email: 'HOD.COMP@college.edu',
+      department_id: 'dept_comp',
+      scope: 'maintenance',
+      is_active: true,
+      assigned_by: 'p1',
+      created_at: '2026-11-21T10:00:00.000Z',
+    },
+    {
+      $id: 'a3',
+      user_id: 'u2',
+      email: 'water.admin@college.edu',
+      department_id: 'dept_water',
+      scope: 'maintenance',
+      is_active: true,
+      assigned_by: 'p1',
+      created_at: '2026-11-19T08:00:00.000Z',
+    },
+    {
+      $id: 'a4',
+      user_id: 'u1',
+      email: 'hod.comp@college.edu',
+      department_id: 'dept_comp',
+      scope: 'academic',
+      is_active: false,
+      assigned_by: 'p1',
+      created_at: '2026-11-18T08:00:00.000Z',
+    },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.equal(grouped[0].scopeDisplay, 'both');
+  assert.equal(grouped[0].assignments.length, 2);
+  assert.equal(grouped[0].created_at, '2026-11-21T10:00:00.000Z');
+  assert.equal(grouped[1].scopeDisplay, 'maintenance');
+  assert.equal(grouped[1].assignments.length, 1);
+  assert.equal(grouped[2].is_active, false);
+  assert.equal(grouped[2].scopeDisplay, 'academic');
+
+  const root = process.cwd();
+  const assignmentsTabSrc = fs.readFileSync(
+    path.resolve(root, 'src/components/principal/PrincipalAdminAssignmentsTab.tsx'),
+    'utf8'
+  );
+  assert.ok(assignmentsTabSrc.includes('groupAdminAssignments'));
+  assert.ok(assignmentsTabSrc.includes('Both (Academic & Maintenance)'));
+});
+
+test('Regression: Principal Grievance Overview supports custom departments and bounded date query', () => {
+  const root = process.cwd();
+
+  // 1. Overview tab supports dynamic departments
+  const overviewSrc = fs.readFileSync(
+    path.resolve(root, 'src/components/principal/PrincipalGrievanceOverviewTab.tsx'),
+    'utf8'
+  );
+  assert.ok(overviewSrc.includes('departments?: Department[]'));
+  assert.ok(overviewSrc.includes('displayedDepartments'));
+
+  // 2. Principal handler queries active departments & uses date-indexed delay query
+  const principalSrc = fs.readFileSync(
+    path.resolve(root, 'functions/campusvoice-api/src/handlers/principal.ts'),
+    'utf8'
+  );
+  assert.ok(principalSrc.includes('activeDepartments'));
+  assert.ok(principalSrc.includes("Query.lessThan('last_meaningful_update_at'"));
+  assert.equal(principalSrc.includes('listAllComplaintsByStatus'), false);
+
+  // 3. Transient retry in auth.ts
+  const authSrc = fs.readFileSync(
+    path.resolve(root, 'functions/campusvoice-api/src/auth.ts'),
+    'utf8'
+  );
+  assert.ok(authSrc.includes('withTransientRetry(() =>'));
+
+  // 4. Clean package.json
+  const pkgSrc = fs.readFileSync(path.resolve(root, 'package.json'), 'utf8');
+  assert.equal(pkgSrc.includes('@radix-ui/react-label'), false);
+  assert.equal(pkgSrc.includes('@radix-ui/react-slot'), false);
+  assert.equal(pkgSrc.includes('class-variance-authority'), false);
+
+  // 5. No debugging console.logs
+  const indexSrc = fs.readFileSync(
+    path.resolve(root, 'functions/campusvoice-api/src/index.ts'),
+    'utf8'
+  );
+  assert.equal(indexSrc.includes("console.log('[index]"), false);
+  const profileSrc = fs.readFileSync(
+    path.resolve(root, 'functions/campusvoice-api/src/handlers/profile.ts'),
+    'utf8'
+  );
+  assert.equal(profileSrc.includes("console.log('[get-profile]"), false);
+});

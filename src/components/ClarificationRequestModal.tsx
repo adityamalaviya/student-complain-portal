@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { X, CircleNotch, Question, WarningCircle } from '@phosphor-icons/react';
+import { normalizeComplaintStatus } from '@/lib/utils';
 import type { Complaint } from '@/types';
 
 export interface ClarificationSubmitResult {
@@ -49,12 +50,18 @@ export function ClarificationRequestModal({
     return null;
   }
 
+  const isResolved = normalizeComplaintStatus(complaint.status) === 'Resolved';
   const trimmedQuestion = question.trim();
   const isValidLength = trimmedQuestion.length >= 5 && trimmedQuestion.length <= 2000;
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (isSubmittingRef.current) return;
+    if (isSubmittingRef.current || isSubmitting) return;
+
+    if (isResolved) {
+      setErrorMessage('Cannot request clarification on a resolved complaint.');
+      return;
+    }
 
     if (!isValidLength) {
       setErrorMessage('Clarification request must be between 5 and 2000 characters.');
@@ -95,7 +102,7 @@ export function ClarificationRequestModal({
       <div
         className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs transition-opacity"
         onClick={() => {
-          if (!isSubmitting) onClose();
+          if (!isSubmittingRef.current && !isSubmitting) onClose();
         }}
       />
 
@@ -180,7 +187,7 @@ export function ClarificationRequestModal({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !isValidLength}
+              disabled={isSubmitting || !isValidLength || isResolved}
               className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
             >
               {isSubmitting ? (

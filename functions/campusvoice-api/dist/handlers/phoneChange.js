@@ -1,21 +1,24 @@
 import { ID, Query } from 'node-appwrite';
-import { getAppwriteConfig, getServerClient } from '../db.js';
-import { PHONE_NUMBER_REGEX, readBooleanField, readStringField, resolveDepartment, } from '../departments.js';
+import { getAppwriteConfig, getServerClient, withTransientRetry } from '../db.js';
+import { PHONE_NUMBER_REGEX, readBooleanField, readStringField, resolveDepartment, resolveLegacyDepartmentCode, } from '../departments.js';
 import { appendAuditLog } from './audit.js';
 /**
  * Fetches caller profile from the profiles collection.
  */
 async function getCallerProfile(databases, userId, databaseId, profilesCollectionId) {
-    const res = await databases.listDocuments(databaseId, profilesCollectionId, [
+    const res = await withTransientRetry(() => databases.listDocuments(databaseId, profilesCollectionId, [
         Query.equal('user_id', userId),
         Query.limit(1),
-    ]);
+    ]));
     if (res.total === 0 || !res.documents[0]) {
         return null;
     }
     const doc = res.documents[0];
+    const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
     const rawDeptId = readStringField(doc, 'student_department_id');
-    const resolvedDept = resolveDepartment(rawDeptId);
+    const rawLegacyDeptCode = readStringField(doc, 'department_code');
+    const resolvedDept = resolveDepartment(rawDeptId) ||
+        (!rawDeptId && enrollmentNo.length === 12 ? resolveLegacyDepartmentCode(rawLegacyDeptCode) : null);
     return {
         $id: doc.$id,
         user_id: readStringField(doc, 'user_id') || userId,
@@ -56,6 +59,58 @@ function toPhoneChangeModel(doc) {
             readStringField(doc, 'updated_at') ||
             doc.$updatedAt,
     };
+}
+function extractTimestampSchemaMismatch(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const unknownMatch = /Unknown attribute[:\s]*["']?(created_at|requested_at|updated_at|reviewed_at|completed_at)["']?/i.exec(msg);
+    if (unknownMatch?.[1]) {
+        return { type: 'unknown', field: unknownMatch[1] };
+    }
+    const missingMatch = /Missing required attribute[:\s]*["']?(created_at|requested_at|updated_at|reviewed_at|completed_at)["']?/i.exec(msg);
+    if (missingMatch?.[1]) {
+        return { type: 'missing', field: missingMatch[1] };
+    }
+    return null;
+}
+async function executeWithTimestampCompat(operation, initialPayload, now) {
+    const candidate = { ...initialPayload };
+    const triedAdjustments = new Set();
+    for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+            return await operation(candidate);
+        }
+        catch (err) {
+            const mismatch = extractTimestampSchemaMismatch(err);
+            if (!mismatch) {
+                throw err;
+            }
+            const adjustmentKey = `${mismatch.type}:${mismatch.field}`;
+            if (triedAdjustments.has(adjustmentKey)) {
+                throw err;
+            }
+            triedAdjustments.add(adjustmentKey);
+            if (mismatch.type === 'unknown' && mismatch.field in candidate) {
+                delete candidate[mismatch.field];
+                continue;
+            }
+            if (mismatch.type === 'missing' && !(mismatch.field in candidate)) {
+                candidate[mismatch.field] = now;
+                continue;
+            }
+            throw err;
+        }
+    }
+    return operation(candidate);
+}
+async function createPhoneChangeDocCompat(databases, databaseId, collectionId, docId, payload, now) {
+    return executeWithTimestampCompat((candidate) => databases.createDocument(databaseId, collectionId, docId, candidate, []), {
+        ...payload,
+        requested_at: now,
+        created_at: now,
+    }, now);
+}
+async function updatePhoneChangeDocCompat(databases, databaseId, collectionId, docId, payload, now) {
+    return executeWithTimestampCompat((candidate) => databases.updateDocument(databaseId, collectionId, docId, candidate), payload, now);
 }
 // ----------------------------------------------------
 // 1. Student Requests Phone Change
@@ -117,7 +172,11 @@ export async function handleRequestPhoneChange(context, caller, data, deps) {
     }
     // Check for existing pending or unconsumed approved requests
     try {
-        const existingRequests = await databases.listDocuments(config.databaseId, config.phoneChangeRequestsCollectionId, [Query.equal('student_user_id', caller.id), Query.limit(20)]);
+        const existingRequests = await withTransientRetry(() => databases.listDocuments(config.databaseId, config.phoneChangeRequestsCollectionId, [
+            Query.equal('student_user_id', caller.id),
+            Query.orderDesc('$createdAt'),
+            Query.limit(100),
+        ]));
         const hasActiveRequest = existingRequests.documents.some((d) => {
             const status = readStringField(d, 'status');
             const consumed = readBooleanField(d, 'permission_consumed');
@@ -132,7 +191,7 @@ export async function handleRequestPhoneChange(context, caller, data, deps) {
         }
         const now = new Date().toISOString();
         const docId = `pcr_${ID.unique().slice(0, 32)}`;
-        const newDoc = await databases.createDocument(config.databaseId, config.phoneChangeRequestsCollectionId, docId, {
+        const newDoc = await createPhoneChangeDocCompat(databases, config.databaseId, config.phoneChangeRequestsCollectionId, docId, {
             student_user_id: caller.id,
             academic_department_id: profile.student_department_id,
             old_phone_number: profile.phone_number,
@@ -142,9 +201,7 @@ export async function handleRequestPhoneChange(context, caller, data, deps) {
             reviewed_by: '',
             decision_reason: '',
             permission_consumed: false,
-            requested_at: now,
-        }, [] // Strictly empty permissions ($permissions = [])
-        );
+        }, now);
         await appendAuditLog(databases, config.databaseId, config.auditLogsCollectionId, {
             action: 'request_phone_change',
             actor_id: caller.id,
@@ -238,12 +295,13 @@ export async function handleReviewPhoneChange(context, caller, data, deps) {
             }, 403);
         }
         const now = new Date().toISOString();
-        const updatedDoc = await databases.updateDocument(config.databaseId, config.phoneChangeRequestsCollectionId, requestId, {
+        const updatedDoc = await updatePhoneChangeDocCompat(databases, config.databaseId, config.phoneChangeRequestsCollectionId, requestId, {
             status: decision,
             reviewed_by: caller.id,
             decision_reason: decisionReason || (decision === 'approved' ? 'Approved by Academic Admin' : 'Rejected'),
+            reviewed_at: now,
             updated_at: now,
-        });
+        }, now);
         await appendAuditLog(databases, config.databaseId, config.auditLogsCollectionId, {
             action: 'review_phone_change',
             actor_id: caller.id,
@@ -342,6 +400,14 @@ export async function handleCompletePhoneChange(context, caller, data, deps) {
             }, 404);
         }
         const profileDoc = profileRes.documents[0];
+        const currentProfilePhone = readStringField(profileDoc, 'phone_number').trim();
+        if (oldPhoneNumber.trim() && currentProfilePhone !== oldPhoneNumber.trim()) {
+            return res.json({
+                success: false,
+                error: 'Your phone number was already updated by another request or session. Refresh to view your latest status.',
+                code: 'PERMISSION_NOT_AVAILABLE',
+            }, 409);
+        }
         const now = new Date().toISOString();
         // FAILURE-SAFE EXECUTION:
         // Step 1: Update student profile with new phone number.
@@ -363,11 +429,12 @@ export async function handleCompletePhoneChange(context, caller, data, deps) {
         }
         // Step 2: Now that profile save succeeded, mark permission as consumed and status completed
         try {
-            await databases.updateDocument(config.databaseId, config.phoneChangeRequestsCollectionId, requestId, {
+            await updatePhoneChangeDocCompat(databases, config.databaseId, config.phoneChangeRequestsCollectionId, requestId, {
                 status: 'completed',
                 permission_consumed: true,
+                completed_at: now,
                 updated_at: now,
-            });
+            }, now);
         }
         catch (reqUpdateErr) {
             error(`[phone-change] Failed to mark request as consumed, attempting profile rollback: ${String(reqUpdateErr)}`);
@@ -463,7 +530,7 @@ export async function handleListPhoneChangeRequests(context, caller, data, deps)
                 code: 'FORBIDDEN',
             }, 403);
         }
-        const result = await databases.listDocuments(config.databaseId, config.phoneChangeRequestsCollectionId, queries);
+        const result = await withTransientRetry(() => databases.listDocuments(config.databaseId, config.phoneChangeRequestsCollectionId, queries));
         const requests = result.documents.map(toPhoneChangeModel);
         return res.json({
             success: true,

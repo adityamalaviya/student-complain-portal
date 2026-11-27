@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ID, Permission, Role } from 'appwrite';
@@ -14,21 +14,22 @@ import {
   Wrench,
   X,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard } from '@/lib/hooks';
 import { storage, APPWRITE_CONFIG } from '@/lib/appwrite';
 import { apiCreateComplaint, apiListDepartments } from '@/lib/api';
 import { ComplaintCreateSchema } from '@/lib/schemas';
-import { getMaintenanceDepartments, resolveDepartment } from '@/lib/utils';
+import {
+  getMaintenanceDepartments,
+  resolveDepartment,
+  validateAttachmentFile,
+} from '@/lib/utils';
 import { DepartmentBadge } from '@/components';
 import type { Department } from '@/types';
 
-const ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'] as const;
-const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png'] as const;
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-
 export default function RaiseComplaintPage(): React.ReactElement {
   const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal } = useAuth();
+  const { user, profile, loading, error: authError, refreshProfile } = useAuth();
+  useAuthGuard('student');
 
   const [departments, setDepartments] = useState<Department[]>(() =>
     getMaintenanceDepartments().map((d) => ({
@@ -47,24 +48,22 @@ export default function RaiseComplaintPage(): React.ReactElement {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isSubmittingRef = useRef<boolean>(false);
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [isRedirecting, setIsRedirecting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Guard: unauthenticated -> sign-in; non-student -> workspace; incomplete profile -> onboarding
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push('/sign-in');
-      } else if (isAdmin) {
-        router.push('/admin');
-      } else if (isPrincipal) {
-        router.replace('/principal');
-      } else if (!isOnboarded) {
-        router.push('/onboarding');
+    return (): void => {
+      if (redirectTimerRef.current !== null) {
+        clearTimeout(redirectTimerRef.current);
       }
-    }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
+    };
+  }, []);
 
   // Load authoritative maintenance departments from backend
   useEffect(() => {
@@ -88,6 +87,23 @@ export default function RaiseComplaintPage(): React.ReactElement {
     };
   }, []);
 
+  if (authError && !profile && !loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6 dark:bg-gray-950">
+        <div className="w-full max-w-md rounded-xl border border-red-200 bg-white p-6 text-center shadow-xs dark:border-red-900/50 dark:bg-slate-900">
+          <p className="text-sm font-semibold text-red-700 dark:text-red-400">{authError}</p>
+          <button
+            type="button"
+            onClick={() => void refreshProfile()}
+            className="mt-4 rounded-xl bg-blue-700 px-4 py-2 text-xs font-bold text-white transition hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (loading || !profile) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-gray-950">
@@ -102,29 +118,14 @@ export default function RaiseComplaintPage(): React.ReactElement {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size <= 0) {
-      setErrorMessage('Attachment file cannot be empty.');
+    const validation = validateAttachmentFile(file);
+    if (!validation.valid) {
+      setErrorMessage(validation.error || 'Only PDF, JPG, JPEG, or PNG attachments are permitted.');
       setSelectedFile(null);
       setSelectedFileName(null);
-      return;
-    }
-
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      setErrorMessage('Attachment size exceeds the 5 MB limit.');
-      setSelectedFile(null);
-      setSelectedFileName(null);
-      return;
-    }
-
-    const ext = file.name.includes('.')
-      ? file.name.split('.').pop()?.trim().toLowerCase() || ''
-      : '';
-    const isAllowedType = ALLOWED_MIME_TYPES.some((mime) => file.type === mime);
-    const isAllowedExt = ALLOWED_EXTENSIONS.some((allowedExt) => ext === allowedExt);
-    if (!isAllowedType || !isAllowedExt) {
-      setErrorMessage('Only PDF, JPG, JPEG, or PNG attachments are permitted.');
-      setSelectedFile(null);
-      setSelectedFileName(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
       return;
     }
 
@@ -136,10 +137,17 @@ export default function RaiseComplaintPage(): React.ReactElement {
   const handleClearFile = (): void => {
     setSelectedFile(null);
     setSelectedFileName(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
+    if (isSubmittingRef.current || isSubmitting || isRedirecting) {
+      return;
+    }
+
     setErrorMessage(null);
     setSuccessMessage(null);
 
@@ -162,9 +170,11 @@ export default function RaiseComplaintPage(): React.ReactElement {
     }
 
     let uploadedFileId: string | undefined;
-    try {
-      setIsSubmitting(true);
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    let submittedSuccessfully = false;
 
+    try {
       if (selectedFile && user) {
         try {
           const uploadedFile = await storage.createFile(
@@ -207,9 +217,11 @@ export default function RaiseComplaintPage(): React.ReactElement {
       });
 
       if (res.success && res.data) {
+        submittedSuccessfully = true;
+        setIsRedirecting(true);
         setSuccessMessage('Complaint filed successfully. Redirecting to your department feed...');
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        setTimeout(() => {
+        redirectTimerRef.current = setTimeout(() => {
           router.push('/dashboard');
         }, 1200);
       } else {
@@ -227,6 +239,9 @@ export default function RaiseComplaintPage(): React.ReactElement {
       setErrorMessage(msg);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } finally {
+      if (!submittedSuccessfully) {
+        isSubmittingRef.current = false;
+      }
       setIsSubmitting(false);
     }
   };
@@ -400,7 +415,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
                   ))}
                 </select>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Choose which of the 6 institutional maintenance teams should resolve this issue.
+                  Choose which institutional maintenance team should resolve this issue.
                 </p>
               </div>
 
@@ -509,6 +524,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
                   )}
                 </p>
                 <input
+                  ref={fileInputRef}
                   id="attachmentInput"
                   type="file"
                   accept="image/png,image/jpeg,application/pdf"
@@ -529,7 +545,7 @@ export default function RaiseComplaintPage(): React.ReactElement {
               <button
                 id="submitComplaintButton"
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isSubmitting || isRedirecting}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-blue-800 active:scale-95 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
               >
                 {isSubmitting ? (

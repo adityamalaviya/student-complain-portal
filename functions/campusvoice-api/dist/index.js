@@ -3,7 +3,7 @@ import { INSTITUTIONAL_DEPARTMENTS, toDepartmentModel } from './departments.js';
 import { handleGetProfile, handleCompleteOnboarding, handleListDepartments, } from './handlers/profile.js';
 import { handleCreateComplaint, handleListComplaints, handleGetComplaint, handleGetComplaintAttachment, handleSupportComplaint, handleRemoveSupport, handleGetSupportState, handleGetAdminDashboard, handleListAdminComplaints, handleUpdateAdminComplaint, handleRequestClarification, handleReplyClarification, } from './handlers/complaints.js';
 import { handleRequestPhoneChange, handleReviewPhoneChange, handleCompletePhoneChange, handleListPhoneChangeRequests, } from './handlers/phoneChange.js';
-import { handleGetPrincipalDashboard, handleIssueWarning, handleRespondToWarning, handleListAdminAssignments, handleAssignAdmin, handleRevokeAdmin, handleGetAuditHistory, } from './handlers/principal.js';
+import { handleGetPrincipalDashboard, handleIssueWarning, handleRespondToWarning, handleListAdminAssignments, handleAssignAdmin, handleRevokeAdmin, handleGetAuditHistory, handleCreateDepartment, handleUpdateDepartment, handleDeleteDepartment, } from './handlers/principal.js';
 export default async function main(context, deps) {
     const { req, res, log } = context;
     try {
@@ -66,10 +66,6 @@ export default async function main(context, deps) {
             }, resolvedStatus);
         }
         const caller = authResult.caller;
-        console.log('[index] step 1: parsing request body');
-        console.log('[index] step 2: extracting action');
-        console.log('[index] action value:', action);
-        console.log('[index] step 3: routing to handler');
         log(`[campusvoice-api] Routing action '${action}' for caller '${caller.id}'`);
         switch (action) {
             case 'get-profile':
@@ -122,6 +118,12 @@ export default async function main(context, deps) {
                 return await handleRevokeAdmin(context, caller, data, deps?.principalDeps);
             case 'get-audit-history':
                 return await handleGetAuditHistory(context, caller, data, deps?.principalDeps);
+            case 'create-department':
+                return await handleCreateDepartment(context, caller, data, deps?.principalDeps);
+            case 'update-department':
+                return await handleUpdateDepartment(context, caller, data, deps?.principalDeps);
+            case 'delete-department':
+                return await handleDeleteDepartment(context, caller, data, deps?.principalDeps);
             default:
                 return res.json({
                     success: false,

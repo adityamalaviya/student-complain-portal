@@ -320,6 +320,7 @@ async function provisionComplaints() {
   await safeCreateIndex('complaints', 'idx_cmpl_maint_dept', 'key', ['maintenance_department_id']);
   await safeCreateIndex('complaints', 'idx_cmpl_status', 'key', ['status']);
   await safeCreateIndex('complaints', 'idx_cmpl_attachment', 'key', ['attachment_file_id']);
+  await safeCreateIndex('complaints', 'idx_cmpl_last_update', 'key', ['last_meaningful_update_at']);
 }
 
 // ============================================================

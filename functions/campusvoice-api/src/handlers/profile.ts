@@ -1,4 +1,5 @@
 import { ID, Query, type Models } from 'node-appwrite';
+import { resolveActiveAdminAssignmentsFromDocs } from '../auth.js';
 import { getAppwriteConfig, getServerClient } from '../db.js';
 import {
   INSTITUTIONAL_DEPARTMENTS,
@@ -13,11 +14,17 @@ import {
   toDepartmentModel,
   type DatabaseClientLike,
 } from '../departments.js';
+import {
+  hasCompleteStudentProfileFields,
+  isIncompleteLockedProfileStub,
+  readProfileLockSummary,
+} from '../stateMachines.js';
 import type {
   AcademicDepartmentId,
   AppwriteContext,
   AuthenticatedCaller,
   Department,
+  DepartmentAdminAssignment,
   DepartmentId,
   ProfileStatus,
   UserProfile,
@@ -28,14 +35,8 @@ export interface ProfileHandlerDeps {
   databases?: DatabaseClientLike;
 }
 
-function resolveUserRole(callerRole: UserRole): UserRole {
-  if (callerRole === 'principal') {
-    return 'principal';
-  }
-  if (callerRole === 'department_admin') {
-    return 'department_admin';
-  }
-  return 'student';
+function isDocumentLike(value: unknown): value is Models.Document {
+  return typeof value === 'object' && value !== null && typeof (value as { $id?: unknown }).$id === 'string';
 }
 
 function buildProfileResponse(
@@ -55,6 +56,8 @@ function buildProfileResponse(
     name_locked: boolean;
     enrollment_locked: boolean;
     phone_locked: boolean;
+    is_onboarded?: boolean;
+    admin_assignments?: DepartmentAdminAssignment[];
     department_name?: string;
     created_at: string;
     updated_at: string;
@@ -78,6 +81,10 @@ function buildProfileResponse(
     enrollment_locked: fields.enrollment_locked,
     phone_locked: fields.phone_locked,
     is_locked: isLocked,
+    ...(fields.is_onboarded !== undefined ? { is_onboarded: fields.is_onboarded } : {}),
+    ...(fields.admin_assignments && fields.admin_assignments.length > 0
+      ? { admin_assignments: fields.admin_assignments }
+      : {}),
     ...(fields.department_name ? { department_name: fields.department_name } : {}),
     created_at: fields.created_at,
     updated_at: fields.updated_at,
@@ -97,9 +104,8 @@ export async function handleGetProfile(
     const config = getAppwriteConfig();
     const databases = deps?.databases ?? getServerClient().databases;
 
-    // 1. After authenticating caller, ALWAYS query department_admins:
-    // - Query where user_id === caller.id AND is_active === true
-    // - If not found: query where email === caller.email AND is_active === true
+    // 1. After authenticating caller, ALWAYS collect ALL active department_admins
+    // matching either user_id or email so inactive user_id rows never shadow new email grants.
     const adminColIds = Array.from(
       new Set(
         [config.departmentAdminsCollectionId, 'department_admins'].filter(
@@ -108,34 +114,29 @@ export async function handleGetProfile(
       )
     );
 
-    let adminAssignment: Models.Document | null = null;
+    const matchedCandidateMap = new Map<string, Models.Document>();
 
     for (const colId of adminColIds) {
       try {
-        let userResult;
         try {
-          userResult = await databases.listDocuments(config.databaseId, colId, [
+          const userResult = await databases.listDocuments(config.databaseId, colId, [
             Query.equal('user_id', caller.id),
             Query.equal('is_active', true),
-            Query.limit(1),
+            Query.limit(50),
           ]);
+          for (const d of userResult.documents) {
+            matchedCandidateMap.set(d.$id, d);
+          }
         } catch {
-          userResult = await databases.listDocuments(config.databaseId, colId, [
+          const userResult = await databases.listDocuments(config.databaseId, colId, [
             Query.equal('user_id', caller.id),
-            Query.limit(20),
+            Query.limit(50),
           ]);
-          userResult = {
-            ...userResult,
-            documents: userResult.documents.filter(
-              (d) => readBooleanField(d, 'is_active') === true
-            ),
-          };
-          userResult.total = userResult.documents.length;
-        }
-
-        if (userResult.total > 0 && userResult.documents[0]) {
-          adminAssignment = userResult.documents[0];
-          break;
+          for (const d of userResult.documents) {
+            if (readBooleanField(d, 'is_active') === true) {
+              matchedCandidateMap.set(d.$id, d);
+            }
+          }
         }
 
         if (caller.email) {
@@ -144,93 +145,64 @@ export async function handleGetProfile(
           ).filter(Boolean);
 
           for (const emailVal of emailVariants) {
-            let emailResult;
             try {
-              emailResult = await databases.listDocuments(config.databaseId, colId, [
+              const emailResult = await databases.listDocuments(config.databaseId, colId, [
                 Query.equal('email', emailVal),
                 Query.equal('is_active', true),
-                Query.limit(1),
+                Query.limit(50),
               ]);
+              for (const d of emailResult.documents) {
+                matchedCandidateMap.set(d.$id, d);
+              }
             } catch {
-              emailResult = await databases.listDocuments(config.databaseId, colId, [
+              const emailResult = await databases.listDocuments(config.databaseId, colId, [
                 Query.equal('email', emailVal),
-                Query.limit(20),
+                Query.limit(50),
               ]);
-              emailResult = {
-                ...emailResult,
-                documents: emailResult.documents.filter(
-                  (d) => readBooleanField(d, 'is_active') === true
-                ),
-              };
-              emailResult.total = emailResult.documents.length;
-            }
-
-            if (emailResult.total > 0 && emailResult.documents[0]) {
-              adminAssignment = emailResult.documents[0];
-              break;
+              for (const d of emailResult.documents) {
+                if (readBooleanField(d, 'is_active') === true) {
+                  matchedCandidateMap.set(d.$id, d);
+                }
+              }
             }
           }
+        }
 
-          if (adminAssignment) {
-            break;
-          }
+        if (matchedCandidateMap.size > 0) {
+          break;
         }
       } catch (err) {
         log(`[profile] Notice: query on ${colId} failed: ${String(err)}`);
       }
     }
 
-    if (
-      !adminAssignment &&
-      Array.isArray(caller.admin_assignments) &&
-      caller.admin_assignments.length > 0
-    ) {
-      const active = caller.admin_assignments.find((a) => a.is_active === true);
-      if (active) {
-        adminAssignment = active as unknown as Models.Document;
-      }
-    }
+    const candidateAdminDocs = Array.from(matchedCandidateMap.values());
+    const { assignments: dbResolvedAssignments } = resolveActiveAdminAssignmentsFromDocs(
+      candidateAdminDocs,
+      caller.id,
+      caller.email
+    );
 
-    const rawAssignmentDeptId = adminAssignment
-      ? typeof adminAssignment.department_id === 'string' && adminAssignment.department_id.trim()
-        ? adminAssignment.department_id.trim()
-        : readStringField(adminAssignment, 'department_id').trim() || null
-      : null;
+    const resolvedAssignments: DepartmentAdminAssignment[] =
+      dbResolvedAssignments.length > 0
+        ? dbResolvedAssignments
+        : candidateAdminDocs.length === 0 && Array.isArray(caller.admin_assignments)
+        ? caller.admin_assignments.filter((a) => a.is_active === true)
+        : [];
 
-    const resolvedDept = rawAssignmentDeptId ? resolveDepartment(rawAssignmentDeptId) : null;
-    const assignmentDeptId: DepartmentId | null = resolvedDept
-      ? resolvedDept.id
-      : (rawAssignmentDeptId as DepartmentId | null);
-
-    const assignmentDeptName = adminAssignment
-      ? typeof adminAssignment.department_name === 'string' && adminAssignment.department_name.trim()
-        ? adminAssignment.department_name.trim()
-        : readStringField(adminAssignment, 'department_name').trim() ||
-          (resolvedDept ? resolvedDept.name : null)
-      : null;
-
-    const assignmentAcademicDeptId: AcademicDepartmentId | null = adminAssignment
-      ? typeof adminAssignment.academic_department_id === 'string' &&
-        adminAssignment.academic_department_id.trim()
-        ? (adminAssignment.academic_department_id.trim() as AcademicDepartmentId)
-        : (readStringField(adminAssignment, 'academic_department_id').trim() as AcademicDepartmentId) ||
-          (resolvedDept && resolvedDept.is_academic ? (resolvedDept.id as AcademicDepartmentId) : null)
-      : null;
-
-    const assignmentMaintenanceDeptId = adminAssignment
-      ? typeof adminAssignment.maintenance_department_id === 'string' &&
-        adminAssignment.maintenance_department_id.trim()
-        ? adminAssignment.maintenance_department_id.trim()
-        : readStringField(adminAssignment, 'maintenance_department_id').trim() ||
-          (resolvedDept && resolvedDept.is_maintenance ? resolvedDept.id : null)
+    const primaryAssignment =
+      resolvedAssignments.find((a) => a.scope === 'maintenance') ||
+      resolvedAssignments[0] ||
+      null;
+    const resolvedDept = primaryAssignment
+      ? resolveDepartment(primaryAssignment.department_id)
       : null;
 
     const assignment = {
-      department_id: assignmentDeptId,
-      department_name: assignmentDeptName,
-      academic_department_id: assignmentAcademicDeptId,
-      maintenance_department_id: assignmentMaintenanceDeptId,
-      is_active: true,
+      department_id: resolvedDept
+        ? resolvedDept.id
+        : ((primaryAssignment?.department_id ?? null) as DepartmentId | null),
+      department_name: resolvedDept ? resolvedDept.name : null,
     };
 
     const listResult = await databases.listDocuments(
@@ -257,36 +229,24 @@ export async function handleGetProfile(
       );
     }
 
+    const isCallerAdmin = resolvedAssignments.length > 0;
     const isPrincipal =
-      !adminAssignment &&
+      !isCallerAdmin &&
       caller.role === 'principal' &&
       (doc ? rawDocRole === 'principal' || readBooleanField(doc, 'is_principal') === true : true);
 
-    const isCallerAdmin = Boolean(adminAssignment);
     const effectiveRole: UserRole = isCallerAdmin
       ? 'department_admin'
       : isPrincipal
       ? 'principal'
       : 'student';
 
-    // Logs for traceability:
-    console.log('[get-profile] caller email:', caller.email);
-    console.log('[get-profile] admin assignment found:', !!adminAssignment);
-    console.log('[get-profile] effective role:', effectiveRole);
-
     // 3. If profile document exists:
     if (doc) {
+      const locks = readProfileLockSummary(doc);
       const isStaleAdminRole = effectiveRole === 'student' && rawDocRole === 'department_admin';
-
-      const legacyLocked = readBooleanField(doc, 'is_locked');
-      const rawNameLocked = readBooleanField(doc, 'name_locked') ?? Boolean(legacyLocked);
-      const rawEnrollmentLocked =
-        readBooleanField(doc, 'enrollment_locked') ?? Boolean(legacyLocked);
-      const phoneNumber = readStringField(doc, 'phone_number').trim();
-      const rawPhoneLocked =
-        readBooleanField(doc, 'phone_locked') ??
-        Boolean(legacyLocked && PHONE_NUMBER_REGEX.test(phoneNumber));
       const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
+      const phoneNumber = readStringField(doc, 'phone_number').trim();
 
       const rawStudentDeptId = readStringField(doc, 'student_department_id');
       const rawLegacyDeptCode = readStringField(doc, 'department_code');
@@ -320,36 +280,37 @@ export async function handleGetProfile(
         ? resolvedStudentDept.name
         : '';
 
-      const hasValidStudentOnboarding = Boolean(
-        rawNameLocked &&
-          rawEnrollmentLocked &&
-          rawPhoneLocked &&
-          enrollmentNo.length === 12 &&
-          effectiveStudentDeptId &&
-          PHONE_NUMBER_REGEX.test(phoneNumber)
-      );
+      const hasValidStudentOnboarding = hasCompleteStudentProfileFields(doc);
+      const isIncompleteLockedStub =
+        effectiveRole === 'student' &&
+        !hasValidStudentOnboarding &&
+        isIncompleteLockedProfileStub(doc);
+      const needsStudentUnlock = isStaleAdminRole || isIncompleteLockedStub;
 
-      // Sync updated role / status back to database if needed
-      if (isStaleAdminRole) {
+      // Sync updated role / lock state back to database if needed
+      if (needsStudentUnlock) {
         try {
           await databases.updateDocument(
             config.databaseId,
             config.profilesCollectionId,
             doc.$id,
             {
-              role: 'student',
+              ...(isStaleAdminRole ? { role: 'student' } : {}),
               ...(!hasValidStudentOnboarding
                 ? {
                     name_locked: false,
                     enrollment_locked: false,
                     phone_locked: false,
+                    ...(readBooleanField(doc, 'is_locked') !== undefined
+                      ? { is_locked: false }
+                      : {}),
                     profile_status: 'incomplete',
                   }
                 : {}),
               updated_at: new Date().toISOString(),
             }
           );
-          log(`[profile] Downgraded stale department_admin role on profile ${doc.$id} to student`);
+          log(`[profile] Synced role/lock reset on profile ${doc.$id} to student`);
         } catch (syncErr) {
           log(`[profile] Notice: Could not sync stale admin downgrade to profile doc: ${String(syncErr)}`);
         }
@@ -372,21 +333,21 @@ export async function handleGetProfile(
 
       const nameLocked = isCallerAdmin || isPrincipal
         ? true
-        : isStaleAdminRole && !hasValidStudentOnboarding
+        : needsStudentUnlock && !hasValidStudentOnboarding
         ? false
-        : rawNameLocked;
+        : locks.nameLocked;
       const enrollmentLocked = isCallerAdmin || isPrincipal
         ? true
-        : isStaleAdminRole && !hasValidStudentOnboarding
+        : needsStudentUnlock && !hasValidStudentOnboarding
         ? false
-        : rawEnrollmentLocked;
+        : locks.enrollmentLocked;
       const phoneLocked = isCallerAdmin || isPrincipal
         ? true
-        : isStaleAdminRole && !hasValidStudentOnboarding
+        : needsStudentUnlock && !hasValidStudentOnboarding
         ? false
-        : rawPhoneLocked;
+        : locks.phoneLocked;
 
-      // is_onboarded: true for admin / principal, check fields for student
+      // is_onboarded: true for admin / principal, check fields + status for student
       const isOnboarded = isCallerAdmin || isPrincipal ? true : hasValidStudentOnboarding;
 
       const rawStatus = readStringField(doc, 'profile_status');
@@ -394,7 +355,7 @@ export async function handleGetProfile(
         ? rawStatus === 'pending_verification' || rawStatus === 'rejected'
           ? rawStatus
           : 'complete'
-        : isStaleAdminRole && !hasValidStudentOnboarding
+        : needsStudentUnlock && !hasValidStudentOnboarding
         ? 'incomplete'
         : rawStatus === 'pending_verification' || rawStatus === 'rejected'
         ? rawStatus
@@ -418,6 +379,8 @@ export async function handleGetProfile(
         name_locked: nameLocked,
         enrollment_locked: enrollmentLocked,
         phone_locked: phoneLocked,
+        is_onboarded: isOnboarded,
+        admin_assignments: isCallerAdmin ? resolvedAssignments : undefined,
         department_name: effectiveDeptName,
         created_at: readStringField(doc, 'created_at') || doc.$createdAt,
         updated_at: readStringField(doc, 'updated_at') || doc.$updatedAt,
@@ -440,20 +403,20 @@ export async function handleGetProfile(
     // - For admin: create profile document with role: 'department_admin' and is_onboarded: true
     // - For student: return { profile: null, is_onboarded: false } so frontend redirects to onboarding
     if (effectiveRole === 'principal') {
+      const now = new Date().toISOString();
       const newPrincipalProfileData = {
-        $id: caller.id,
         user_id: caller.id,
         auth_user_id: caller.id,
         email: caller.email,
         name: caller.name,
+        display_name: caller.name,
         role: 'principal' as const,
-        is_active: true,
-        is_locked: true,
         name_locked: true,
         enrollment_locked: true,
         phone_locked: true,
         profile_status: 'complete' as const,
-        created_at: new Date().toISOString(),
+        created_at: now,
+        updated_at: now,
       };
 
       try {
@@ -485,8 +448,9 @@ export async function handleGetProfile(
               name_locked: true,
               enrollment_locked: true,
               phone_locked: true,
-              created_at: newPrincipalProfileData.created_at,
-              updated_at: newPrincipalProfileData.created_at,
+              is_onboarded: true,
+              created_at: now,
+              updated_at: now,
             }),
             is_onboarded: true,
           },
@@ -496,93 +460,98 @@ export async function handleGetProfile(
     }
 
     if (effectiveRole === 'department_admin') {
+      const now = new Date().toISOString();
       const newProfileData = {
-        $id: caller.id,
         user_id: caller.id,
         auth_user_id: caller.id,
         email: caller.email,
+        name: caller.name,
+        display_name: caller.name,
         role: 'department_admin' as const,
-        department_id: assignment.department_id,
-        department_name: assignment.department_name,
-        academic_department_id: assignment.academic_department_id,
-        maintenance_department_id: assignment.maintenance_department_id,
-        is_active: true,
-        is_locked: true,
         name_locked: true,
         enrollment_locked: true,
         phone_locked: true,
-        created_at: new Date().toISOString(),
+        profile_status: 'complete' as const,
+        created_at: now,
+        updated_at: now,
       };
 
-      console.log('[get-profile] creating admin profile for:', caller.id);
-
-      let adminProfile: unknown = null;
+      let adminProfileDoc: Models.Document | null = null;
       try {
-        adminProfile = await databases.createDocument(
+        adminProfileDoc = await databases.createDocument(
           config.databaseId,
           config.profilesCollectionId,
           caller.id,
           newProfileData
         );
-        console.log('[get-profile] admin profile created successfully');
       } catch (createErr) {
         log(`[profile] Notice: admin profile creation failed: ${String(createErr)}`);
-        let createdOnRetry = false;
         try {
-          const { $id: _omittedId, ...dataWithoutId } = newProfileData;
-          adminProfile = await databases.createDocument(
-            config.databaseId,
-            config.profilesCollectionId,
-            caller.id,
-            dataWithoutId
-          );
-          createdOnRetry = true;
-          console.log('[get-profile] admin profile created successfully');
-        } catch {
-          // creation failed or document already exists
-        }
-
-        if (!createdOnRetry) {
+          if (typeof databases.getDocument === 'function') {
+            adminProfileDoc = await databases.getDocument(
+              config.databaseId,
+              config.profilesCollectionId,
+              caller.id
+            );
+          } else {
+            const fetchRes = await databases.listDocuments(
+              config.databaseId,
+              config.profilesCollectionId,
+              [Query.equal('user_id', caller.id), Query.limit(1)]
+            );
+            if (fetchRes.total > 0 && fetchRes.documents[0]) {
+              adminProfileDoc = fetchRes.documents[0];
+            }
+          }
+        } catch (fetchErr) {
+          log(`[profile] Notice: getDocument failed, falling back to listDocuments: ${String(fetchErr)}`);
           try {
-            if (typeof (databases as any).getDocument === 'function') {
-              adminProfile = await (databases as any).getDocument(
-                config.databaseId,
-                config.profilesCollectionId,
-                caller.id
-              );
-            } else {
-              const fetchRes = await databases.listDocuments(
-                config.databaseId,
-                config.profilesCollectionId,
-                [Query.equal('user_id', caller.id), Query.limit(1)]
-              );
-              if (fetchRes.total > 0 && fetchRes.documents[0]) {
-                adminProfile = fetchRes.documents[0];
-              }
+            const fetchRes = await databases.listDocuments(
+              config.databaseId,
+              config.profilesCollectionId,
+              [Query.equal('user_id', caller.id), Query.limit(1)]
+            );
+            if (fetchRes.total > 0 && fetchRes.documents[0]) {
+              adminProfileDoc = fetchRes.documents[0];
             }
-          } catch (fetchErr) {
-            log(`[profile] Notice: getDocument failed, falling back to listDocuments: ${String(fetchErr)}`);
-            try {
-              const fetchRes = await databases.listDocuments(
-                config.databaseId,
-                config.profilesCollectionId,
-                [Query.equal('user_id', caller.id), Query.limit(1)]
-              );
-              if (fetchRes.total > 0 && fetchRes.documents[0]) {
-                adminProfile = fetchRes.documents[0];
-              }
-            } catch {
-              // ignore fallback fetch error
-            }
+          } catch {
+            // ignore fallback fetch error
           }
         }
       }
 
-      const returnedProfile = {
-        ...(typeof adminProfile === 'object' && adminProfile !== null ? adminProfile : newProfileData),
-        $id: (adminProfile as any)?.$id || caller.id,
+      const callerDept = caller.department_id ? resolveDepartment(caller.department_id) : null;
+      const effectiveDeptId: DepartmentId | null =
+        assignment.department_id ?? callerDept?.id ?? caller.department_id ?? null;
+      const effectiveDeptName =
+        assignment.department_name || callerDept?.name || caller.department_name || '';
+
+      const savedDoc = isDocumentLike(adminProfileDoc) ? adminProfileDoc : null;
+      const returnedProfile = buildProfileResponse(savedDoc?.$id || caller.id, {
+        user_id: (savedDoc && readStringField(savedDoc, 'user_id')) || caller.id,
+        auth_user_id: (savedDoc && readStringField(savedDoc, 'auth_user_id')) || caller.id,
+        email: (savedDoc && readStringField(savedDoc, 'email')) || caller.email,
+        name:
+          (savedDoc && (readStringField(savedDoc, 'name') || readStringField(savedDoc, 'display_name'))) ||
+          caller.name,
+        display_name:
+          (savedDoc && (readStringField(savedDoc, 'display_name') || readStringField(savedDoc, 'name'))) ||
+          caller.name,
+        enrollment_no: '',
+        student_department_id: null,
+        department_id: effectiveDeptId,
+        phone_number: '',
         role: 'department_admin',
-      };
+        profile_status: 'complete',
+        name_locked: true,
+        enrollment_locked: true,
+        phone_locked: true,
+        is_onboarded: true,
+        admin_assignments: resolvedAssignments,
+        department_name: effectiveDeptName,
+        created_at: (savedDoc && (readStringField(savedDoc, 'created_at') || savedDoc.$createdAt)) || now,
+        updated_at: (savedDoc && (readStringField(savedDoc, 'updated_at') || savedDoc.$updatedAt)) || now,
+      });
 
       return res.json(
         {
@@ -727,19 +696,12 @@ export async function handleCompleteOnboarding(
       existingUserProfiles.total > 0 ? existingUserProfiles.documents[0] : undefined;
 
     if (existingDoc) {
-      const isStaleAdminStub =
-        readStringField(existingDoc, 'role') === 'department_admin' &&
-        !readStringField(existingDoc, 'enrollment_no').trim() &&
-        !readStringField(existingDoc, 'phone_number').trim();
-
+      const isStaleStub = isIncompleteLockedProfileStub(existingDoc);
+      const locks = readProfileLockSummary(existingDoc);
       const alreadyLocked =
-        Boolean(readBooleanField(existingDoc, 'name_locked')) ||
-        Boolean(readBooleanField(existingDoc, 'enrollment_locked')) ||
-        Boolean(readBooleanField(existingDoc, 'phone_locked')) ||
-        Boolean(readBooleanField(existingDoc, 'is_locked')) ||
-        readStringField(existingDoc, 'profile_status') === 'complete';
+        locks.anyLocked || readStringField(existingDoc, 'profile_status') === 'complete';
 
-      if (!isStaleAdminStub && alreadyLocked) {
+      if (!isStaleStub && alreadyLocked) {
         return res.json(
           {
             success: false,
@@ -789,6 +751,9 @@ export async function handleCompleteOnboarding(
       name_locked: true,
       enrollment_locked: true,
       phone_locked: true,
+      ...(existingDoc && readBooleanField(existingDoc, 'is_locked') !== undefined
+        ? { is_locked: true }
+        : {}),
       profile_status: 'complete' as const,
       created_at: existingDoc ? readStringField(existingDoc, 'created_at') || now : now,
       updated_at: now,
@@ -815,6 +780,7 @@ export async function handleCompleteOnboarding(
 
     const profile = buildProfileResponse(savedDoc.$id, {
       ...dbProfileData,
+      is_onboarded: true,
       department_id: enrollmentResult.departmentId,
       department_name: enrollmentResult.departmentName || undefined,
     });
@@ -866,22 +832,40 @@ export async function handleListDepartments(
         const dbById = new Map<string, Department>();
         for (const doc of result.documents) {
           const resolved = resolveDepartment(doc.$id);
-          if (!resolved) {
-            continue;
-          }
-          const isAcademic = readBooleanField(doc, 'is_academic');
-          const isMaintenance = readBooleanField(doc, 'is_maintenance');
-          const isActive = readBooleanField(doc, 'is_active');
-          dbById.set(resolved.id, {
-            $id: resolved.id,
-            name: readStringField(doc, 'name') || resolved.name,
-            is_academic: isAcademic ?? resolved.is_academic,
-            is_maintenance: isMaintenance ?? resolved.is_maintenance,
-            is_active: isActive ?? resolved.is_active,
+          const isAcademic = readBooleanField(doc, 'is_academic') ?? resolved?.is_academic ?? false;
+          const isMaintenance = readBooleanField(doc, 'is_maintenance') ?? resolved?.is_maintenance ?? false;
+          const isActive = readBooleanField(doc, 'is_active') ?? resolved?.is_active ?? true;
+          const name = readStringField(doc, 'name') || resolved?.name || doc.$id;
+          const rawCode = readStringField(doc, 'code') || resolved?.code || '';
+
+          dbById.set(doc.$id, {
+            $id: doc.$id as DepartmentId,
+            name,
+            ...(rawCode ? { code: rawCode } : {}),
+            is_academic: isAcademic,
+            is_maintenance: isMaintenance,
+            is_active: isActive,
           });
         }
 
-        const merged = canonicalDepartments.map((dept) => dbById.get(dept.$id) ?? dept);
+        const merged: Department[] = [];
+        for (const canDept of canonicalDepartments) {
+          if (dbById.has(canDept.$id)) {
+            const docDept = dbById.get(canDept.$id)!;
+            if (docDept.is_active) {
+              merged.push(docDept);
+            }
+            dbById.delete(canDept.$id);
+          } else {
+            merged.push(canDept);
+          }
+        }
+
+        for (const customDept of dbById.values()) {
+          if (customDept.is_active) {
+            merged.push(customDept);
+          }
+        }
 
         return res.json(
           {

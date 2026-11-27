@@ -1,22 +1,36 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+} from 'react';
 import { getCurrentUser, signInWithGoogle, signOut, type AppwriteUser } from '../appwrite';
 import { apiGetProfile } from '../api';
-import { isAcademicDepartment } from '../utils';
+import { hasScopeAccess, isProfileOnboarded } from '../utils';
 import type { UserProfile } from '../../types';
+
+export interface RefreshProfileOptions {
+  silent?: boolean;
+}
 
 interface AuthContextValue {
   user: AppwriteUser | null;
   profile: UserProfile | null;
   loading: boolean;
+  isRefreshing: boolean;
   error: string | null;
   isOnboarded: boolean;
   isAdmin: boolean;
   isPrincipal: boolean;
+  hasMaintenanceScope: boolean;
+  hasAcademicScope: boolean;
   signIn: () => void;
   signOutUser: () => Promise<void>;
-  refreshProfile: () => Promise<void>;
+  refreshProfile: (options?: RefreshProfileOptions) => Promise<UserProfile | null>;
   setProfileState: (profile: UserProfile) => void;
 }
 
@@ -26,60 +40,91 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const [user, setUser] = useState<AppwriteUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-
-  const fetchAuthAndProfile = useCallback(async (): Promise<void> => {
-    setLoading(true);
-    setError(null);
-    try {
-      let currentUser = await getCurrentUser();
-
-      // Only retry with a brief delay if returning from an OAuth callback with token parameters
-      if (!currentUser && typeof window !== 'undefined') {
-        const params = new URLSearchParams(window.location.search);
-        if (params.has('userId') || params.has('secret')) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          currentUser = await getCurrentUser();
-        }
-      }
-
-      setUser(currentUser);
-
-      if (currentUser) {
-        const response = await apiGetProfile();
-        if (response.success && response.data) {
-          setProfile(response.data.profile);
-        } else if (response.error) {
-          console.warn('[useAuth] Profile retrieval issue:', response.error);
-          setError(response.error);
-          setUser(null);
-          setProfile(null);
-        }
-      } else {
-        setProfile(null);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Authentication initialization error';
-      setError(msg);
-      setUser(null);
-      setProfile(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const isMountedRef = useRef<boolean>(true);
 
   useEffect(() => {
-    let isMounted = true;
-
-    void (async (): Promise<void> => {
-      if (isMounted) {
-        await fetchAuthAndProfile();
-      }
-    })();
-
+    isMountedRef.current = true;
     return (): void => {
-      isMounted = false;
+      isMountedRef.current = false;
     };
+  }, []);
+
+  const fetchAuthAndProfile = useCallback(
+    async (options?: RefreshProfileOptions): Promise<UserProfile | null> => {
+      const silent = Boolean(options?.silent);
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+      setError(null);
+
+      try {
+        const currentUser = await getCurrentUser();
+        if (!isMountedRef.current) {
+          return null;
+        }
+
+        setUser(currentUser);
+
+        if (!currentUser) {
+          setProfile(null);
+          return null;
+        }
+
+        const response = await apiGetProfile();
+        if (!isMountedRef.current) {
+          return null;
+        }
+
+        if (response.success && response.data) {
+          setProfile(response.data.profile);
+          return response.data.profile;
+        }
+
+        if (response.code === 'UNAUTHORIZED') {
+          setUser(null);
+          setProfile(null);
+          setError(response.error || 'Session expired. Please sign in again.');
+          return null;
+        }
+
+        // Preserve signed-in user across transient errors so routes can offer retry without bouncing to sign-in
+        if (response.error) {
+          console.warn('[useAuth] Profile retrieval issue:', response.error);
+          setError(response.error);
+        }
+        return null;
+      } catch (err: unknown) {
+        if (!isMountedRef.current) {
+          return null;
+        }
+        const msg = err instanceof Error ? err.message : 'Authentication initialization error';
+        setError(msg);
+        return null;
+      } finally {
+        if (isMountedRef.current) {
+          if (silent) {
+            setIsRefreshing(false);
+          } else {
+            setLoading(false);
+          }
+        }
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.pathname === '/auth/callback') {
+      // Let AuthCallbackPage orchestrate the OAuth token exchange before syncing AuthProvider
+      setLoading(false);
+      return;
+    }
+
+    void fetchAuthAndProfile();
   }, [fetchAuthAndProfile]);
 
   const handleSignIn = useCallback((): void => {
@@ -90,39 +135,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     setLoading(true);
     try {
       await signOut();
-      setUser(null);
-      setProfile(null);
+      if (isMountedRef.current) {
+        setUser(null);
+        setProfile(null);
+        setError(null);
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   const handleSetProfileState = useCallback((newProfile: UserProfile): void => {
     setProfile(newProfile);
+    setError(null);
   }, []);
 
   const isAdmin = Boolean(profile?.role === 'department_admin');
   const isPrincipal = Boolean(profile?.role === 'principal');
-  const isOnboarded = Boolean(
-    profile &&
-      (isAdmin ||
-        isPrincipal ||
-        ((profile.name_locked || profile.is_locked) &&
-          (profile.enrollment_locked || profile.is_locked) &&
-          Boolean(profile.enrollment_no) &&
-          Boolean(profile.student_department_id && isAcademicDepartment(profile.student_department_id)) &&
-          Boolean(profile.phone_locked) &&
-          Boolean(profile.phone_number)))
-  );
+  const isOnboarded = isProfileOnboarded(profile);
+  const hasMaintenanceScope =
+    isAdmin && hasScopeAccess(profile?.admin_assignments, 'maintenance', profile?.department_id);
+  const hasAcademicScope =
+    isAdmin && hasScopeAccess(profile?.admin_assignments, 'academic', profile?.department_id);
 
   const contextValue: AuthContextValue = {
     user,
     profile,
     loading,
+    isRefreshing,
     error,
     isOnboarded,
     isAdmin,
     isPrincipal,
+    hasMaintenanceScope,
+    hasAcademicScope,
     signIn: handleSignIn,
     signOutUser: handleSignOut,
     refreshProfile: fetchAuthAndProfile,

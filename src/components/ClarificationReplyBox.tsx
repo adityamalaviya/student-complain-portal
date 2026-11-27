@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PaperPlaneRight, CircleNotch, ChatCircleText, WarningCircle } from '@phosphor-icons/react';
 
 export interface ClarificationReplySubmitResult {
@@ -22,15 +22,24 @@ export function ClarificationReplyBox({
   const [reply, setReply] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isSubmittingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    setReply('');
+    setErrorMessage(null);
+    setIsSubmitting(false);
+    isSubmittingRef.current = false;
+  }, [complaintId]);
 
   const trimmedReply = reply.trim();
   const isValidLength = trimmedReply.length >= 1 && trimmedReply.length <= 2000;
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (isSubmitting || !isValidLength) return;
+    if (isSubmittingRef.current || isSubmitting || !isValidLength) return;
 
     setErrorMessage(null);
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
 
     try {
@@ -48,6 +57,7 @@ export function ClarificationReplyBox({
       const msg = err instanceof Error ? err.message : 'Unexpected error submitting reply.';
       setErrorMessage(msg);
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };

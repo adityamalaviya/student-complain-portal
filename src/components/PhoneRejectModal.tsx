@@ -22,23 +22,24 @@ export function PhoneRejectModal({
   const [reason, setReason] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isSubmittingRef = useRef<boolean>(false);
 
   // Reset state when opening modal for a new request
   useEffect(() => {
-    if (isOpen) {
-      setReason('');
-      setErrorMessage(null);
-      // Auto-focus textarea
-      setTimeout(() => {
-        textareaRef.current?.focus();
-      }, 50);
-    }
+    if (!isOpen) return;
+    setReason('');
+    setErrorMessage(null);
+    isSubmittingRef.current = false;
+    const focusTimer = setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
+    return (): void => clearTimeout(focusTimer);
   }, [isOpen, request]);
 
   // Handle ESC key to close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && isOpen && !isSubmitting) {
+      if (e.key === 'Escape' && isOpen && !isSubmitting && !isSubmittingRef.current) {
         onClose();
       }
     };
@@ -54,15 +55,19 @@ export function PhoneRejectModal({
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
+    if (isSubmittingRef.current || isSubmitting) return;
     if (!isValidLength) {
       setErrorMessage('Rejection reason must be at least 5 characters (and max 1000 characters).');
       return;
     }
     setErrorMessage(null);
+    isSubmittingRef.current = true;
     try {
       await onSubmit(reqId, trimmedReason);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to submit rejection.');
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 

@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   ArrowLeft,
@@ -21,17 +21,20 @@ import {
   ChatText,
   NotePencil,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard, useSupportToggle, type SupportStateSnapshot } from '@/lib/hooks';
 import {
   apiGetComplaint,
   apiGetComplaintAttachment,
-  apiSupportComplaint,
-  apiRemoveSupport,
   apiRequestClarification,
   apiReplyClarification,
   apiUpdateAdminComplaint,
 } from '@/lib/api';
-import { resolveDepartment, calculateComplaintDelay } from '@/lib/utils';
+import {
+  resolveDepartment,
+  calculateComplaintDelay,
+  getClarificationState,
+  getWarningState,
+} from '@/lib/utils';
 import type { Complaint, ComplaintStatus, ComplaintTimeline, ComplaintWarning } from '@/types';
 import {
   ComplaintStatusBadge,
@@ -43,6 +46,7 @@ import {
   ClarificationReplyBox,
   IssueWarningModal,
   RespondWarningModal,
+  ErrorState,
   type AdminResolutionSubmitResult,
 } from '@/components';
 
@@ -146,11 +150,11 @@ function getSafeTimelineAuthorLabel(
 }
 
 export default function ComplaintDetailPage(): React.ReactElement {
-  const router = useRouter();
   const params = useParams();
   const complaintId = Array.isArray(params?.id) ? params.id[0] : (params?.id as string);
 
   const { user, loading, isOnboarded, isAdmin, isPrincipal } = useAuth();
+  useAuthGuard('authenticated');
 
   const [complaint, setComplaint] = useState<Complaint | null>(null);
   const [timeline, setTimeline] = useState<ComplaintTimeline[]>([]);
@@ -167,17 +171,17 @@ export default function ComplaintDetailPage(): React.ReactElement {
   const [isIssueWarningModalOpen, setIsIssueWarningModalOpen] = useState<boolean>(false);
   const [selectedWarningForResponse, setSelectedWarningForResponse] = useState<ComplaintWarning | null>(null);
   const [isRespondWarningModalOpen, setIsRespondWarningModalOpen] = useState<boolean>(false);
+  const revokeTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
-  // Authentication & Onboarding Guards
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push('/sign-in');
-      } else if (!isOnboarded && !isAdmin && !isPrincipal) {
-        router.push('/onboarding');
+    const timers = revokeTimersRef.current;
+    return (): void => {
+      for (const timer of timers) {
+        clearTimeout(timer);
       }
-    }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
+      timers.clear();
+    };
+  }, []);
 
   // Fetch complaint details
   const fetchComplaintDetails = useCallback(async (): Promise<void> => {
@@ -193,7 +197,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
         setTimeline(Array.isArray(res.data.timeline) ? res.data.timeline : []);
         setHasSupported(Boolean(res.data.has_supported));
         setSupportCount(res.data.complaint.support_count ?? 1);
-        const rawWarnings = (res.data as { warnings?: ComplaintWarning[] }).warnings;
+        const rawWarnings = res.data.warnings;
         setWarnings(Array.isArray(rawWarnings) ? rawWarnings : []);
       } else if (
         res.code === 'NOT_FOUND' ||
@@ -202,78 +206,54 @@ export default function ComplaintDetailPage(): React.ReactElement {
       ) {
         setIsNotFound(true);
       } else {
-        setFetchError(res.error || 'Failed to load complaint details');
+        setFetchError(res.error || 'Failed to load complaint details.');
       }
-    } catch {
-      setIsNotFound(true);
+    } catch (err: unknown) {
+      setFetchError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to load complaint details. Please check your connection and try again.'
+      );
     } finally {
       setIsLoading(false);
     }
   }, [complaintId]);
 
   useEffect(() => {
-    if (user && complaintId) {
+    if (!loading && user && (isOnboarded || isAdmin || isPrincipal) && complaintId) {
       void fetchComplaintDetails();
     }
-  }, [user, complaintId, fetchComplaintDetails]);
+  }, [loading, user, isOnboarded, isAdmin, isPrincipal, complaintId, fetchComplaintDetails]);
 
-  // Support complaint handler (with full toggle lifecycle: support / remove-support)
+  const applyDetailSupportState = useCallback(
+    (_id: string, snapshot: SupportStateSnapshot): void => {
+      setHasSupported(snapshot.has_supported);
+      setSupportCount(snapshot.support_count);
+    },
+    []
+  );
+
+  const { pendingMap: supportPendingMap, toggleSupport } = useSupportToggle({
+    applyState: applyDetailSupportState,
+    onError: (msg) => console.warn('[handleSupportClick]', msg),
+  });
+
+  // Support complaint handler (creator cannot toggle or remove baseline support)
   const handleSupportClick = async (_id?: string): Promise<void> => {
-    if (!complaintId) return;
+    if (!complaintId || !complaint) return;
+    const isCreatorCaller = Boolean(
+      user &&
+        ((user as { id?: string }).id === complaint.student_user_id ||
+          (user as { $id?: string }).$id === complaint.student_user_id)
+    );
+    if (isCreatorCaller || complaint.is_own_complaint) return;
 
-    const prevSupported = hasSupported;
-    const prevCount = supportCount;
-
-    if (hasSupported) {
-      // Optimistic revocation
-      setHasSupported(false);
-      setSupportCount((prev) => Math.max(1, prev - 1));
-
-      try {
-        const res = await apiRemoveSupport(complaintId);
-        if (res.success && res.data) {
-          setSupportCount(res.data.support_count);
-          setHasSupported(res.data.has_supported);
-        } else {
-          setHasSupported(prevSupported);
-          setSupportCount(prevCount);
-          if (res.error) {
-            console.warn('[handleSupportClick remove]', res.error);
-          }
-        }
-      } catch (err: unknown) {
-        setHasSupported(prevSupported);
-        setSupportCount(prevCount);
-        console.warn('[handleSupportClick remove] Network error:', err);
-      }
-    } else {
-      // Optimistic support
-      setHasSupported(true);
-      setSupportCount((prev) => prev + 1);
-
-      try {
-        const res = await apiSupportComplaint(complaintId);
-        if (res.success && res.data) {
-          setSupportCount(res.data.support_count);
-          setHasSupported(res.data.has_supported);
-        } else {
-          if (res.code === 'ALREADY_SUPPORTED') {
-            setHasSupported(true);
-            setSupportCount(prevCount);
-          } else {
-            setHasSupported(prevSupported);
-            setSupportCount(prevCount);
-          }
-          if (res.error) {
-            console.warn('[handleSupportClick add]', res.error);
-          }
-        }
-      } catch (err: unknown) {
-        setHasSupported(prevSupported);
-        setSupportCount(prevCount);
-        console.warn('[handleSupportClick add] Network error:', err);
-      }
-    }
+    await toggleSupport({
+      complaintId,
+      currentSupported: hasSupported,
+      currentCount: supportCount,
+      isOwnComplaint: isCreatorCaller || Boolean(complaint.is_own_complaint),
+    });
   };
 
   const handleDownloadAttachment = async (): Promise<void> => {
@@ -308,9 +288,11 @@ export default function ComplaintDetailPage(): React.ReactElement {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      setTimeout(() => {
+      const revokeTimer = setTimeout(() => {
         URL.revokeObjectURL(blobUrl);
+        revokeTimersRef.current.delete(revokeTimer);
       }, 1000);
+      revokeTimersRef.current.add(revokeTimer);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to download attachment.';
       setAttachmentError(msg);
@@ -408,6 +390,33 @@ export default function ComplaintDetailPage(): React.ReactElement {
     );
   }
 
+  const backHref = isPrincipal ? '/principal' : isAdmin ? '/admin' : '/dashboard';
+  const backLabel = isPrincipal
+    ? 'Principal Governance'
+    : isAdmin
+    ? 'Department Queue'
+    : 'Complaints Feed';
+
+  // Recoverable fetch error view (keep distinct from 404 Oracle view)
+  if (fetchError && !isNotFound && !complaint) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 dark:bg-gray-950">
+        <div className="w-full max-w-md space-y-4">
+          <ErrorState message={fetchError} onRetry={() => void fetchComplaintDetails()} />
+          <div className="flex justify-center">
+            <Link
+              href={backHref}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-xs transition hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              <ArrowLeft size={14} weight="bold" />
+              <span>Return to {backLabel}</span>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Oracle Elimination / 404 View
   if (isNotFound || !complaint) {
     return (
@@ -417,16 +426,15 @@ export default function ComplaintDetailPage(): React.ReactElement {
         </div>
         <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Grievance Not Found</h1>
         <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-slate-500 sm:text-sm dark:text-slate-400">
-          {fetchError ||
-            'The requested complaint record does not exist or is not available under your authorized institutional jurisdiction.'}
+          The requested complaint record does not exist or is not available under your authorized institutional jurisdiction.
         </p>
         <div className="mt-6">
           <Link
-            href={isAdmin ? '/admin' : '/dashboard'}
+            href={backHref}
             className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-2.5 text-xs font-bold text-white shadow-xs transition hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-700"
           >
             <ArrowLeft size={16} weight="bold" />
-            <span>Return to {isAdmin ? 'Admin Console' : 'Complaints Feed'}</span>
+            <span>Return to {backLabel}</span>
           </Link>
         </div>
       </div>
@@ -442,11 +450,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
       ((user as { id?: string }).id === complaint.student_user_id ||
         (user as { $id?: string }).$id === complaint.student_user_id)
   );
-  const hasClarificationRequest = timeline.some(
-    (entry) =>
-      entry.entry_type === 'clarification_request' ||
-      (entry.entry_type as string) === 'request_clarification'
-  );
+  const clarificationState = getClarificationState(timeline);
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
@@ -455,7 +459,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-3">
             <Link
-              href={isAdmin ? '/admin' : '/dashboard'}
+              href={backHref}
               className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
             >
               <ArrowLeft size={18} weight="bold" />
@@ -483,11 +487,11 @@ export default function ComplaintDetailPage(): React.ReactElement {
         {/* Navigation Back Link */}
         <div className="mb-6">
           <Link
-            href={isAdmin ? '/admin' : '/dashboard'}
+            href={backHref}
             className="group inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition hover:text-slate-900 sm:text-sm dark:text-slate-400 dark:hover:text-white"
           >
             <ArrowLeft size={16} weight="bold" className="transition-transform group-hover:-translate-x-0.5" />
-            <span>Back to {isAdmin ? 'Department Queue' : 'Complaints Feed'}</span>
+            <span>Back to {backLabel}</span>
           </Link>
         </div>
 
@@ -618,7 +622,8 @@ export default function ComplaintDetailPage(): React.ReactElement {
               </div>
               <div>
                 <p className="text-xs text-slate-900 sm:text-sm dark:text-white">
-                  <strong className="text-sm font-bold sm:text-base">{supportCount}</strong> students support this issue
+                  <strong className="text-sm font-bold sm:text-base">{supportCount}</strong>{' '}
+                  {supportCount === 1 ? 'student supports' : 'students support'} this issue
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Includes creator baseline and peer department support
@@ -631,7 +636,8 @@ export default function ComplaintDetailPage(): React.ReactElement {
               supportCount={supportCount}
               hasSupported={hasSupported}
               onToggleSupport={handleSupportClick}
-              disabled={isCreator}
+              disabled={isCreator || Boolean(supportPendingMap[complaint.$id])}
+              disabledReason={isCreator ? 'Creator baseline support cannot be removed' : undefined}
               variant="detail"
             />
           </div>
@@ -697,13 +703,15 @@ export default function ComplaintDetailPage(): React.ReactElement {
                         {w.warning_reason}
                       </p>
 
-                      {w.admin_response ? (
+                      {getWarningState(w) === 'responded' ? (
                         <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
                           <div className="flex items-center justify-between text-[11px] font-semibold text-amber-900 dark:text-amber-300">
                             <span>Maintenance Administrator Response:</span>
                             {w.responded_at && <span>{formatTimelineDate(w.responded_at)}</span>}
                           </div>
-                          <p className="mt-1 text-slate-800 dark:text-slate-200">{w.admin_response}</p>
+                          {w.admin_response && (
+                            <p className="mt-1 text-slate-800 dark:text-slate-200">{w.admin_response}</p>
+                          )}
                         </div>
                       ) : (
                         <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-xs dark:border-slate-800">
@@ -717,7 +725,7 @@ export default function ComplaintDetailPage(): React.ReactElement {
                                 setSelectedWarningForResponse(w);
                                 setIsRespondWarningModalOpen(true);
                               }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-200 dark:bg-amber-900/60 dark:text-amber-200"
+                              className="inline-flex items-center gap-1 rounded-lg bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-200 dark:bg-amber-900/60 dark:text-amber-200 dark:hover:bg-amber-900"
                             >
                               <ChatText size={12} weight="bold" />
                               <span>Respond to Warning</span>
@@ -759,14 +767,16 @@ export default function ComplaintDetailPage(): React.ReactElement {
 
                 {isAdmin && (
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setIsClarificationModalOpen(true)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-1.5 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 active:scale-95 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/50"
-                    >
-                      <Question size={14} weight="bold" />
-                      <span>Request Clarification</span>
-                    </button>
+                    {complaint.status !== 'Resolved' && (
+                      <button
+                        type="button"
+                        onClick={() => setIsClarificationModalOpen(true)}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-1.5 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 active:scale-95 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300 dark:hover:bg-amber-900/50"
+                      >
+                        <Question size={14} weight="bold" />
+                        <span>Request Clarification</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setIsResolutionModalOpen(true)}
@@ -875,12 +885,17 @@ export default function ComplaintDetailPage(): React.ReactElement {
               </div>
             )}
 
-            {/* Student Clarification Reply Interface (Complaint Author Only) */}
-            {isCreator && hasClarificationRequest && complaint.status !== 'Resolved' && (
+            {/* Student Clarification Reply Interface (Turn-Based Author Only) */}
+            {isCreator && complaint.status !== 'Resolved' && clarificationState === 'awaiting_reply' && (
               <ClarificationReplyBox
                 complaintId={complaint.$id}
                 onSubmit={handleClarificationReplySubmit}
               />
+            )}
+            {isCreator && complaint.status !== 'Resolved' && clarificationState === 'replied' && (
+              <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 text-xs font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
+                Clarification reply submitted. If the maintenance administrator requests additional details later, the reply box will reopen here.
+              </div>
             )}
           </section>
         </article>

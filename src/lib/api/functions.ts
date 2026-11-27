@@ -9,12 +9,15 @@ import type {
   ComplaintAttachmentData,
   ComplaintStatus,
   ComplaintTimeline,
+  ClarificationState,
   AdminMetrics,
   PhoneChangeRequest,
   ComplaintWarning,
   PrincipalDashboardData,
   DepartmentAdminAssignment,
   AuditLog,
+  CreateDepartmentInput,
+  UpdateDepartmentInput,
 } from '../../types';
 import type {
   OnboardingInput,
@@ -26,91 +29,107 @@ export async function executeFunction<T>(
   action: string,
   data: Record<string, unknown> = {}
 ): Promise<ApiResponse<T>> {
-  try {
-    const jwt = await createJWT();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (jwt) {
-      headers['Authorization'] = `Bearer ${jwt}`;
-    }
+  const isReadOnlyAction = action.startsWith('get-') || action.startsWith('list-');
+  // Read-only actions retry transient 5xx/network + 401 JWT refresh;
+  // mutations retry once only when pre-handler JWT verification returns 401 UNAUTHORIZED.
+  const maxAttempts = 2;
 
-    const payload = JSON.stringify({
-      action,
-      data,
-      jwt: jwt || undefined,
-    });
-
-    const execution = await functions.createExecution(
-      APPWRITE_CONFIG.functionId,
-      payload,
-      false, // synchronous execution
-      '/',
-      ExecutionMethod.POST,
-      headers
-    );
-
-    if (execution.status === 'failed' || execution.responseStatusCode >= 400) {
-      if (execution.responseStatusCode === 401) {
-        clearCachedJWT();
-      }
-      let errorMsg = `Serverless function execution failed with status ${execution.responseStatusCode} (${execution.status})`;
-      let errorCode = 'FUNCTION_ERROR';
-
-      if (execution.responseBody && execution.responseBody.trim().length > 0) {
-        try {
-          const parsed = JSON.parse(execution.responseBody) as Record<string, unknown>;
-          if (parsed && typeof parsed.error === 'string') {
-            errorMsg = parsed.error;
-          }
-          if (parsed && typeof parsed.code === 'string') {
-            errorCode = parsed.code;
-          }
-        } catch {
-          errorMsg = execution.responseBody;
-        }
-      } else if (execution.errors && execution.errors.trim().length > 0) {
-        errorMsg = execution.errors;
-      }
-
-      return {
-        success: false,
-        error: errorMsg,
-        code: errorCode,
-      };
-    }
-
-    let parsedResponse: ApiResponse<T>;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      parsedResponse = JSON.parse(execution.responseBody) as ApiResponse<T>;
-    } catch {
-      return {
-        success: false,
-        error: execution.responseBody || 'Invalid JSON response from serverless function',
-        code: 'PARSE_ERROR',
+      const jwt = await createJWT();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
       };
-    }
-
-    if (!parsedResponse.success) {
-      if (parsedResponse.code === 'UNAUTHORIZED') {
-        clearCachedJWT();
+      if (jwt) {
+        headers['Authorization'] = `Bearer ${jwt}`;
       }
+
+      const payload = JSON.stringify({
+        action,
+        data,
+        jwt: jwt || undefined,
+      });
+
+      const execution = await functions.createExecution(
+        APPWRITE_CONFIG.functionId,
+        payload,
+        false, // synchronous execution
+        '/',
+        ExecutionMethod.POST,
+        headers
+      );
+
+      if (!execution.responseBody || !execution.responseBody.trim()) {
+        const execMeta = execution as { status?: string; errors?: string };
+        return {
+          success: false,
+          error:
+            execMeta.errors?.trim() ||
+            (execMeta.status === 'failed'
+              ? 'Serverless function execution failed without a response payload.'
+              : 'Empty response from serverless function'),
+          code: 'EXECUTION_FAILED',
+        };
+      }
+
+      let parsedResponse: ApiResponse<T>;
+      try {
+        parsedResponse = JSON.parse(execution.responseBody) as ApiResponse<T>;
+      } catch {
+        return {
+          success: false,
+          error: execution.responseBody || 'Invalid JSON response from serverless function',
+          code: 'PARSE_ERROR',
+        };
+      }
+
+      if (execution.responseStatusCode >= 400 || !parsedResponse.success) {
+        const isAuthFailure =
+          execution.responseStatusCode === 401 || parsedResponse.code === 'UNAUTHORIZED';
+        const isTransientAuthVerifyFailure =
+          execution.responseStatusCode >= 500 && parsedResponse.code === 'INTERNAL_ERROR';
+
+        if (isAuthFailure) {
+          clearCachedJWT();
+        }
+
+        const canRetryAuthRefresh = isAuthFailure && Boolean(jwt);
+        const canRetryTransient = isReadOnlyAction && isTransientAuthVerifyFailure;
+
+        if (attempt < maxAttempts && (canRetryAuthRefresh || canRetryTransient)) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
+        }
+
+        return {
+          success: false,
+          error:
+            parsedResponse.error || `Request failed with status ${execution.responseStatusCode}`,
+          code: parsedResponse.code || 'FUNCTION_ERROR',
+          ...(parsedResponse.data !== undefined ? { data: parsedResponse.data } : {}),
+        };
+      }
+
+      return parsedResponse;
+    } catch (err: unknown) {
+      if (attempt < maxAttempts && isReadOnlyAction) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        continue;
+      }
+      const message = err instanceof Error ? err.message : 'Unknown network failure';
       return {
         success: false,
-        error: parsedResponse.error || `Request failed with status ${execution.responseStatusCode}`,
-        code: parsedResponse.code || 'FUNCTION_ERROR',
+        error: message,
+        code: 'NETWORK_ERROR',
       };
     }
-
-    return parsedResponse;
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown network failure';
-    return {
-      success: false,
-      error: message,
-      code: 'NETWORK_ERROR',
-    };
   }
+
+  return {
+    success: false,
+    error: 'Unexpected execution failure',
+    code: 'NETWORK_ERROR',
+  };
 }
 
 // ----------------------------------------------------
@@ -135,6 +154,46 @@ export async function apiCompleteOnboarding(
 
 export async function apiListDepartments(): Promise<ApiResponse<{ departments: Department[] }>> {
   return executeFunction<{ departments: Department[] }>('list-departments');
+}
+
+export async function apiCreateDepartment(
+  input: CreateDepartmentInput
+): Promise<ApiResponse<{ department: Department; assignments?: DepartmentAdminAssignment[] }>> {
+  return executeFunction<{ department: Department; assignments?: DepartmentAdminAssignment[] }>(
+    'create-department',
+    {
+      name: input.name,
+      code: input.code,
+      admin_email: input.admin_email,
+      scopes: input.scopes,
+    }
+  );
+}
+
+export async function apiUpdateDepartment(
+  input: UpdateDepartmentInput
+): Promise<ApiResponse<{ department: Department; assignments?: DepartmentAdminAssignment[] }>> {
+  return executeFunction<{ department: Department; assignments?: DepartmentAdminAssignment[] }>(
+    'update-department',
+    {
+      department_id: input.department_id,
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.code !== undefined ? { code: input.code } : {}),
+      ...(input.admin_email !== undefined ? { admin_email: input.admin_email } : {}),
+      ...(input.scopes !== undefined ? { scopes: input.scopes } : {}),
+    }
+  );
+}
+
+export async function apiDeleteDepartment(
+  departmentId: string
+): Promise<ApiResponse<{ department: Department; revoked_assignment_ids?: string[] }>> {
+  return executeFunction<{ department: Department; revoked_assignment_ids?: string[] }>(
+    'delete-department',
+    {
+      department_id: departmentId,
+    }
+  );
 }
 
 // ----------------------------------------------------
@@ -173,11 +232,21 @@ export async function apiCreateComplaint(
 
 export async function apiGetComplaint(
   complaintId: string
-): Promise<ApiResponse<{ complaint: Complaint; timeline: ComplaintTimeline[]; has_supported: boolean }>> {
+): Promise<
+  ApiResponse<{
+    complaint: Complaint;
+    timeline: ComplaintTimeline[];
+    has_supported: boolean;
+    clarification_state?: ClarificationState;
+    warnings?: ComplaintWarning[];
+  }>
+> {
   return executeFunction<{
     complaint: Complaint;
     timeline: ComplaintTimeline[];
     has_supported: boolean;
+    clarification_state?: ClarificationState;
+    warnings?: ComplaintWarning[];
   }>('get-complaint', {
     complaint_id: complaintId,
   });

@@ -5,6 +5,7 @@ import { appendAuditLog } from './audit.js';
 import {
   PHONE_NUMBER_REGEX,
   isAcademicDepartment,
+  isComplaintDelayed,
   normalizeComplaintStatus,
   readBooleanField,
   readNumberField,
@@ -14,6 +15,14 @@ import {
   type DatabaseClientLike,
   type StorageClientLike,
 } from '../departments.js';
+import {
+  getClarificationState,
+  getWarningState,
+  isMeaningfulComplaintUpdate,
+  validateClarificationReply,
+  validateClarificationRequest,
+  validateComplaintStatusTransition,
+} from '../stateMachines.js';
 import type {
   AcademicDepartmentId,
   AdminMetrics,
@@ -46,21 +55,7 @@ export function isDelayed(complaint: {
   created_at: string;
   last_meaningful_update_at: string;
 }): boolean {
-  const status = complaint.status;
-  if (status === 'Resolved' || status === 'resolved') return false;
-  const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
-  const now = new Date();
-  if (status === 'Pending' || status === 'pending' || status === 'open') {
-    const time = new Date(complaint.created_at).getTime();
-    if (isNaN(time)) return false;
-    return now.getTime() - time > FIVE_DAYS_MS;
-  }
-  if (status === 'In Progress' || status === 'in_progress') {
-    const time = new Date(complaint.last_meaningful_update_at || complaint.created_at).getTime();
-    if (isNaN(time)) return false;
-    return now.getTime() - time > FIVE_DAYS_MS;
-  }
-  return false;
+  return isComplaintDelayed(complaint);
 }
 const MIME_TO_EXTENSIONS: Record<string, readonly string[]> = {
   'application/pdf': ['pdf'],
@@ -664,8 +659,15 @@ function resolveAuthorizedMaintenanceDeptIds(caller: AuthenticatedCaller): strin
       (assignment.user_id === caller.id || !assignment.user_id)
     ) {
       const dept = resolveDepartment(assignment.department_id);
-      if (dept && dept.is_maintenance && dept.is_active) {
-        ids.add(dept.id);
+      if (dept) {
+        if (dept.is_maintenance && dept.is_active) {
+          ids.add(dept.id);
+        }
+      } else if (typeof assignment.department_id === 'string') {
+        const trimmed = assignment.department_id.trim();
+        if (trimmed) {
+          ids.add(trimmed);
+        }
       }
     }
   }
@@ -837,42 +839,67 @@ export async function handleCreateComplaint(
       );
     }
 
-    // 3. Validate maintenance department selection against active 6 maintenance departments
+    // 3. Validate maintenance department selection against active maintenance departments
     const rawMaintDeptId =
       typeof data.maintenance_department_id === 'string'
         ? data.maintenance_department_id.trim()
         : '';
-    const maintenanceDept = resolveDepartment(rawMaintDeptId);
+    let maintenanceDept = resolveDepartment(rawMaintDeptId);
+
+    if (maintenanceDept) {
+      let dbIsMaintenance: boolean | undefined;
+      let dbIsActive: boolean | undefined;
+      try {
+        const deptDoc = await databases.getDocument(
+          config.databaseId,
+          config.departmentsCollectionId,
+          maintenanceDept.id
+        );
+        dbIsMaintenance = readBooleanField(deptDoc, 'is_maintenance');
+        dbIsActive = readBooleanField(deptDoc, 'is_active');
+      } catch {
+        // Departments collection may not be seeded in unit mocks or pre-migration DB
+      }
+
+      if (
+        !(dbIsMaintenance ?? maintenanceDept.is_maintenance) ||
+        !(dbIsActive ?? maintenanceDept.is_active)
+      ) {
+        return res.json(
+          {
+            success: false,
+            error: 'Please select a valid active maintenance department.',
+            code: 'INVALID_MAINTENANCE_DEPARTMENT',
+          },
+          400
+        );
+      }
+    } else if (rawMaintDeptId) {
+      try {
+        const deptDoc = await databases.getDocument(
+          config.databaseId,
+          config.departmentsCollectionId,
+          rawMaintDeptId
+        );
+        const isMaintenance = readBooleanField(deptDoc, 'is_maintenance') === true;
+        const isActive = readBooleanField(deptDoc, 'is_active') === true;
+        if (isMaintenance && isActive) {
+          const name = readStringField(deptDoc, 'name') || rawMaintDeptId;
+          const isAcademic = readBooleanField(deptDoc, 'is_academic') === true;
+          maintenanceDept = {
+            id: deptDoc.$id,
+            name,
+            is_academic: isAcademic,
+            is_maintenance: true,
+            is_active: true,
+          };
+        }
+      } catch {
+        // Department document not found or query error
+      }
+    }
 
     if (!maintenanceDept) {
-      return res.json(
-        {
-          success: false,
-          error: 'Please select a valid active maintenance department.',
-          code: 'INVALID_MAINTENANCE_DEPARTMENT',
-        },
-        400
-      );
-    }
-
-    let dbIsMaintenance: boolean | undefined;
-    let dbIsActive: boolean | undefined;
-    try {
-      const deptDoc = await databases.getDocument(
-        config.databaseId,
-        config.departmentsCollectionId,
-        maintenanceDept.id
-      );
-      dbIsMaintenance = readBooleanField(deptDoc, 'is_maintenance');
-      dbIsActive = readBooleanField(deptDoc, 'is_active');
-    } catch {
-      // Departments collection may not be seeded in unit mocks or pre-migration DB
-    }
-
-    if (
-      !(dbIsMaintenance ?? maintenanceDept.is_maintenance) ||
-      !(dbIsActive ?? maintenanceDept.is_active)
-    ) {
       return res.json(
         {
           success: false,
@@ -1459,6 +1486,8 @@ export async function handleGetComplaint(
       hasSupported = false;
     }
 
+    const clarificationState = getClarificationState(rawTimeline);
+
     let warnings: ComplaintWarning[] = [];
     if (includePrivateDetails) {
       try {
@@ -1467,16 +1496,24 @@ export async function handleGetComplaint(
           config.warningsCollectionId,
           [Query.equal('complaint_id', complaintId), Query.orderAsc('created_at')]
         );
-        warnings = warningsResult.documents.map((wDoc) => ({
-          $id: wDoc.$id,
-          complaint_id: readStringField(wDoc, 'complaint_id'),
-          issued_by_principal_id: readStringField(wDoc, 'issued_by_principal_id'),
-          warning_reason: readStringField(wDoc, 'warning_reason'),
-          days_delayed: readNumberField(wDoc, 'days_delayed') ?? 0,
-          admin_response: readStringField(wDoc, 'admin_response') || undefined,
-          responded_at: readStringField(wDoc, 'responded_at') || undefined,
-          created_at: readStringField(wDoc, 'created_at') || wDoc.$createdAt,
-        }));
+        warnings = warningsResult.documents.map((wDoc) => {
+          const adminResponse = readStringField(wDoc, 'admin_response') || undefined;
+          const respondedAt = readStringField(wDoc, 'responded_at') || undefined;
+          return {
+            $id: wDoc.$id,
+            complaint_id: readStringField(wDoc, 'complaint_id'),
+            issued_by_principal_id: readStringField(wDoc, 'issued_by_principal_id'),
+            warning_reason: readStringField(wDoc, 'warning_reason'),
+            days_delayed: readNumberField(wDoc, 'days_delayed') ?? 0,
+            admin_response: adminResponse,
+            responded_at: respondedAt,
+            state: getWarningState({
+              admin_response: adminResponse,
+              responded_at: respondedAt,
+            }),
+            created_at: readStringField(wDoc, 'created_at') || wDoc.$createdAt,
+          };
+        });
       } catch {
         warnings = [];
       }
@@ -1489,6 +1526,7 @@ export async function handleGetComplaint(
           complaint: {
             ...projectedComplaint,
             support_count: trueSupportCount,
+            clarification_state: clarificationState,
             is_delayed: isDelayed({
               status: complaint.status,
               created_at: complaint.created_at || (doc.$createdAt as string) || '',
@@ -1501,6 +1539,7 @@ export async function handleGetComplaint(
           },
           timeline: projectedTimeline,
           has_supported: hasSupported,
+          clarification_state: clarificationState,
           warnings,
         },
       },
@@ -1653,17 +1692,38 @@ export async function handleSupportComplaint(
       existingDoc = null;
     }
 
+    const buildAlreadySupportedResponse = async (): Promise<unknown> => {
+      let currentSupportCount = Math.max(1, complaint.support_count);
+      try {
+        const activeSupports = await databases.listDocuments(
+          config.databaseId,
+          config.supportsCollectionId,
+          [Query.equal('complaint_id', complaintId), Query.equal('status', 'active'), Query.limit(1)]
+        );
+        currentSupportCount = 1 + activeSupports.total;
+      } catch {
+        // Fallback to stored complaint support count
+      }
+      return res.json(
+        {
+          success: false,
+          error: 'You have already supported this complaint.',
+          code: 'ALREADY_SUPPORTED',
+          data: {
+            support_count: currentSupportCount,
+            has_supported: true,
+          },
+        },
+        409
+      );
+    };
+
+    const previousRevokedAt = existingDoc ? readStringField(existingDoc, 'revoked_at') : '';
+
     if (existingDoc) {
       const currentStatus = readStringField(existingDoc, 'status') || 'active';
       if (currentStatus === 'active') {
-        return res.json(
-          {
-            success: false,
-            error: 'You have already supported this complaint.',
-            code: 'ALREADY_SUPPORTED',
-          },
-          409
-        );
+        return buildAlreadySupportedResponse();
       }
       // Re-support lifecycle: reactivate revoked support record
       await databases.updateDocument(
@@ -1692,14 +1752,7 @@ export async function handleSupportComplaint(
       } catch (insertErr: unknown) {
         const errObj = insertErr as { code?: number; message?: string };
         if (errObj?.code === 409 || errObj?.message?.includes('already exists')) {
-          return res.json(
-            {
-              success: false,
-              error: 'You have already supported this complaint.',
-              code: 'ALREADY_SUPPORTED',
-            },
-            409
-          );
+          return buildAlreadySupportedResponse();
         }
         throw insertErr;
       }
@@ -1731,7 +1784,11 @@ export async function handleSupportComplaint(
           config.databaseId,
           config.supportsCollectionId,
           supportDocId,
-          { status: 'revoked' }
+          {
+            status: 'revoked',
+            ...(previousRevokedAt ? { revoked_at: previousRevokedAt } : {}),
+            updated_at: new Date().toISOString(),
+          }
         ).catch(() => undefined);
       }
       throw updateErr;
@@ -1966,6 +2023,8 @@ export async function handleRemoveSupport(
         supportDocId,
         {
           status: 'active',
+          revoked_at: '',
+          updated_at: new Date().toISOString(),
         }
       ).catch(() => undefined);
       throw updateErr;
@@ -2210,7 +2269,7 @@ export async function handleGetAdminDashboard(
   const primaryDeptId = authorizedMaintDeptIds[0];
   const adminDept = primaryDeptId ? resolveDepartment(primaryDeptId) : null;
 
-  if (caller.role !== 'department_admin' || authorizedMaintDeptIds.length === 0 || !adminDept) {
+  if (caller.role !== 'department_admin' || authorizedMaintDeptIds.length === 0) {
     return res.json(
       {
         success: false,
@@ -2247,7 +2306,7 @@ export async function handleGetAdminDashboard(
       total_open: pendingRes.total,
       total_in_progress: inProgRes.total,
       total_resolved: resolvedRes.total,
-      department_id: adminDept.id,
+      department_id: adminDept ? adminDept.id : primaryDeptId,
     };
 
     return res.json(
@@ -2305,12 +2364,14 @@ export async function handleListAdminComplaints(
     const normalizedStatus = normalizeComplaintStatus(data.status);
     const page = typeof data.page === 'number' && data.page > 0 ? data.page : 1;
     const limit = typeof data.limit === 'number' && data.limit > 0 && data.limit <= 50 ? data.limit : 20;
+    const offset = (page - 1) * limit;
 
     const queries = [
       Query.equal('maintenance_department_id', maintDeptFilter),
       ...(normalizedStatus ? [Query.equal('status', normalizedStatus)] : []),
       Query.orderDesc('$createdAt'),
-      Query.limit(limit * 2),
+      Query.limit(limit),
+      Query.offset(offset),
     ];
 
     const result = await databases.listDocuments(
@@ -2322,14 +2383,45 @@ export async function handleListAdminComplaints(
     const allComplaints = result.documents
       .map((doc) => mapDocToComplaint(doc))
       .filter((c) => authorizedMaintDeptIds.includes(c.maintenance_department_id));
-    const total = allComplaints.length;
-    const startIndex = (page - 1) * limit;
-    const pageSlice = allComplaints.slice(startIndex, startIndex + limit);
+    const total = typeof result.total === 'number' ? result.total : allComplaints.length;
+    const serverAlreadyPaginated =
+      result.documents.length <= limit &&
+      result.documents.length <= Math.max(0, total - offset);
+    const pageSlice = serverAlreadyPaginated
+      ? allComplaints
+      : allComplaints.slice(offset, offset + limit);
+
     const summaryMap = await fetchLatestTimelineSummariesForComplaints(databases, config, pageSlice);
+    const warningCountMap = new Map<string, number>();
+    const pageIds = pageSlice
+      .map((c) => c.$id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (pageIds.length > 0 && config.warningsCollectionId) {
+      try {
+        const warningsResult = await databases.listDocuments(
+          config.databaseId,
+          config.warningsCollectionId,
+          [
+            Query.equal('complaint_id', pageIds),
+            Query.limit(Math.max(100, pageIds.length * 10)),
+          ]
+        );
+        for (const wDoc of warningsResult.documents) {
+          const cid = readStringField(wDoc, 'complaint_id');
+          if (cid) {
+            warningCountMap.set(cid, (warningCountMap.get(cid) ?? 0) + 1);
+          }
+        }
+      } catch {
+        // Non-blocking fallback when warnings collection is unavailable
+      }
+    }
+
     const paginatedComplaints = pageSlice.map((c) => {
       const summary = c.$id ? summaryMap.get(c.$id) : undefined;
       return {
         ...c,
+        warning_count: c.$id ? warningCountMap.get(c.$id) ?? 0 : 0,
         is_delayed: isDelayed({
           status: c.status,
           created_at: c.created_at || '',
@@ -2510,27 +2602,37 @@ export async function handleUpdateAdminComplaint(
 
     const existingStatus = normalizeComplaintStatus(existing.status) ?? 'Pending';
     const statusChanged = existingStatus !== normalizedStatus;
+    const transitionCheck = validateComplaintStatusTransition(existingStatus, normalizedStatus);
 
-    if (statusChanged && normalizedStatus === 'Pending') {
+    if (!transitionCheck.allowed) {
       return res.json(
         {
           success: false,
-          error: "Cannot revert an 'In Progress' or 'Resolved' complaint back to 'Pending'.",
-          code: 'INVALID_STATUS_TRANSITION',
+          error: transitionCheck.error || 'Invalid status transition.',
+          code: transitionCheck.code || 'INVALID_STATUS_TRANSITION',
         },
         400
       );
     }
 
-    const now = new Date().toISOString();
-    const responseTimestamp = now;
+    const existingUpdatedMs = Math.max(
+      Date.parse(existing.updated_at || '') || 0,
+      Date.parse(existing.last_meaningful_update_at || '') || 0
+    );
+    const baseMs = Math.max(Date.now(), existingUpdatedMs + 1);
+    const now = new Date(baseMs).toISOString();
+    const responseTimestamp = statusChanged ? new Date(baseMs + 1).toISOString() : now;
+    const finalTimestamp = statusChanged ? responseTimestamp : now;
     const noteEntryType: TimelineEntryType = requestedSubstantive
       ? 'progress_update'
       : 'admin_response';
 
-    // Pending-to-Pending notes do not reset the meaningful activity timer unless accompanied by substantive progress.
-    const isMeaningfulUpdate =
-      statusChanged || (existingStatus !== 'Resolved' && requestedSubstantive);
+    // Pending-to-Pending and Resolved-to-Resolved notes never reset the SLA timer.
+    const isMeaningfulUpdate = isMeaningfulComplaintUpdate(
+      existingStatus,
+      normalizedStatus,
+      requestedSubstantive
+    );
 
     const timelinePayloads: Array<Record<string, unknown>> = [];
     if (statusChanged) {
@@ -2579,9 +2681,9 @@ export async function handleUpdateAdminComplaint(
 
     // Update only status/lifecycle metadata on complaints; original complaint content stays immutable.
     const complaintPatch: Record<string, unknown> = {
-      updated_at: now,
+      updated_at: finalTimestamp,
       ...(statusChanged ? { status: normalizedStatus } : {}),
-      ...(isMeaningfulUpdate ? { last_meaningful_update_at: now } : {}),
+      ...(isMeaningfulUpdate ? { last_meaningful_update_at: finalTimestamp } : {}),
     };
 
     let updatedDoc: Models.Document;
@@ -2973,6 +3075,18 @@ export async function handleRequestClarification(
       );
     }
 
+    const clarificationCheck = validateClarificationRequest(complaint.status);
+    if (!clarificationCheck.allowed) {
+      return res.json(
+        {
+          success: false,
+          error: clarificationCheck.error || 'Cannot request clarification on this complaint.',
+          code: clarificationCheck.code || 'COMPLAINT_ALREADY_RESOLVED',
+        },
+        400
+      );
+    }
+
     const maintDept = resolveDepartment(complaint.maintenance_department_id);
     const authorLabel = maintDept?.name
       ? `${maintDept.name} Maintenance Admin`
@@ -3135,6 +3249,19 @@ export async function handleReplyClarification(
           code: 'FORBIDDEN',
         },
         403
+      );
+    }
+
+    const existingTimeline = await fetchComplaintTimeline(databases, config, complaintId);
+    const replyCheck = validateClarificationReply(complaint.status, existingTimeline);
+    if (!replyCheck.allowed) {
+      return res.json(
+        {
+          success: false,
+          error: replyCheck.error || 'Cannot reply to clarification.',
+          code: replyCheck.code || 'NO_ACTIVE_CLARIFICATION_REQUEST',
+        },
+        400
       );
     }
 

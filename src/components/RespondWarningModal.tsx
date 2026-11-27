@@ -10,6 +10,7 @@ export interface RespondWarningModalProps {
   complaintTitle?: string;
   warningReason?: string;
   daysDelayed?: number;
+  isAlreadyResponded?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }
@@ -20,6 +21,7 @@ export function RespondWarningModal({
   complaintTitle,
   warningReason,
   daysDelayed,
+  isAlreadyResponded = false,
   onClose,
   onSuccess,
 }: RespondWarningModalProps): React.ReactElement | null {
@@ -27,21 +29,25 @@ export function RespondWarningModal({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isSubmittingRef = useRef<boolean>(false);
 
   useEffect(() => {
-    if (isOpen) {
-      setAdminResponse('');
-      setErrorMessage(null);
-      setIsSubmitting(false);
-      setTimeout(() => {
-        textareaRef.current?.focus();
-      }, 50);
-    }
-  }, [isOpen, warningId]);
+    if (!isOpen) return;
+    setAdminResponse('');
+    setErrorMessage(
+      isAlreadyResponded ? 'A formal response has already been recorded for this warning.' : null
+    );
+    setIsSubmitting(false);
+    isSubmittingRef.current = false;
+    const focusTimer = setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
+    return (): void => clearTimeout(focusTimer);
+  }, [isOpen, warningId, isAlreadyResponded]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && isOpen && !isSubmitting) {
+      if (e.key === 'Escape' && isOpen && !isSubmittingRef.current && !isSubmitting) {
         onClose();
       }
     };
@@ -56,11 +62,17 @@ export function RespondWarningModal({
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
+    if (isSubmittingRef.current || isSubmitting) return;
+    if (isAlreadyResponded) {
+      setErrorMessage('A formal response has already been recorded for this warning.');
+      return;
+    }
     if (!isValidLength) {
       setErrorMessage('Response must be at least 10 characters (and up to 2000 characters).');
       return;
     }
     setErrorMessage(null);
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
 
     try {
@@ -71,16 +83,16 @@ export function RespondWarningModal({
 
       if (!res.success) {
         setErrorMessage(res.error || 'Failed to submit response.');
-        setIsSubmitting(false);
         return;
       }
 
-      setIsSubmitting(false);
       onSuccess();
       onClose();
     } catch (err) {
-      setIsSubmitting(false);
       setErrorMessage(err instanceof Error ? err.message : 'Network error submitting response.');
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -89,6 +101,11 @@ export function RespondWarningModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="respond-warning-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !isSubmittingRef.current && !isSubmitting) {
+          onClose();
+        }
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150"
     >
       <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">

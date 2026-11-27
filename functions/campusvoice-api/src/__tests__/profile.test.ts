@@ -8,6 +8,12 @@ import {
   handleListDepartments,
 } from '../handlers/profile.js';
 import {
+  handleCreateDepartment,
+  handleDeleteDepartment,
+  handleRevokeAdmin,
+  handleUpdateDepartment,
+} from '../handlers/principal.js';
+import {
   ENROLLMENT_CODE_MAPPINGS,
   INSTITUTIONAL_DEPARTMENTS,
   canApprovePhoneChange,
@@ -980,4 +986,978 @@ test('Step 10 (Scenario 10): Valid Student onboarding works end-to-end through v
   assert.equal(prof2Data.is_onboarded, true);
   assert.equal(prof2Data.profile.role, 'student');
   assert.equal(prof2Data.profile.student_department_id, 'dept_elec');
+});
+
+test('verifyCaller retries transient network failures and fails closed when persistent', async () => {
+  const { databases } = createInMemoryDb({
+    department_admins: [
+      {
+        $id: 'da_retry_admin',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_retry_admin',
+        email: 'retry.admin@college.edu',
+        department_id: 'dept_comp',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal',
+        created_at: '2026-11-10T00:00:00.000Z',
+      },
+    ],
+  });
+
+  // 1. Transient failure on first department_admins listDocuments recovers on retry
+  let adminAttempts = 0;
+  const flakyAdminDb: DatabaseClientLike = {
+    ...databases,
+    async listDocuments(dbId, collectionId, queries) {
+      if (collectionId === 'department_admins') {
+        adminAttempts++;
+        if (adminAttempts === 1) {
+          throw new TypeError('fetch failed');
+        }
+      }
+      return databases.listDocuments(dbId, collectionId, queries);
+    },
+  };
+
+  const recoveredAuth = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_retry_ok' }).context,
+    undefined,
+    {
+      databases: flakyAdminDb,
+      verifyJwt: async () => ({
+        $id: 'usr_retry_admin',
+        email: 'retry.admin@college.edu',
+        name: 'Retry Admin',
+      }),
+    }
+  );
+  assert.ok(recoveredAuth.caller);
+  assert.equal(recoveredAuth.caller.role, 'department_admin');
+  assert.equal(adminAttempts, 2);
+
+  // 2. Transient HTTP 503 on profiles query for student recovers on retry
+  let profileAttempts = 0;
+  const flakyStudentDb: DatabaseClientLike = {
+    ...databases,
+    async listDocuments(dbId, collectionId, queries) {
+      if (collectionId === 'profiles') {
+        profileAttempts++;
+        if (profileAttempts === 1) {
+          const err = new Error('Service Unavailable') as Error & { code: number };
+          err.code = 503;
+          throw err;
+        }
+      }
+      return databases.listDocuments(dbId, collectionId, queries);
+    },
+  };
+
+  const recoveredStudentAuth = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_student_retry' }).context,
+    undefined,
+    {
+      databases: flakyStudentDb,
+      verifyJwt: async () => ({
+        $id: 'usr_retry_student',
+        email: 'retry.student@college.edu',
+        name: 'Retry Student',
+      }),
+    }
+  );
+  assert.ok(recoveredStudentAuth.caller);
+  assert.equal(recoveredStudentAuth.caller.role, 'student');
+  assert.equal(profileAttempts, 2);
+
+  // 3. Persistent transient failure exhausts retries and still fails closed with 500
+  const alwaysFlakyDb: DatabaseClientLike = {
+    ...databases,
+    async listDocuments(dbId, collectionId, queries) {
+      if (collectionId === 'profiles') {
+        throw new TypeError('fetch failed');
+      }
+      return databases.listDocuments(dbId, collectionId, queries);
+    },
+  };
+
+  const failedAuth = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_student_fail' }).context,
+    undefined,
+    {
+      databases: alwaysFlakyDb,
+      verifyJwt: async () => ({
+        $id: 'usr_retry_student',
+        email: 'retry.student@college.edu',
+        name: 'Retry Student',
+      }),
+    }
+  );
+  assert.equal(failedAuth.caller, null);
+  assert.equal(failedAuth.statusCode, 500);
+});
+
+test('Regression: Revoked auto-provisioned admin can complete student onboarding without PROFILE_ALREADY_LOCKED deadlock', async () => {
+  const { databases } = createInMemoryDb({
+    department_admins: [
+      {
+        $id: 'da_stub_revoke',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'revoked.stub@college.edu',
+        department_id: 'dept_comp',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: '2026-11-10T00:00:00.000Z',
+      },
+    ],
+  });
+
+  // 1. User logs in as assigned Computer Maintenance Admin -> auto-provisions schema-safe locked stub
+  const adminAuth = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_stub_admin' }).context,
+    undefined,
+    {
+      databases,
+      verifyJwt: async () => ({
+        $id: 'usr_stub_reboard',
+        email: 'revoked.stub@college.edu',
+        name: 'Temporary Admin',
+      }),
+    }
+  );
+  assert.ok(adminAuth.caller);
+  assert.equal(adminAuth.caller.role, 'department_admin');
+
+  const adminProfCtx = createMockContext();
+  await handleGetProfile(adminProfCtx.context, adminAuth.caller, { databases });
+  assert.equal(adminProfCtx.getResponse().statusCode, 200);
+  const adminProfData = adminProfCtx.getResponse().body.data as {
+    is_onboarded: boolean;
+    profile: { role: string; name: string; admin_assignments?: Array<{ scope: string }> };
+  };
+  assert.equal(adminProfData.is_onboarded, true);
+  assert.equal(adminProfData.profile.role, 'department_admin');
+  assert.equal(adminProfData.profile.name, 'Temporary Admin');
+  assert.equal(adminProfData.profile.admin_assignments?.length, 1);
+
+  // 2. Principal revokes admin assignment -> profile reverts to student & unlocks stub fields
+  const revokeCtx = createMockContext();
+  await handleRevokeAdmin(
+    revokeCtx.context,
+    {
+      id: 'usr_principal_1',
+      email: 'principal@college.edu',
+      name: 'Principal',
+      role: 'principal',
+      department_id: null,
+      department_name: null,
+    },
+    { assignment_id: 'da_stub_revoke' },
+    { databases }
+  );
+  assert.equal(revokeCtx.getResponse().statusCode, 200);
+
+  // 3. Revoked user fetches profile -> is_onboarded: false, locks cleared
+  const postRevokeAuth = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_stub_student' }).context,
+    undefined,
+    {
+      databases,
+      verifyJwt: async () => ({
+        $id: 'usr_stub_reboard',
+        email: 'revoked.stub@college.edu',
+        name: 'Temporary Admin',
+      }),
+    }
+  );
+  assert.ok(postRevokeAuth.caller);
+  assert.equal(postRevokeAuth.caller.role, 'student');
+
+  const studentProfCtx = createMockContext();
+  await handleGetProfile(studentProfCtx.context, postRevokeAuth.caller, { databases });
+  assert.equal(studentProfCtx.getResponse().statusCode, 200);
+  const studentProfData = studentProfCtx.getResponse().body.data as {
+    is_onboarded: boolean;
+    profile: {
+      role: string;
+      name_locked: boolean;
+      enrollment_locked: boolean;
+      phone_locked: boolean;
+      profile_status: string;
+    };
+  };
+  assert.equal(studentProfData.is_onboarded, false);
+  assert.equal(studentProfData.profile.role, 'student');
+  assert.equal(studentProfData.profile.name_locked, false);
+  assert.equal(studentProfData.profile.enrollment_locked, false);
+  assert.equal(studentProfData.profile.phone_locked, false);
+  assert.equal(studentProfData.profile.profile_status, 'incomplete');
+
+  // 4. Student completes onboarding cleanly without 403 PROFILE_ALREADY_LOCKED
+  const onboardCtx = createMockContext();
+  await handleCompleteOnboarding(
+    onboardCtx.context,
+    postRevokeAuth.caller,
+    {
+      name: 'Temporary Admin',
+      enrollment_no: '246510307099',
+      phone_number: '9876501234',
+    },
+    { databases }
+  );
+  assert.equal(onboardCtx.getResponse().statusCode, 200);
+
+  const finalProfCtx = createMockContext();
+  await handleGetProfile(finalProfCtx.context, postRevokeAuth.caller, { databases });
+  const finalData = finalProfCtx.getResponse().body.data as {
+    is_onboarded: boolean;
+    profile: { student_department_id: string };
+  };
+  assert.equal(finalData.is_onboarded, true);
+  assert.equal(finalData.profile.student_department_id, 'dept_comp');
+});
+
+test('Regression: Revoked user_id row never shadows newly pre-provisioned active email assignment in verifyCaller', async () => {
+  const { databases } = createInMemoryDb({
+    department_admins: [
+      {
+        $id: 'da_revoked_prior',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_reassigned',
+        email: 'reassigned@college.edu',
+        department_id: 'dept_comp',
+        scope: 'maintenance',
+        is_active: false,
+        assigned_by: 'usr_principal_1',
+        created_at: '2026-11-01T00:00:00.000Z',
+      },
+      {
+        $id: 'da_preprovisioned_active',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-10T00:00:00.000Z',
+        $updatedAt: '2026-11-10T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'reassigned@college.edu',
+        department_id: 'dept_elec',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal_1',
+        created_at: '2026-11-10T00:00:00.000Z',
+      },
+    ],
+  });
+
+  const authRes = await verifyCaller(
+    createAuthContext({ jwt: 'jwt_reassigned' }).context,
+    undefined,
+    {
+      databases,
+      verifyJwt: async () => ({
+        $id: 'usr_reassigned',
+        email: 'reassigned@college.edu',
+        name: 'Reassigned Admin',
+      }),
+    }
+  );
+  assert.ok(authRes.caller);
+  assert.equal(authRes.caller.role, 'department_admin');
+  assert.equal(authRes.caller.department_id, 'dept_elec');
+  assert.equal(authRes.caller.admin_assignments?.length, 1);
+
+  const linkedDoc = await databases.getDocument('campusvoice', 'department_admins', 'da_preprovisioned_active');
+  assert.equal(linkedDoc.user_id, 'usr_reassigned');
+});
+
+// =====================================================================
+// Department CRUD Backend Unit Tests: Security, Validation, CRUD, Audits
+// =====================================================================
+
+test('Department CRUD: handleCreateDepartment security, validation, multi-scope assignment, code collision, and audit logging', async () => {
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal',
+    email: 'principal@college.edu',
+    name: 'Dr. Mehta',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student',
+    email: 'student@college.edu',
+    name: 'Student User',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const { databases, collections } = createInMemoryDb({
+    departments: [
+      {
+        $id: 'dept_soft_deleted',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        name: 'Aerospace Engineering',
+        code: 'AERO',
+        is_active: false,
+        is_academic: true,
+        is_maintenance: true,
+      },
+      {
+        $id: 'dept_active_bio',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        name: 'Biotechnology',
+        code: 'BIO',
+        is_active: true,
+        is_academic: true,
+        is_maintenance: false,
+      },
+    ],
+    profiles: [
+      {
+        $id: 'prof_principal',
+        $collectionId: 'profiles',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_principal',
+        email: 'principal@college.edu',
+        name: 'Dr. Mehta',
+        role: 'principal',
+      },
+    ],
+  });
+
+  // 1. RBAC: non-principal rejected with 403 FORBIDDEN
+  const nonPrincipalCtx = createMockContext();
+  await handleCreateDepartment(
+    nonPrincipalCtx.context,
+    studentCaller,
+    {
+      name: 'Robotics',
+      code: 'ROBO',
+      admin_email: 'robo.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(nonPrincipalCtx.getResponse().statusCode, 403);
+  assert.equal(nonPrincipalCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Input validation: invalid name
+  const invalidNameCtx = createMockContext();
+  await handleCreateDepartment(
+    invalidNameCtx.context,
+    principalCaller,
+    {
+      name: 'R',
+      code: 'ROBO',
+      admin_email: 'robo.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(invalidNameCtx.getResponse().statusCode, 400);
+  assert.equal(invalidNameCtx.getResponse().body.code, 'INVALID_NAME');
+
+  // 3. Input validation: invalid code format (special chars, too short)
+  const invalidCodeCtx = createMockContext();
+  await handleCreateDepartment(
+    invalidCodeCtx.context,
+    principalCaller,
+    {
+      name: 'Robotics',
+      code: 'R!',
+      admin_email: 'robo.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(invalidCodeCtx.getResponse().statusCode, 400);
+  assert.equal(invalidCodeCtx.getResponse().body.code, 'INVALID_CODE');
+
+  // 4. Input validation: invalid admin email
+  const invalidEmailCtx = createMockContext();
+  await handleCreateDepartment(
+    invalidEmailCtx.context,
+    principalCaller,
+    {
+      name: 'Robotics',
+      code: 'ROBO',
+      admin_email: 'not-an-email',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(invalidEmailCtx.getResponse().statusCode, 400);
+  assert.equal(invalidEmailCtx.getResponse().body.code, 'INVALID_ADMIN_EMAIL');
+
+  // 5. Input validation: neither scope checked
+  const invalidScopeCtx = createMockContext();
+  await handleCreateDepartment(
+    invalidScopeCtx.context,
+    principalCaller,
+    {
+      name: 'Robotics',
+      code: 'ROBO',
+      admin_email: 'robo.admin@college.edu',
+      scopes: { maintenance: false, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(invalidScopeCtx.getResponse().statusCode, 400);
+  assert.equal(invalidScopeCtx.getResponse().body.code, 'INVALID_SCOPE');
+
+  // 6. Code collision with soft-deleted department code (AERO) must return 409
+  const softDeletedCollisionCtx = createMockContext();
+  await handleCreateDepartment(
+    softDeletedCollisionCtx.context,
+    principalCaller,
+    {
+      name: 'New Aerospace',
+      code: 'AERO',
+      admin_email: 'aero.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(softDeletedCollisionCtx.getResponse().statusCode, 409);
+  assert.equal(softDeletedCollisionCtx.getResponse().body.code, 'DEPARTMENT_CODE_EXISTS');
+
+  // 7. Code collision with active department code (BIO) must return 409
+  const activeCollisionCtx = createMockContext();
+  await handleCreateDepartment(
+    activeCollisionCtx.context,
+    principalCaller,
+    {
+      name: 'Biotechnology Advanced',
+      code: 'BIO',
+      admin_email: 'bio2.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(activeCollisionCtx.getResponse().statusCode, 409);
+  assert.equal(activeCollisionCtx.getResponse().body.code, 'DEPARTMENT_CODE_EXISTS');
+
+  // 8. Canonical department code collision (06 / CIVIL) must return 409
+  const canonicalCollisionCtx = createMockContext();
+  await handleCreateDepartment(
+    canonicalCollisionCtx.context,
+    principalCaller,
+    {
+      name: 'Civil Engineering Two',
+      code: 'CIVIL',
+      admin_email: 'civil2.admin@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(canonicalCollisionCtx.getResponse().statusCode, 409);
+  assert.equal(canonicalCollisionCtx.getResponse().body.code, 'DEPARTMENT_CODE_EXISTS');
+
+  // 9. Reassigning principal email as department admin must return 409
+  const principalReassignCtx = createMockContext();
+  await handleCreateDepartment(
+    principalReassignCtx.context,
+    principalCaller,
+    {
+      name: 'Robotics',
+      code: 'ROBO',
+      admin_email: 'principal@college.edu',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(principalReassignCtx.getResponse().statusCode, 409);
+  assert.equal(principalReassignCtx.getResponse().body.code, 'CANNOT_REASSIGN_PRINCIPAL');
+
+  // 10. Happy path: creates department with both Maintenance and Academic scopes
+  const happyCtx = createMockContext();
+  await handleCreateDepartment(
+    happyCtx.context,
+    principalCaller,
+    {
+      name: 'Robotics Engineering',
+      code: 'ROBO',
+      admin_email: 'robo.admin@college.edu',
+      scopes: { maintenance: true, academic: true },
+    },
+    { databases }
+  );
+  assert.equal(happyCtx.getResponse().statusCode, 201);
+  const happyBody = happyCtx.getResponse().body as {
+    success: boolean;
+    data: {
+      department: { $id: string; name: string; code: string; is_academic: boolean; is_maintenance: boolean; is_active: boolean };
+      assignments: Array<{ scope: string; email: string; is_active: boolean }>;
+    };
+  };
+  assert.equal(happyBody.success, true);
+  assert.equal(happyBody.data.department.name, 'Robotics Engineering');
+  assert.equal(happyBody.data.department.code, 'ROBO');
+  assert.equal(happyBody.data.department.is_academic, true);
+  assert.equal(happyBody.data.department.is_maintenance, true);
+  assert.equal(happyBody.data.department.is_active, true);
+  assert.equal(happyBody.data.assignments.length, 2);
+
+  // Verify created department in DB
+  const deptDocs = collections.get('departments') || [];
+  const createdDept = deptDocs.find((d) => d.code === 'ROBO');
+  assert.ok(createdDept);
+  assert.equal(createdDept.name, 'Robotics Engineering');
+  assert.equal(createdDept.is_active, true);
+
+  // Verify created admin assignments in DB: 2 active docs (maintenance & academic)
+  const adminDocs = collections.get('department_admins') || [];
+  const roboAssignments = adminDocs.filter((d) => d.department_id === createdDept.$id);
+  assert.equal(roboAssignments.length, 2);
+  const maintAssign = roboAssignments.find((d) => d.scope === 'maintenance');
+  const acadAssign = roboAssignments.find((d) => d.scope === 'academic');
+  assert.ok(maintAssign);
+  assert.equal(maintAssign.is_active, true);
+  assert.equal(maintAssign.email, 'robo.admin@college.edu');
+  assert.ok(acadAssign);
+  assert.equal(acadAssign.is_active, true);
+  assert.equal(acadAssign.email, 'robo.admin@college.edu');
+
+  // Verify audit log entry
+  const auditDocs = collections.get('audit_logs') || [];
+  const createAudit = auditDocs.find(
+    (a) => a.action === 'create_department' && a.target_resource_id === createdDept.$id
+  );
+  assert.ok(createAudit);
+  assert.equal(createAudit.actor_id, 'usr_principal');
+  assert.equal(createAudit.actor_role, 'principal');
+});
+
+test('Department CRUD: handleUpdateDepartment security, validation, scope toggling, admin re-assignment, and audit logging', async () => {
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal',
+    email: 'principal@college.edu',
+    name: 'Dr. Mehta',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student',
+    email: 'student@college.edu',
+    name: 'Student User',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const { databases, collections } = createInMemoryDb({
+    departments: [
+      {
+        $id: 'dept_ai',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        name: 'Artificial Intelligence',
+        code: 'AI',
+        is_active: true,
+        is_academic: true,
+        is_maintenance: true,
+      },
+      {
+        $id: 'dept_ml_soft_deleted',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        name: 'Machine Learning',
+        code: 'ML',
+        is_active: false,
+        is_academic: true,
+        is_maintenance: true,
+      },
+    ],
+    department_admins: [
+      {
+        $id: 'da_ai_m',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'ai.admin@college.edu',
+        department_id: 'dept_ai',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal',
+        created_at: '2026-11-01T00:00:00.000Z',
+      },
+      {
+        $id: 'da_ai_a',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'ai.admin@college.edu',
+        department_id: 'dept_ai',
+        scope: 'academic',
+        is_active: true,
+        assigned_by: 'usr_principal',
+        created_at: '2026-11-01T00:00:00.000Z',
+      },
+    ],
+  });
+
+  // 1. RBAC: non-principal rejected with 403
+  const nonPrincipalCtx = createMockContext();
+  await handleUpdateDepartment(
+    nonPrincipalCtx.context,
+    studentCaller,
+    { department_id: 'dept_ai', name: 'New AI' },
+    { databases }
+  );
+  assert.equal(nonPrincipalCtx.getResponse().statusCode, 403);
+  assert.equal(nonPrincipalCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Missing department_id rejected with 400
+  const missingIdCtx = createMockContext();
+  await handleUpdateDepartment(
+    missingIdCtx.context,
+    principalCaller,
+    { name: 'New AI' },
+    { databases }
+  );
+  assert.equal(missingIdCtx.getResponse().statusCode, 400);
+  assert.equal(missingIdCtx.getResponse().body.code, 'INVALID_DEPARTMENT_ID');
+
+  // 3. Unknown department rejected with 404
+  const notFoundCtx = createMockContext();
+  await handleUpdateDepartment(
+    notFoundCtx.context,
+    principalCaller,
+    { department_id: 'dept_unknown_404', name: 'New AI' },
+    { databases }
+  );
+  assert.equal(notFoundCtx.getResponse().statusCode, 404);
+  assert.equal(notFoundCtx.getResponse().body.code, 'NOT_FOUND');
+
+  // 4. Code collision: updating code to another department's code (even soft-deleted ML) returns 409
+  const collisionCtx = createMockContext();
+  await handleUpdateDepartment(
+    collisionCtx.context,
+    principalCaller,
+    { department_id: 'dept_ai', code: 'ML' },
+    { databases }
+  );
+  assert.equal(collisionCtx.getResponse().statusCode, 409);
+  assert.equal(collisionCtx.getResponse().body.code, 'DEPARTMENT_CODE_EXISTS');
+
+  // 4b. Rejection of invalid admin email in update-department
+  const invalidEmailCtx = createMockContext();
+  await handleUpdateDepartment(
+    invalidEmailCtx.context,
+    principalCaller,
+    { department_id: 'dept_ai', admin_email: 'not-an-email' },
+    { databases }
+  );
+  assert.equal(invalidEmailCtx.getResponse().statusCode, 400);
+  assert.equal(invalidEmailCtx.getResponse().body.code, 'INVALID_ADMIN_EMAIL');
+
+  // 4c. Rejection of academic scope assignment to maintenance-only Water & Sanitation
+  const waterAcademicCtx = createMockContext();
+  await handleUpdateDepartment(
+    waterAcademicCtx.context,
+    principalCaller,
+    {
+      department_id: 'dept_water',
+      scopes: { maintenance: true, academic: true },
+    },
+    { databases }
+  );
+  assert.equal(waterAcademicCtx.getResponse().statusCode, 400);
+  assert.equal(waterAcademicCtx.getResponse().body.code, 'INVALID_SCOPE');
+
+  const sanitAcademicCtx = createMockContext();
+  await handleUpdateDepartment(
+    sanitAcademicCtx.context,
+    principalCaller,
+    {
+      department_id: 'dept_sanit',
+      scopes: { maintenance: false, academic: true },
+    },
+    { databases }
+  );
+  assert.equal(sanitAcademicCtx.getResponse().statusCode, 400);
+  assert.equal(sanitAcademicCtx.getResponse().body.code, 'INVALID_SCOPE');
+
+  // 5. Happy path: update name, code, toggle academic scope off (only maintenance remains)
+  const updateCtx = createMockContext();
+  await handleUpdateDepartment(
+    updateCtx.context,
+    principalCaller,
+    {
+      department_id: 'dept_ai',
+      name: 'AI & Data Science',
+      code: 'AIDS',
+      scopes: { maintenance: true, academic: false },
+    },
+    { databases }
+  );
+  assert.equal(updateCtx.getResponse().statusCode, 200);
+  const updateBody = updateCtx.getResponse().body as {
+    success: boolean;
+    data: {
+      department: { $id: string; name: string; code: string; is_academic: boolean; is_maintenance: boolean };
+      assignments: Array<{ scope: string; is_active: boolean }>;
+    };
+  };
+  assert.equal(updateBody.success, true);
+  assert.equal(updateBody.data.department.name, 'AI & Data Science');
+  assert.equal(updateBody.data.department.code, 'AIDS');
+  assert.equal(updateBody.data.department.is_maintenance, true);
+  assert.equal(updateBody.data.department.is_academic, false);
+
+  // Verify updated assignments: maintenance active, academic revoked
+  const adminDocs = collections.get('department_admins') || [];
+  const aiAssignments = adminDocs.filter((d) => d.department_id === 'dept_ai');
+  const maintAssign = aiAssignments.find((d) => d.scope === 'maintenance');
+  const acadAssign = aiAssignments.find((d) => d.scope === 'academic');
+  assert.ok(maintAssign);
+  assert.equal(maintAssign.is_active, true);
+  assert.ok(acadAssign);
+  assert.equal(acadAssign.is_active, false);
+
+  // Verify audit log entry
+  const auditDocs = collections.get('audit_logs') || [];
+  const updateAudit = auditDocs.find(
+    (a) => a.action === 'update_department' && a.target_resource_id === 'dept_ai'
+  );
+  assert.ok(updateAudit);
+  assert.equal(updateAudit.actor_id, 'usr_principal');
+});
+
+test('Department CRUD: handleDeleteDepartment security, soft deletion, assignment revocation, and audit logging', async () => {
+  const principalCaller: AuthenticatedCaller = {
+    id: 'usr_principal',
+    email: 'principal@college.edu',
+    name: 'Dr. Mehta',
+    role: 'principal',
+    department_id: null,
+    department_name: null,
+  };
+
+  const studentCaller: AuthenticatedCaller = {
+    id: 'usr_student',
+    email: 'student@college.edu',
+    name: 'Student User',
+    role: 'student',
+    department_id: null,
+    department_name: null,
+  };
+
+  const { databases, collections } = createInMemoryDb({
+    departments: [
+      {
+        $id: 'dept_to_delete',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        name: 'Obsolete Department',
+        code: 'OBS',
+        is_active: true,
+        is_academic: true,
+        is_maintenance: true,
+      },
+    ],
+    department_admins: [
+      {
+        $id: 'da_obs_m',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'obs.admin@college.edu',
+        department_id: 'dept_to_delete',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal',
+        created_at: '2026-11-01T00:00:00.000Z',
+      },
+      {
+        $id: 'da_obs_a',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-01T00:00:00.000Z',
+        $updatedAt: '2026-11-01T00:00:00.000Z',
+        $permissions: [],
+        user_id: '',
+        email: 'obs.admin@college.edu',
+        department_id: 'dept_to_delete',
+        scope: 'academic',
+        is_active: true,
+        assigned_by: 'usr_principal',
+        created_at: '2026-11-01T00:00:00.000Z',
+      },
+    ],
+  });
+
+  // 1. RBAC: non-principal rejected with 403
+  const nonPrincipalCtx = createMockContext();
+  await handleDeleteDepartment(
+    nonPrincipalCtx.context,
+    studentCaller,
+    { department_id: 'dept_to_delete' },
+    { databases }
+  );
+  assert.equal(nonPrincipalCtx.getResponse().statusCode, 403);
+  assert.equal(nonPrincipalCtx.getResponse().body.code, 'FORBIDDEN');
+
+  // 2. Missing department_id rejected with 400
+  const missingIdCtx = createMockContext();
+  await handleDeleteDepartment(
+    missingIdCtx.context,
+    principalCaller,
+    {},
+    { databases }
+  );
+  assert.equal(missingIdCtx.getResponse().statusCode, 400);
+  assert.equal(missingIdCtx.getResponse().body.code, 'INVALID_DEPARTMENT_ID');
+
+  // 3. Unknown department rejected with 404
+  const notFoundCtx = createMockContext();
+  await handleDeleteDepartment(
+    notFoundCtx.context,
+    principalCaller,
+    { department_id: 'dept_nonexistent' },
+    { databases }
+  );
+  assert.equal(notFoundCtx.getResponse().statusCode, 404);
+  assert.equal(notFoundCtx.getResponse().body.code, 'NOT_FOUND');
+
+  // 4. Happy path: soft delete department and revoke active assignments
+  const deleteCtx = createMockContext();
+  await handleDeleteDepartment(
+    deleteCtx.context,
+    principalCaller,
+    { department_id: 'dept_to_delete' },
+    { databases }
+  );
+  assert.equal(deleteCtx.getResponse().statusCode, 200);
+  const deleteBody = deleteCtx.getResponse().body as {
+    success: boolean;
+    data: {
+      department: { $id: string; is_active: boolean };
+      revoked_assignment_ids: string[];
+    };
+  };
+  assert.equal(deleteBody.data.department.$id, 'dept_to_delete');
+  assert.equal(deleteBody.data.department.is_active, false);
+  assert.equal(deleteBody.data.revoked_assignment_ids.length, 2);
+
+  // Verify department is soft-deleted (is_active: false)
+  const deptDocs = collections.get('departments') || [];
+  const deletedDoc = deptDocs.find((d) => d.$id === 'dept_to_delete');
+  assert.ok(deletedDoc);
+  assert.equal(deletedDoc.is_active, false);
+
+  // Verify all assignments are revoked (is_active: false)
+  const adminDocs = collections.get('department_admins') || [];
+  const obsAssignments = adminDocs.filter((d) => d.department_id === 'dept_to_delete');
+  assert.equal(obsAssignments.length, 2);
+  for (const assign of obsAssignments) {
+    assert.equal(assign.is_active, false);
+  }
+
+  // Verify audit log entry
+  const auditDocs = collections.get('audit_logs') || [];
+  const deleteAudit = auditDocs.find(
+    (a) => a.action === 'delete_department' && a.target_resource_id === 'dept_to_delete'
+  );
+  assert.ok(deleteAudit);
+  assert.equal(deleteAudit.actor_id, 'usr_principal');
+});
+
+test('Custom maintenance departments: verifyCaller attaches department ID and resolves name from database', async () => {
+  const { databases } = createInMemoryDb({
+    departments: [
+      {
+        $id: 'dept_transport',
+        $collectionId: 'departments',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-20T00:00:00.000Z',
+        $updatedAt: '2026-11-20T00:00:00.000Z',
+        $permissions: [],
+        name: 'Campus Transport',
+        is_academic: false,
+        is_maintenance: true,
+        is_active: true,
+      },
+    ],
+    department_admins: [
+      {
+        $id: 'da_transport',
+        $collectionId: 'department_admins',
+        $databaseId: 'campusvoice',
+        $createdAt: '2026-11-20T00:00:00.000Z',
+        $updatedAt: '2026-11-20T00:00:00.000Z',
+        $permissions: [],
+        user_id: 'usr_transport_admin',
+        email: 'transport.admin@college.edu',
+        department_id: 'dept_transport',
+        scope: 'maintenance',
+        is_active: true,
+        assigned_by: 'usr_principal',
+      },
+    ],
+    profiles: [],
+  });
+
+  const authCtx = createAuthContext({ jwt: 'jwt_transport' });
+  const authRes = await verifyCaller(authCtx.context, undefined, {
+    databases,
+    verifyJwt: async () => ({
+      $id: 'usr_transport_admin',
+      email: 'transport.admin@college.edu',
+      name: 'Transport Admin',
+    }),
+  });
+
+  assert.ok(authRes.caller);
+  assert.equal(authRes.caller.role, 'department_admin');
+  assert.equal(authRes.caller.department_id, 'dept_transport');
+  assert.equal(authRes.caller.department_name, 'Campus Transport');
+  assert.equal(authRes.caller.admin_assignments?.length, 1);
+  assert.equal(authRes.caller.admin_assignments[0].department_id, 'dept_transport');
 });

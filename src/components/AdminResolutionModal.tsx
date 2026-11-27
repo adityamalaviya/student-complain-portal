@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { X, CircleNotch, CheckCircle, WarningCircle, Info } from '@phosphor-icons/react';
+import { canSelectComplaintStatus, normalizeComplaintStatus } from '@/lib/utils';
 import type { Complaint, ComplaintStatus } from '@/types';
 import { ComplaintPriorityBadge } from './ComplaintPriorityBadge';
 
@@ -20,16 +21,6 @@ interface AdminResolutionModalProps {
     officialResponse: string,
     isSubstantive?: boolean
   ) => Promise<AdminResolutionSubmitResult | boolean>;
-}
-
-function normalizeStatusForModal(status: ComplaintStatus): 'Pending' | 'In Progress' | 'Resolved' {
-  if (status === 'In Progress' || status === 'in_progress') {
-    return 'In Progress';
-  }
-  if (status === 'Resolved' || status === 'resolved') {
-    return 'Resolved';
-  }
-  return 'Pending';
 }
 
 export function AdminResolutionModal({
@@ -57,7 +48,7 @@ export function AdminResolutionModal({
     const openKey = `${isOpen}:${complaint.$id}`;
     if (lastOpenedKeyRef.current !== openKey) {
       lastOpenedKeyRef.current = openKey;
-      setStatus(normalizeStatusForModal(complaint.status));
+      setStatus(normalizeComplaintStatus(complaint.status) ?? 'Pending');
       setOfficialResponse('');
       setIsSubstantive(false);
       setErrorMessage(null);
@@ -78,10 +69,11 @@ export function AdminResolutionModal({
   if (!isOpen || !complaint) return null;
 
   const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
-  const currentCanonicalStatus = normalizeStatusForModal(complaint.status);
-  const selectedCanonicalStatus = normalizeStatusForModal(status);
-  const canSelectPending = currentCanonicalStatus === 'Pending';
-  const showSubstantiveOption = selectedCanonicalStatus !== 'Resolved';
+  const currentCanonicalStatus = normalizeComplaintStatus(complaint.status) ?? 'Pending';
+  const selectedCanonicalStatus = normalizeComplaintStatus(status) ?? 'Pending';
+  const canSelectPending = canSelectComplaintStatus(currentCanonicalStatus, 'Pending');
+  const canSelectInProgress = canSelectComplaintStatus(currentCanonicalStatus, 'In Progress');
+  const showSubstantiveOption = selectedCanonicalStatus === 'In Progress';
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -91,9 +83,11 @@ export function AdminResolutionModal({
 
     setErrorMessage(null);
 
-    if (!canSelectPending && selectedCanonicalStatus === 'Pending') {
+    if (!canSelectComplaintStatus(currentCanonicalStatus, selectedCanonicalStatus)) {
       setErrorMessage(
-        "Cannot revert an 'In Progress' or 'Resolved' complaint back to 'Pending'."
+        selectedCanonicalStatus === 'Pending'
+          ? "Cannot revert an 'In Progress' or 'Resolved' complaint back to 'Pending'."
+          : "Cannot reopen a 'Resolved' complaint back to 'In Progress'."
       );
       return;
     }
@@ -224,9 +218,14 @@ export function AdminResolutionModal({
               </button>
               <button
                 type="button"
-                disabled={isSubmitting}
+                disabled={isSubmitting || !canSelectInProgress}
+                title={
+                  canSelectInProgress
+                    ? 'Move grievance to active investigation'
+                    : 'Resolved complaints cannot be reopened back to In Progress'
+                }
                 onClick={() => setStatus('In Progress')}
-                className={`rounded-lg py-2 transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                className={`rounded-lg py-2 transition disabled:cursor-not-allowed disabled:opacity-45 ${
                   selectedCanonicalStatus === 'In Progress'
                     ? 'bg-white text-blue-700 shadow-2xs dark:bg-slate-900 dark:text-blue-300'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -252,6 +251,14 @@ export function AdminResolutionModal({
                 <Info size={14} weight="bold" className="mt-0.5 shrink-0" />
                 <span>
                   Status remains Pending; your note will be persisted as a complaint timeline entry.
+                </span>
+              </p>
+            )}
+            {currentCanonicalStatus === 'Resolved' && (
+              <p className="mt-1.5 flex items-start gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
+                <Info size={14} weight="bold" className="mt-0.5 shrink-0" />
+                <span>
+                  Post-Resolution Follow-Up Note: Status stays Resolved without reopening or changing resolution timestamps.
                 </span>
               </p>
             )}

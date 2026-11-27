@@ -1,8 +1,66 @@
+import dns from 'node:dns';
 import { Client, Databases, Storage, Users } from 'node-appwrite';
+// Ensure IPv4 resolution takes precedence on dual-stack hosts to avoid transient UND_ERR_CONNECT_TIMEOUT
+try {
+    dns.setDefaultResultOrder('ipv4first');
+}
+catch {
+    // Ignore on runtimes without setDefaultResultOrder
+}
+const TRANSIENT_NETWORK_CODES = new Set([
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ECONNREFUSED',
+    'EAI_AGAIN',
+    'ENOTFOUND',
+    'EPIPE',
+]);
+export function isTransientAppwriteError(err) {
+    if (!err || typeof err !== 'object') {
+        return false;
+    }
+    const record = err;
+    if (typeof record.code === 'number') {
+        if (record.code === 429 || record.code === 502 || record.code === 503 || record.code === 504) {
+            return true;
+        }
+    }
+    if (typeof record.code === 'string' && TRANSIENT_NETWORK_CODES.has(record.code)) {
+        return true;
+    }
+    if (record.cause &&
+        typeof record.cause.code === 'string' &&
+        TRANSIENT_NETWORK_CODES.has(record.cause.code)) {
+        return true;
+    }
+    const msg = `${typeof record.message === 'string' ? record.message : ''} ${record.cause && typeof record.cause.message === 'string' ? record.cause.message : ''}`;
+    return /fetch failed|socket hang up|connect timeout|econnreset|etimedout|too many requests|service unavailable|bad gateway|gateway timeout/i.test(msg);
+}
+export async function withTransientRetry(operation, maxAttempts = 3, baseDelayMs = 120) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await operation();
+        }
+        catch (err) {
+            lastError = err;
+            if (attempt >= maxAttempts || !isTransientAppwriteError(err)) {
+                throw err;
+            }
+            const delayMs = baseDelayMs * attempt;
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+    throw lastError;
+}
 export function getAppwriteConfig() {
-    const endpoint = process.env.APPWRITE_FUNCTION_ENDPOINT ||
+    const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT ||
+        process.env.APPWRITE_FUNCTION_ENDPOINT ||
         process.env.APPWRITE_ENDPOINT ||
-        'https://cloud.appwrite.io/v1';
+        'https://fra.cloud.appwrite.io/v1';
     const projectId = process.env.APPWRITE_FUNCTION_PROJECT_ID ||
         process.env.APPWRITE_PROJECT_ID ||
         '';
@@ -45,15 +103,16 @@ export function getAppwriteConfig() {
         adminComputerEmail,
     };
 }
-export function getServerClient() {
+export function getServerClient(apiKeyOverride) {
     const config = getAppwriteConfig();
+    const effectiveApiKey = (apiKeyOverride || '').trim() || config.apiKey;
     const client = new Client();
     client.setEndpoint(config.endpoint);
     if (config.projectId) {
         client.setProject(config.projectId);
     }
-    if (config.apiKey) {
-        client.setKey(config.apiKey);
+    if (effectiveApiKey) {
+        client.setKey(effectiveApiKey);
     }
     const databases = new Databases(client);
     const storage = new Storage(client);

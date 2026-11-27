@@ -43,7 +43,12 @@ export function DepartmentBadge({
   size = 'md',
 }: DepartmentBadgeProps): React.ReactElement {
   const resolved = resolveDepartment(departmentId);
-  const displayName = name || resolved?.name || 'Institutional Department';
+  const displayName =
+    name ||
+    resolved?.name ||
+    (typeof departmentId === 'string' && departmentId
+      ? departmentId.replace(/^dept_/, '').toUpperCase()
+      : 'Institutional Department');
 
   const paddingClass = size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-2.5 py-1 text-xs';
   const iconSize = size === 'sm' ? 12 : 14;

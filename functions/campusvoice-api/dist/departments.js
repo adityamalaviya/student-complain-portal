@@ -146,6 +146,7 @@ export function toDepartmentModel(dept) {
     return {
         $id: dept.id,
         name: dept.name,
+        ...(dept.code ? { code: dept.code } : {}),
         is_academic: dept.is_academic,
         is_maintenance: dept.is_maintenance,
         is_active: dept.is_active,
@@ -247,4 +248,10 @@ export function calculateComplaintDelay(complaint, referenceTime = new Date()) {
         delay_anchor: anchorStr,
         reason: isDelayed ? reason : undefined,
     };
+}
+/**
+ * Authoritative 5-day delay boolean predicate delegating to calculateComplaintDelay.
+ */
+export function isComplaintDelayed(complaint, referenceTime = new Date()) {
+    return calculateComplaintDelay(complaint, referenceTime).is_delayed;
 }

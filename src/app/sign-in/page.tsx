@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useEffect, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import React, { useEffect, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   Buildings,
   ShieldCheck,
@@ -9,30 +9,36 @@ import {
   Question,
   WarningCircle,
   GraduationCap,
+  X,
+  Info,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard } from '@/lib/hooks';
 
 function SignInContent(): React.ReactElement {
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal, signIn } = useAuth();
+  const { signIn } = useAuth();
+  useAuthGuard('guest_or_redirect');
+  const [isHelpdeskOpen, setIsHelpdeskOpen] = useState<boolean>(false);
+  const [isSigningIn, setIsSigningIn] = useState<boolean>(false);
   const rawError = searchParams.get('error');
   const errorMsg = searchParams.get('message') || searchParams.get('error_description') || (rawError && rawError !== 'oauth_failed' ? rawError : null);
   const oauthError = Boolean(rawError);
 
   useEffect(() => {
-    if (!loading && user) {
-      if (isPrincipal) {
-        router.replace('/principal');
-      } else if (isAdmin) {
-        router.push('/admin');
-      } else if (isOnboarded) {
-        router.push('/dashboard');
-      } else {
-        router.push('/onboarding');
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && isHelpdeskOpen) {
+        setIsHelpdeskOpen(false);
       }
-    }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return (): void => window.removeEventListener('keydown', handleKeyDown);
+  }, [isHelpdeskOpen]);
+
+  const handleGoogleSignIn = (): void => {
+    if (isSigningIn) return;
+    setIsSigningIn(true);
+    signIn();
+  };
 
   return (
     <div className="flex min-h-screen flex-col justify-between bg-slate-50 text-slate-900 antialiased selection:bg-blue-600 selection:text-white dark:bg-gray-950 dark:text-slate-100">
@@ -70,13 +76,15 @@ function SignInContent(): React.ReactElement {
                 Academic Year 2024-2025 • Operational
               </span>
             </div>
-            <a
-              href="#helpdesk"
+            <button
+              type="button"
+              onClick={() => setIsHelpdeskOpen(true)}
+              aria-haspopup="dialog"
               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-blue-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
             >
               <Question size={16} weight="bold" />
               <span>Helpdesk</span>
-            </a>
+            </button>
           </div>
         </div>
       </header>
@@ -137,8 +145,9 @@ function SignInContent(): React.ReactElement {
             <div className="space-y-4">
               <button
                 type="button"
-                onClick={signIn}
-                className="group flex w-full items-center justify-center gap-3.5 rounded-xl border border-slate-300 bg-white px-5 py-3.5 text-sm font-bold text-slate-800 shadow-xs transition-all hover:bg-slate-50 hover:shadow-sm active:scale-[0.99] dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:hover:bg-slate-750"
+                onClick={handleGoogleSignIn}
+                disabled={isSigningIn}
+                className="group flex w-full items-center justify-center gap-3.5 rounded-xl border border-slate-300 bg-white px-5 py-3.5 text-sm font-bold text-slate-800 shadow-xs transition-all hover:bg-slate-50 hover:shadow-sm active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:hover:bg-slate-700"
               >
                 {/* Google Official Logo SVG */}
                 <svg className="h-5 w-5 transition-transform group-hover:scale-105" viewBox="0 0 24 24">
@@ -159,7 +168,7 @@ function SignInContent(): React.ReactElement {
                     fill="#EA4335"
                   />
                 </svg>
-                <span>Continue with Google</span>
+                <span>{isSigningIn ? 'Redirecting to Google...' : 'Continue with Google'}</span>
               </button>
 
               <div className="relative flex items-center py-2">
@@ -214,6 +223,83 @@ function SignInContent(): React.ReactElement {
       <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
         CampusVoice Institutional Portal • Strict Department Isolation &amp; Ombudsman Protocol
       </footer>
+
+      {/* Helpdesk Guidance Modal */}
+      {isHelpdeskOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="helpdesk-modal-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsHelpdeskOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
+        >
+          <div className="relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400">
+                  <Question size={20} weight="bold" />
+                </div>
+                <div>
+                  <h2
+                    id="helpdesk-modal-title"
+                    className="text-base font-bold text-slate-900 dark:text-white"
+                  >
+                    CampusVoice Sign-In Helpdesk
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Authentication &amp; Onboarding Guidance
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsHelpdeskOpen(false)}
+                aria-label="Close helpdesk dialog"
+                className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                <X size={18} weight="bold" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                <p className="font-semibold text-slate-900 dark:text-white">
+                  1. Google Sign-In Issues
+                </p>
+                <p className="mt-1">
+                  Ensure third-party cookies and pop-ups/redirects are allowed for this site, and sign in with your Google account.
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                <p className="font-semibold text-slate-900 dark:text-white">
+                  2. First-Time Student Verification
+                </p>
+                <p className="mt-1">
+                  New students must confirm their full name, 12-digit enrollment number, and 10-digit Indian mobile number during onboarding.
+                </p>
+              </div>
+              <div className="flex items-start gap-2 rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
+                <Info size={16} weight="bold" className="mt-0.5 shrink-0" />
+                <p>
+                  For enrollment code discrepancies, locked profile corrections, or administrator access, contact your Academic Department Administrator or the College Ombudsman Office.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end border-t border-slate-100 pt-4 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setIsHelpdeskOpen(false)}
+                className="rounded-xl bg-blue-700 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-700"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

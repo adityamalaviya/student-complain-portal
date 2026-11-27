@@ -1,10 +1,11 @@
 import { ID, Query, type Models } from 'node-appwrite';
-import { getAppwriteConfig, getServerClient } from '../db.js';
+import { getAppwriteConfig, getServerClient, withTransientRetry } from '../db.js';
 import {
   PHONE_NUMBER_REGEX,
   readBooleanField,
   readStringField,
   resolveDepartment,
+  resolveLegacyDepartmentCode,
   type DatabaseClientLike,
 } from '../departments.js';
 import type {
@@ -29,18 +30,24 @@ async function getCallerProfile(
   databaseId: string,
   profilesCollectionId: string
 ): Promise<UserProfile | null> {
-  const res = await databases.listDocuments(databaseId, profilesCollectionId, [
-    Query.equal('user_id', userId),
-    Query.limit(1),
-  ]);
+  const res = await withTransientRetry(() =>
+    databases.listDocuments(databaseId, profilesCollectionId, [
+      Query.equal('user_id', userId),
+      Query.limit(1),
+    ])
+  );
 
   if (res.total === 0 || !res.documents[0]) {
     return null;
   }
 
   const doc = res.documents[0];
+  const enrollmentNo = readStringField(doc, 'enrollment_no').trim();
   const rawDeptId = readStringField(doc, 'student_department_id');
-  const resolvedDept = resolveDepartment(rawDeptId);
+  const rawLegacyDeptCode = readStringField(doc, 'department_code');
+  const resolvedDept =
+    resolveDepartment(rawDeptId) ||
+    (!rawDeptId && enrollmentNo.length === 12 ? resolveLegacyDepartmentCode(rawLegacyDeptCode) : null);
 
   return {
     $id: doc.$id,
@@ -86,6 +93,97 @@ function toPhoneChangeModel(doc: Models.Document): PhoneChangeRequest {
       readStringField(doc, 'updated_at') ||
       doc.$updatedAt,
   };
+}
+
+function extractTimestampSchemaMismatch(err: unknown): {
+  type: 'unknown' | 'missing';
+  field: string;
+} | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  const unknownMatch = /Unknown attribute[:\s]*["']?(created_at|requested_at|updated_at|reviewed_at|completed_at)["']?/i.exec(
+    msg
+  );
+  if (unknownMatch?.[1]) {
+    return { type: 'unknown', field: unknownMatch[1] };
+  }
+  const missingMatch = /Missing required attribute[:\s]*["']?(created_at|requested_at|updated_at|reviewed_at|completed_at)["']?/i.exec(
+    msg
+  );
+  if (missingMatch?.[1]) {
+    return { type: 'missing', field: missingMatch[1] };
+  }
+  return null;
+}
+
+async function executeWithTimestampCompat(
+  operation: (candidate: Record<string, unknown>) => Promise<Models.Document>,
+  initialPayload: Record<string, unknown>,
+  now: string
+): Promise<Models.Document> {
+  const candidate: Record<string, unknown> = { ...initialPayload };
+  const triedAdjustments = new Set<string>();
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      return await operation(candidate);
+    } catch (err) {
+      const mismatch = extractTimestampSchemaMismatch(err);
+      if (!mismatch) {
+        throw err;
+      }
+      const adjustmentKey = `${mismatch.type}:${mismatch.field}`;
+      if (triedAdjustments.has(adjustmentKey)) {
+        throw err;
+      }
+      triedAdjustments.add(adjustmentKey);
+
+      if (mismatch.type === 'unknown' && mismatch.field in candidate) {
+        delete candidate[mismatch.field];
+        continue;
+      }
+      if (mismatch.type === 'missing' && !(mismatch.field in candidate)) {
+        candidate[mismatch.field] = now;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  return operation(candidate);
+}
+
+async function createPhoneChangeDocCompat(
+  databases: DatabaseClientLike,
+  databaseId: string,
+  collectionId: string,
+  docId: string,
+  payload: Record<string, unknown>,
+  now: string
+): Promise<Models.Document> {
+  return executeWithTimestampCompat(
+    (candidate) => databases.createDocument(databaseId, collectionId, docId, candidate, []),
+    {
+      ...payload,
+      requested_at: now,
+      created_at: now,
+    },
+    now
+  );
+}
+
+async function updatePhoneChangeDocCompat(
+  databases: DatabaseClientLike,
+  databaseId: string,
+  collectionId: string,
+  docId: string,
+  payload: Record<string, unknown>,
+  now: string
+): Promise<Models.Document> {
+  return executeWithTimestampCompat(
+    (candidate) => databases.updateDocument(databaseId, collectionId, docId, candidate),
+    payload,
+    now
+  );
 }
 
 // ----------------------------------------------------
@@ -183,10 +281,16 @@ export async function handleRequestPhoneChange(
 
   // Check for existing pending or unconsumed approved requests
   try {
-    const existingRequests = await databases.listDocuments(
-      config.databaseId,
-      config.phoneChangeRequestsCollectionId,
-      [Query.equal('student_user_id', caller.id), Query.limit(20)]
+    const existingRequests = await withTransientRetry(() =>
+      databases.listDocuments(
+        config.databaseId,
+        config.phoneChangeRequestsCollectionId,
+        [
+          Query.equal('student_user_id', caller.id),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100),
+        ]
+      )
     );
 
     const hasActiveRequest = existingRequests.documents.some((d) => {
@@ -209,7 +313,8 @@ export async function handleRequestPhoneChange(
     const now = new Date().toISOString();
     const docId = `pcr_${ID.unique().slice(0, 32)}`;
 
-    const newDoc = await databases.createDocument(
+    const newDoc = await createPhoneChangeDocCompat(
+      databases,
       config.databaseId,
       config.phoneChangeRequestsCollectionId,
       docId,
@@ -223,9 +328,8 @@ export async function handleRequestPhoneChange(
         reviewed_by: '',
         decision_reason: '',
         permission_consumed: false,
-        requested_at: now,
       },
-      [] // Strictly empty permissions ($permissions = [])
+      now
     );
 
     await appendAuditLog(
@@ -375,7 +479,8 @@ export async function handleReviewPhoneChange(
     }
 
     const now = new Date().toISOString();
-    const updatedDoc = await databases.updateDocument(
+    const updatedDoc = await updatePhoneChangeDocCompat(
+      databases,
       config.databaseId,
       config.phoneChangeRequestsCollectionId,
       requestId,
@@ -383,8 +488,10 @@ export async function handleReviewPhoneChange(
         status: decision,
         reviewed_by: caller.id,
         decision_reason: decisionReason || (decision === 'approved' ? 'Approved by Academic Admin' : 'Rejected'),
+        reviewed_at: now,
         updated_at: now,
-      }
+      },
+      now
     );
 
     await appendAuditLog(
@@ -544,6 +651,19 @@ export async function handleCompletePhoneChange(
     }
 
     const profileDoc = profileRes.documents[0];
+    const currentProfilePhone = readStringField(profileDoc, 'phone_number').trim();
+    if (oldPhoneNumber.trim() && currentProfilePhone !== oldPhoneNumber.trim()) {
+      return res.json(
+        {
+          success: false,
+          error:
+            'Your phone number was already updated by another request or session. Refresh to view your latest status.',
+          code: 'PERMISSION_NOT_AVAILABLE',
+        },
+        409
+      );
+    }
+
     const now = new Date().toISOString();
 
     // FAILURE-SAFE EXECUTION:
@@ -574,15 +694,18 @@ export async function handleCompletePhoneChange(
 
     // Step 2: Now that profile save succeeded, mark permission as consumed and status completed
     try {
-      await databases.updateDocument(
+      await updatePhoneChangeDocCompat(
+        databases,
         config.databaseId,
         config.phoneChangeRequestsCollectionId,
         requestId,
         {
           status: 'completed',
           permission_consumed: true,
+          completed_at: now,
           updated_at: now,
-        }
+        },
+        now
       );
     } catch (reqUpdateErr) {
       error(`[phone-change] Failed to mark request as consumed, attempting profile rollback: ${String(reqUpdateErr)}`);
@@ -716,10 +839,12 @@ export async function handleListPhoneChangeRequests(
       );
     }
 
-    const result = await databases.listDocuments(
-      config.databaseId,
-      config.phoneChangeRequestsCollectionId,
-      queries
+    const result = await withTransientRetry(() =>
+      databases.listDocuments(
+        config.databaseId,
+        config.phoneChangeRequestsCollectionId,
+        queries
+      )
     );
 
     const requests = result.documents.map(toPhoneChangeModel);
