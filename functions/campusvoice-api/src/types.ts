@@ -13,7 +13,11 @@ export type AcademicDepartmentId =
 
 export type MaintenanceOnlyDepartmentId = 'dept_water' | 'dept_sanit';
 
-export type DepartmentId = AcademicDepartmentId | MaintenanceOnlyDepartmentId;
+export type CanonicalDepartmentId =
+  | AcademicDepartmentId
+  | MaintenanceOnlyDepartmentId;
+
+export type DepartmentId = CanonicalDepartmentId | (string & {});
 
 export type MaintenanceDepartmentId = DepartmentId;
 
@@ -30,6 +34,18 @@ export type AdminScope = 'academic' | 'maintenance';
 export type PriorityLevel = 'low' | 'medium' | 'high';
 
 export type ComplaintStatus = 'Pending' | 'In Progress' | 'Resolved' | 'open' | 'in_progress' | 'resolved';
+
+export type CanonicalComplaintStatus = 'Pending' | 'In Progress' | 'Resolved';
+
+export type ClarificationState = 'none' | 'awaiting_reply' | 'replied';
+
+export type WarningState = 'awaiting_response' | 'responded';
+
+export type PhoneChangeWorkflowState =
+  | 'no_active_request'
+  | 'pending_review'
+  | 'approved_ready'
+  | 'rejected';
 
 export type SupportStatus = 'active' | 'revoked';
 
@@ -49,11 +65,32 @@ export type IssueType = 'department' | 'public';
 export interface Department {
   $id: DepartmentId;
   name: string;
+  code?: string;
   is_academic: boolean;
   is_maintenance: boolean;
   is_active: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface DepartmentScopes {
+  maintenance: boolean;
+  academic: boolean;
+}
+
+export interface CreateDepartmentInput {
+  name: string;
+  code: string;
+  admin_email: string;
+  scopes: DepartmentScopes;
+}
+
+export interface UpdateDepartmentInput {
+  department_id: string;
+  name?: string;
+  code?: string;
+  admin_email?: string;
+  scopes?: DepartmentScopes;
 }
 
 export interface UserProfile {
@@ -73,6 +110,8 @@ export interface UserProfile {
   enrollment_locked: boolean;
   phone_locked: boolean;
   is_locked?: boolean;
+  is_onboarded?: boolean;
+  admin_assignments?: DepartmentAdminAssignment[];
   department_name?: string;
   created_at: string;
   updated_at: string;
@@ -96,6 +135,8 @@ export interface Complaint {
   attachment_file_id?: string;
   is_own_complaint?: boolean;
   has_supported?: boolean;
+  warning_count?: number;
+  clarification_state?: ClarificationState;
   department_name?: string;
   issue_type?: IssueType;
   official_response?: string;
@@ -159,6 +200,7 @@ export interface ComplaintWarning {
   days_delayed: number;
   admin_response?: string;
   responded_at?: string;
+  state?: WarningState;
   created_at: string;
 }
 

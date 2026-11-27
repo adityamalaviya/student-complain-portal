@@ -16,49 +16,39 @@ import {
   CircleNotch,
   Phone,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard } from '@/lib/hooks';
 import { apiCompleteOnboarding } from '@/lib/api';
 import { StrictOnboardingSchema, PhoneNumberSchema } from '@/lib/schemas';
 import {
   ENROLLMENT_CODE_MAPPINGS,
   extractAndMapEnrollment,
+  isProfileOnboarded,
+  normalizePhoneInput,
   resolveDepartment,
   resolveEnrollmentCode,
 } from '@/lib/utils';
 
 export default function OnboardingPage(): React.ReactElement {
   const router = useRouter();
-  const { user, loading, isOnboarded, isAdmin, isPrincipal, setProfileState, refreshProfile } = useAuth();
+  const { user, loading, setProfileState, refreshProfile } = useAuth();
 
   const [name, setName] = useState<string>('');
   const [enrollmentNo, setEnrollmentNo] = useState<string>('');
   const [phoneNumber, setPhoneNumber] = useState<string>('');
-  const nameInitialized = useRef(false);
+  const initializedUserIdRef = useRef<string | null>(null);
+  const isSubmittingRef = useRef<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [redirecting, setRedirecting] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (user?.name && !nameInitialized.current) {
-      setName(user.name);
-      nameInitialized.current = true;
-    }
-  }, [user]);
+  useAuthGuard('onboarding', { skipRedirect: redirecting });
 
   useEffect(() => {
-    if (redirecting) return;
-    if (!loading) {
-      if (!user) {
-        router.push('/sign-in');
-      } else if (isAdmin) {
-        router.push('/admin');
-      } else if (isPrincipal) {
-        router.replace('/principal');
-      } else if (isOnboarded) {
-        router.push('/dashboard');
-      }
+    if (user?.$id && user.name && initializedUserIdRef.current !== user.$id) {
+      setName(user.name);
+      initializedUserIdRef.current = user.$id;
     }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router, redirecting]);
+  }, [user]);
 
   const cleanEnrollment = enrollmentNo.trim();
   const hasMinDigits = cleanEnrollment.length >= 9;
@@ -90,7 +80,7 @@ export default function OnboardingPage(): React.ReactElement {
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (isSubmittingRef.current || isSubmitting || redirecting) return;
 
     const validation = StrictOnboardingSchema.safeParse({
       name: name.trim(),
@@ -103,6 +93,7 @@ export default function OnboardingPage(): React.ReactElement {
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
 
@@ -114,10 +105,16 @@ export default function OnboardingPage(): React.ReactElement {
         setProfileState(response.data.profile);
         router.replace('/dashboard');
       } else if (response.code === 'PROFILE_ALREADY_LOCKED') {
-        // Profile is already completed and locked; refresh profile state and navigate directly to dashboard
-        setRedirecting(true);
-        await refreshProfile();
-        router.replace('/dashboard');
+        const refreshed = await refreshProfile({ silent: true });
+        if (isProfileOnboarded(refreshed)) {
+          setRedirecting(true);
+          router.replace('/dashboard');
+        } else {
+          setSubmitError(
+            response.error ||
+              'Your profile lock state prevented automatic completion. Please contact your department administrator.'
+          );
+        }
       } else {
         setSubmitError(response.error || 'Failed to complete profile registration.');
       }
@@ -125,6 +122,7 @@ export default function OnboardingPage(): React.ReactElement {
       const msg = err instanceof Error ? err.message : 'An unexpected error occurred.';
       setSubmitError(msg);
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -391,12 +389,10 @@ export default function OnboardingPage(): React.ReactElement {
                   name="phoneNumber"
                   type="tel"
                   inputMode="numeric"
-                  maxLength={10}
                   required
                   value={phoneNumber}
                   onChange={(e) => {
-                    const val = e.target.value.replace(/\D/g, '').slice(0, 10);
-                    setPhoneNumber(val);
+                    setPhoneNumber(normalizePhoneInput(e.target.value, phoneNumber));
                   }}
                   placeholder="e.g. 9876543210"
                   className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pr-3.5 pl-10 font-mono text-base tracking-widest text-slate-900 transition focus:border-blue-700 focus:ring-3 focus:ring-blue-100 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:border-blue-500 dark:focus:ring-blue-900/40"
@@ -431,7 +427,7 @@ export default function OnboardingPage(): React.ReactElement {
             {/* Submit Action */}
             <button
               type="submit"
-              disabled={!isFormValid || isSubmitting}
+              disabled={!isFormValid || isSubmitting || redirecting}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3.5 text-sm font-bold text-white shadow-xs transition hover:bg-blue-800 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
             >
               {isSubmitting ? (

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CircleNotch,
   Funnel,
@@ -9,6 +9,22 @@ import {
 } from '@phosphor-icons/react';
 import { EmptyState, ErrorState } from '@/components';
 import type { AuditLog } from '@/types';
+
+export const AUDIT_ACTION_FILTER_OPTIONS = [
+  'complaint_created',
+  'complaint_status_changed',
+  'clarification_requested',
+  'clarification_replied',
+  'support_added',
+  'support_removed',
+  'issue_warning',
+  'respond_to_warning',
+  'assign_department_admin',
+  'revoke_department_admin',
+  'request_phone_change',
+  'review_phone_change',
+  'complete_phone_change',
+] as const;
 
 function formatTimestamp(dateString?: string): string {
   if (!dateString) return 'Recently';
@@ -44,6 +60,16 @@ export function PrincipalAuditTrailTab({
 }: PrincipalAuditTrailTabProps): React.ReactElement {
   const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLog | null>(null);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && selectedAuditLog) {
+        setSelectedAuditLog(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return (): void => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedAuditLog]);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
@@ -65,15 +91,11 @@ export function PrincipalAuditTrailTab({
             className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition focus:border-blue-700 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
           >
             <option value="all">All Actions</option>
-            <option value="issue_warning">issue_warning</option>
-            <option value="respond_to_warning">respond_to_warning</option>
-            <option value="assign_department_admin">assign_department_admin</option>
-            <option value="revoke_department_admin">revoke_department_admin</option>
-            <option value="update_complaint_status">update_complaint_status</option>
-            <option value="add_progress_update">add_progress_update</option>
-            <option value="request_phone_change">request_phone_change</option>
-            <option value="review_phone_change">review_phone_change</option>
-            <option value="complete_phone_change">complete_phone_change</option>
+            {AUDIT_ACTION_FILTER_OPTIONS.map((actionName) => (
+              <option key={actionName} value={actionName}>
+                {actionName}
+              </option>
+            ))}
           </select>
           <button
             type="button"
@@ -155,7 +177,11 @@ export function PrincipalAuditTrailTab({
                         onClick={() => setSelectedAuditLog(log)}
                         className="text-left font-mono underline hover:text-blue-700 dark:hover:text-blue-400"
                       >
-                        {log.details ? log.details.slice(0, 60) + '...' : '{}'}
+                        {log.details
+                          ? log.details.length > 60
+                            ? `${log.details.slice(0, 60)}...`
+                            : log.details
+                          : '{}'}
                       </button>
                     </td>
                   </tr>
@@ -171,6 +197,11 @@ export function PrincipalAuditTrailTab({
         <div
           role="dialog"
           aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setSelectedAuditLog(null);
+            }
+          }}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
         >
           <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">

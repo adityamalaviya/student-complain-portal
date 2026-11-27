@@ -1,13 +1,50 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, createSession, signOut } from '@/lib/appwrite';
 import { apiGetProfile } from '@/lib/api';
+import { useAuth } from '@/lib/hooks';
+import { resolveAuthenticatedHomeRoute } from '@/lib/utils';
 
 export default function AuthCallbackPage(): React.ReactElement {
   const router = useRouter();
+  const { refreshProfile } = useAuth();
   const [profileCheckError, setProfileCheckError] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return (): void => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const verifyAndRedirect = useCallback(async (): Promise<void> => {
+    setProfileCheckError(false);
+
+    const profileResponse = await apiGetProfile();
+    if (!isMountedRef.current) return;
+
+    if (!profileResponse.success || !profileResponse.data) {
+      console.warn('[auth-callback] Profile query failed:', profileResponse.error);
+      setProfileCheckError(true);
+      return;
+    }
+
+    const { profile, is_onboarded } = profileResponse.data;
+    // Sync AuthProvider state silently before navigating so target route guards never flash
+    await refreshProfile({ silent: true });
+    if (!isMountedRef.current) return;
+
+    const destination = resolveAuthenticatedHomeRoute({
+      isPrincipal: profile?.role === 'principal',
+      isAdmin: profile?.role === 'department_admin',
+      isOnboarded: Boolean(is_onboarded),
+    });
+    router.replace(destination);
+  }, [refreshProfile, router]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -20,14 +57,13 @@ export default function AuthCallbackPage(): React.ReactElement {
 
         // 1. Check if user already has an active session
         let user = await getCurrentUser();
-        if (isCancelled) return;
+        if (isCancelled || !isMountedRef.current) return;
 
-        // 2. If token parameters are present and either no session exists or a different user is logged in
+        // 2. Exchange token parameters when no session exists or a different user was signed in
         if (userId && secret) {
           if (!user || user.$id !== userId) {
             try {
               if (user && user.$id !== userId) {
-                // Different user session active; clean up old session before creating new one
                 await signOut();
               }
               await createSession(userId, secret);
@@ -42,18 +78,15 @@ export default function AuthCallbackPage(): React.ReactElement {
                   (sessionErr as { type: string }).type === 'user_session_already_exists');
 
               if (isAlreadyExists) {
-                console.log('[auth-callback] Active session already exists, reusing existing session.');
                 user = await getCurrentUser();
               } else {
                 console.warn('[auth-callback] Session creation from token parameters error:', sessionErr);
               }
             }
-          } else {
-            console.log('[auth-callback] Active session already exists for user:', user.$id);
           }
         }
 
-        if (isCancelled) return;
+        if (isCancelled || !isMountedRef.current) return;
 
         // 3. If no active session could be verified, route back to sign-in with error
         if (!user) {
@@ -61,61 +94,12 @@ export default function AuthCallbackPage(): React.ReactElement {
           return;
         }
 
-        // 4. Attempt to fetch existing profile from Appwrite Cloud Function
-        try {
-          const profileResponse = await apiGetProfile();
-          if (isCancelled) return;
-
-          console.log('[auth-callback] apiGetProfile response:', profileResponse);
-
-          if (profileResponse.success && profileResponse.data) {
-            const { profile, is_onboarded } = profileResponse.data;
-
-            console.log('[auth-callback] profile.role raw value:', profile?.role);
-
-            // Role check FIRST — before any onboarding check
-            if (profile?.role === 'principal') {
-              console.log('[auth-callback] Principal verified, routing to /principal');
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              if (isCancelled) return;
-              router.replace('/principal');
-              return;
-            }
-            if (profile?.role === 'department_admin') {
-              console.log('[auth-callback] Department Admin verified, routing to /admin');
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              if (isCancelled) return;
-              router.replace('/admin');
-              return;
-            }
-
-            // Then student onboarding check
-            if (is_onboarded) {
-              console.log('[auth-callback] Student verified, routing to /dashboard');
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              if (isCancelled) return;
-              router.replace('/dashboard');
-              return;
-            }
-          } else if (!profileResponse.success) {
-            console.warn('[auth-callback] Profile query failed:', profileResponse.error);
-            setProfileCheckError(true);
-            return;
-          }
-        } catch (profileErr) {
-          console.warn('[auth-callback] Profile check failed:', profileErr);
-          setProfileCheckError(true);
-          return;
-        }
-
-        // First-time student or profile not yet locked: route to onboarding
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        if (isCancelled) return;
-        router.replace('/onboarding');
+        // 4. Verify institutional profile & hydrate AuthProvider before routing
+        await verifyAndRedirect();
       } catch (err) {
         console.error('[auth-callback] Error during callback resolution:', err);
-        if (!isCancelled) {
-          router.replace('/sign-in?error=oauth_failed');
+        if (!isCancelled && isMountedRef.current) {
+          setProfileCheckError(true);
         }
       }
     }
@@ -125,11 +109,32 @@ export default function AuthCallbackPage(): React.ReactElement {
     return (): void => {
       isCancelled = true;
     };
-  }, [router]);
+  }, [router, verifyAndRedirect]);
+
+  const handleRetryVerification = async (): Promise<void> => {
+    if (isRetrying) return;
+    setIsRetrying(true);
+    try {
+      await verifyAndRedirect();
+    } catch {
+      if (isMountedRef.current) {
+        setProfileCheckError(true);
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setIsRetrying(false);
+      }
+    }
+  };
+
+  const handleReturnToSignIn = async (): Promise<void> => {
+    await signOut();
+    router.replace('/sign-in');
+  };
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-center dark:bg-gray-950">
-      <div className="flex flex-col items-center gap-4">
+      <div className="flex max-w-sm flex-col items-center gap-4">
         {!profileCheckError && (
           <div className="h-10 w-10 animate-spin rounded-full border-3 border-blue-700 border-t-transparent dark:border-blue-400"></div>
         )}
@@ -140,8 +145,25 @@ export default function AuthCallbackPage(): React.ReactElement {
                 We could not verify your profile.
               </p>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Your Google sign-in succeeded. Please refresh and try again; onboarding will open only after a confirmed profile check.
+                Your Google sign-in succeeded, but profile verification could not complete right now. Retry verification below or return to sign in.
               </p>
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRetryVerification()}
+                  disabled={isRetrying}
+                  className="rounded-xl bg-blue-700 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-700"
+                >
+                  {isRetrying ? 'Retrying...' : 'Retry Verification'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleReturnToSignIn()}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-xs transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  Return to Sign-In
+                </button>
+              </div>
             </>
           ) : (
             <>

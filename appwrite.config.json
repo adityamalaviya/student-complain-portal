@@ -655,6 +655,17 @@
                     "orders": [
                         "ASC"
                     ]
+                },
+                {
+                    "key": "idx_cmpl_last_update",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "last_meaningful_update_at"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
                 }
             ]
         },

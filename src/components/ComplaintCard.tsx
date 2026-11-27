@@ -47,6 +47,7 @@ export function ComplaintCard({
 }: ComplaintCardProps): React.ReactElement {
   const shortId = complaint.$id ? complaint.$id.slice(-6).toUpperCase() : '000000';
   const maintDept = resolveDepartment(complaint.maintenance_department_id);
+  const isOwnComplaint = Boolean(complaint.is_own_complaint);
 
   return (
     <article className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300 sm:p-6 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700">
@@ -112,8 +113,10 @@ export function ComplaintCard({
           <ComplaintSupportButton
             complaintId={complaint.$id}
             supportCount={complaint.support_count ?? 1}
-            hasSupported={hasSupported}
+            hasSupported={isOwnComplaint ? false : hasSupported}
             onToggleSupport={onSupport}
+            disabled={isOwnComplaint}
+            disabledReason={isOwnComplaint ? 'Creator baseline support cannot be removed' : undefined}
             variant="card"
           />
         )}

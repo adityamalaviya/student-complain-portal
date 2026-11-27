@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   ShieldCheck,
@@ -16,7 +15,7 @@ import {
   WarningCircle,
   X,
 } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuth, useAuthGuard } from '@/lib/hooks';
 import { resolveDepartment, calculateComplaintDelay } from '@/lib/utils';
 import {
   apiGetAdminDashboard,
@@ -55,8 +54,15 @@ function formatTimestamp(dateString?: string): string {
 }
 
 export default function AdminDashboardPage(): React.ReactElement {
-  const router = useRouter();
-  const { user, profile, loading, isAdmin, signOutUser } = useAuth();
+  const {
+    profile,
+    loading,
+    isAdmin,
+    hasMaintenanceScope,
+    hasAcademicScope,
+    signOutUser,
+  } = useAuth();
+  useAuthGuard('admin');
 
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'in_progress' | 'resolved'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -71,34 +77,36 @@ export default function AdminDashboardPage(): React.ReactElement {
   const [selectedComplaint, setSelectedComplaint] = useState<Complaint | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
 
-  // Academic Admin Phone Change Workflow State
-  const adminDeptAlt = resolveDepartment(metrics?.department_id || profile?.department_id);
-  const isAcademicAdmin = Boolean(adminDeptAlt?.is_academic);
+  // Scope-aware Academic & Maintenance Admin section flags
+  const isAcademicAdmin = hasAcademicScope;
 
   const [adminSection, setAdminSection] = useState<'complaints' | 'phone_requests'>('complaints');
   const [phoneRequests, setPhoneRequests] = useState<PhoneChangeRequest[]>([]);
+  const [pendingPhoneCount, setPendingPhoneCount] = useState<number>(0);
   const [isPhoneLoading, setIsPhoneLoading] = useState<boolean>(false);
-  const [phoneFilter, setPhoneFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [phoneFilter, setPhoneFilter] = useState<
+    'pending' | 'approved' | 'rejected' | 'completed' | 'all'
+  >('pending');
   const [isReviewSubmitting, setIsReviewSubmitting] = useState<boolean>(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
   const [rejectModalRequest, setRejectModalRequest] = useState<PhoneChangeRequest | null>(null);
 
-  // Authorization Guard: Admin only
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push('/sign-in');
-      } else if (!isAdmin) {
-        // Not an administrator; redirect to student dashboard
-        router.push('/dashboard');
-      }
+    if (!isAdmin) return;
+    if (hasAcademicScope && !hasMaintenanceScope) {
+      setAdminSection('phone_requests');
+    } else if (hasMaintenanceScope && !hasAcademicScope) {
+      setAdminSection('complaints');
     }
-  }, [loading, user, isAdmin, router]);
+  }, [isAdmin, hasAcademicScope, hasMaintenanceScope]);
 
-  // Fetch admin metrics and complaints queue
+  // Fetch admin metrics and complaints queue (maintenance scope only)
   const fetchAdminData = useCallback(async (): Promise<void> => {
-    if (!profile || !isAdmin) return;
+    if (!profile || !isAdmin || !hasMaintenanceScope) {
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     setFetchError(null);
 
@@ -138,32 +146,71 @@ export default function AdminDashboardPage(): React.ReactElement {
     } finally {
       setIsLoading(false);
     }
-  }, [profile, isAdmin, activeTab, page]);
+  }, [profile, isAdmin, hasMaintenanceScope, activeTab, page]);
 
   useEffect(() => {
-    if (isAdmin) {
+    if (isAdmin && hasMaintenanceScope) {
       void fetchAdminData();
+    } else if (isAdmin) {
+      setIsLoading(false);
     }
-  }, [isAdmin, fetchAdminData]);
+  }, [isAdmin, hasMaintenanceScope, fetchAdminData]);
 
   // Fetch phone change requests for academic admin
+  const adminAcademicAssignment = profile?.admin_assignments?.find(
+    (a) => a.is_active && a.scope === 'academic'
+  );
+  const academicDeptIdForAdmin =
+    adminAcademicAssignment?.department_id ||
+    profile?.department_id ||
+    profile?.student_department_id ||
+    metrics?.department_id;
+
+  const filterRequestsByDept = useCallback(
+    (requests: PhoneChangeRequest[]): PhoneChangeRequest[] => {
+      if (!academicDeptIdForAdmin) return requests;
+      const targetId = resolveDepartment(academicDeptIdForAdmin)?.id || academicDeptIdForAdmin;
+      return requests.filter((r) => {
+        const reqDeptId = resolveDepartment(r.academic_department_id)?.id || r.academic_department_id;
+        return reqDeptId === targetId;
+      });
+    },
+    [academicDeptIdForAdmin]
+  );
+
   const fetchPhoneRequests = useCallback(async (): Promise<void> => {
-    if (!profile || !isAdmin || !isAcademicAdmin) return;
+    if (!profile || !isAdmin || !hasAcademicScope || !academicDeptIdForAdmin) return;
     setIsPhoneLoading(true);
     try {
-      const res = await apiListPhoneChangeRequests({
-        academic_department_id: (adminDeptAlt?.id || profile.department_id || profile.student_department_id) as string,
-        status: phoneFilter === 'all' ? undefined : phoneFilter,
-      });
-      if (res.success && res.data) {
-        setPhoneRequests(res.data.requests || []);
+      const [filteredRes, pendingRes] = await Promise.all([
+        apiListPhoneChangeRequests({
+          academic_department_id: academicDeptIdForAdmin,
+          status: phoneFilter === 'all' ? undefined : phoneFilter,
+        }),
+        phoneFilter === 'pending' || phoneFilter === 'all'
+          ? Promise.resolve(null)
+          : apiListPhoneChangeRequests({
+              academic_department_id: academicDeptIdForAdmin,
+              status: 'pending',
+            }),
+      ]);
+
+      if (filteredRes.success && filteredRes.data) {
+        const scoped = filterRequestsByDept(filteredRes.data.requests || []);
+        setPhoneRequests(scoped);
+        if (phoneFilter === 'pending' || phoneFilter === 'all') {
+          setPendingPhoneCount(scoped.filter((r) => r.status === 'pending').length);
+        }
+      }
+      if (pendingRes?.success && pendingRes.data) {
+        setPendingPhoneCount(filterRequestsByDept(pendingRes.data.requests || []).length);
       }
     } catch {
       // Non-fatal
     } finally {
       setIsPhoneLoading(false);
     }
-  }, [profile, isAdmin, isAcademicAdmin, adminDeptAlt?.id, phoneFilter]);
+  }, [profile, isAdmin, hasAcademicScope, academicDeptIdForAdmin, phoneFilter, filterRequestsByDept]);
 
   const handleQuickApprovePhone = async (requestId: string): Promise<void> => {
     setIsReviewSubmitting(true);
@@ -214,15 +261,11 @@ export default function AdminDashboardPage(): React.ReactElement {
     }
   };
 
-  const pendingPhoneRequests = useMemo(() => {
-    const adminDeptId = adminDeptAlt?.id || profile?.department_id || profile?.student_department_id;
-    return phoneRequests.filter((r) => {
-      if (r.status !== 'pending') return false;
-      if (!adminDeptId) return true;
-      const reqDeptId = resolveDepartment(r.academic_department_id)?.id || r.academic_department_id;
-      return reqDeptId === adminDeptId;
-    });
-  }, [phoneRequests, adminDeptAlt?.id, profile?.department_id, profile?.student_department_id]);
+  const displayedPhoneRequests = useMemo(() => {
+    return phoneRequests.filter((r) =>
+      phoneFilter === 'all' ? true : r.status === phoneFilter
+    );
+  }, [phoneRequests, phoneFilter]);
 
   useEffect(() => {
     if (isAdmin && isAcademicAdmin) {
@@ -296,7 +339,6 @@ export default function AdminDashboardPage(): React.ReactElement {
   const inProgressCount = metrics?.total_in_progress ?? 0;
   const resolvedCount = metrics?.total_resolved ?? 0;
   const allCount = openCount + inProgressCount + resolvedCount;
-  const pendingPhoneCount = pendingPhoneRequests.length;
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 text-slate-900 antialiased dark:bg-gray-950 dark:text-slate-100">
@@ -362,42 +404,54 @@ export default function AdminDashboardPage(): React.ReactElement {
 
       {/* Main Admin Canvas */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 sm:py-10 lg:px-12">
-        {/* Academic Admin Section Switcher (Strictly for Academic Dept Admins) */}
-        {isAcademicAdmin && (
+        {/* Scope-Gated Admin Section Switcher */}
+        {(hasMaintenanceScope || hasAcademicScope) && (
           <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
-            <button
-              type="button"
-              onClick={() => setAdminSection('complaints')}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
-                adminSection === 'complaints'
-                  ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
-                  : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
-              }`}
-            >
-              <ShieldCheck size={16} weight="bold" />
-              <span>Maintenance Queue ({openCount + inProgressCount})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdminSection('phone_requests')}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
-                adminSection === 'phone_requests'
-                  ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
-                  : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
-              }`}
-            >
-              <Phone size={16} weight="bold" />
-              <span>Phone Change Requests</span>
-              {pendingPhoneCount > 0 && (
-                <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-white">
-                  {pendingPhoneCount}
-                </span>
-              )}
-            </button>
+            {hasMaintenanceScope && (
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminSection('complaints');
+                  setReviewError(null);
+                  setReviewSuccess(null);
+                }}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
+                  adminSection === 'complaints'
+                    ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
+                    : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                <ShieldCheck size={16} weight="bold" />
+                <span>Maintenance Queue ({openCount + inProgressCount})</span>
+              </button>
+            )}
+            {hasAcademicScope && (
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminSection('phone_requests');
+                  setReviewError(null);
+                  setReviewSuccess(null);
+                }}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition ${
+                  adminSection === 'phone_requests'
+                    ? 'bg-blue-700 text-white shadow-xs dark:bg-blue-600'
+                    : 'bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                <Phone size={16} weight="bold" />
+                <span>Phone Change Requests</span>
+                {pendingPhoneCount > 0 && (
+                  <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-white">
+                    {pendingPhoneCount}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         )}
 
-        {adminSection === 'complaints' ? (
+        {adminSection === 'complaints' && hasMaintenanceScope ? (
           <>
             {/* Sub-Header: Quiet inline metrics & Linear tabs */}
             <div className="mb-8">
@@ -582,15 +636,15 @@ export default function AdminDashboardPage(): React.ReactElement {
                             <span>Delayed ({delayInfo.days_delayed}d)</span>
                           </span>
                         )}
-                        {((complaint as { warning_count?: number }).warning_count ?? 0) > 0 && (
+                        {(complaint.warning_count ?? 0) > 0 && (
                           <Link
                             href={`/complaints/${complaint.$id}`}
                             className="inline-flex items-center gap-1 rounded bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800 transition hover:bg-red-200 dark:bg-red-950/60 dark:text-red-300"
                           >
                             <WarningCircle size={12} weight="bold" />
                             <span>
-                              {(complaint as { warning_count?: number }).warning_count} Warning
-                              {((complaint as { warning_count?: number }).warning_count ?? 0) > 1 ? 's' : ''}
+                              {complaint.warning_count} Warning
+                              {(complaint.warning_count ?? 0) > 1 ? 's' : ''}
                             </span>
                           </Link>
                         )}
@@ -644,7 +698,7 @@ export default function AdminDashboardPage(): React.ReactElement {
                 </button>
                 <button
                   type="button"
-                  disabled={displayedComplaints.length < 20}
+                  disabled={page * 20 >= totalCount || isLoading}
                   onClick={() => setPage((p) => p + 1)}
                   className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-slate-600 transition hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
                 >
@@ -680,32 +734,68 @@ export default function AdminDashboardPage(): React.ReactElement {
             )}
 
             <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-6 py-3.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50/50 px-6 py-3.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-400">
                 <div className="flex items-center gap-2">
                   <Phone size={16} className="text-blue-700 dark:text-blue-400" />
                   <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    Pending Requests ({pendingPhoneRequests.length})
+                    Requests ({displayedPhoneRequests.length})
                   </span>
+                  <span className="text-slate-400 dark:text-slate-500">•</span>
+                  <span>Scope: {adminDeptName}</span>
                 </div>
-                <span>Scope: {adminDeptName}</span>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { key: 'pending', label: 'Pending' },
+                      { key: 'approved', label: 'Approved' },
+                      { key: 'rejected', label: 'Rejected' },
+                      { key: 'completed', label: 'Completed' },
+                      { key: 'all', label: 'All' },
+                    ] as const
+                  ).map((filterOption) => (
+                    <button
+                      key={filterOption.key}
+                      type="button"
+                      onClick={() => setPhoneFilter(filterOption.key)}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
+                        phoneFilter === filterOption.key
+                          ? 'bg-blue-700 text-white shadow-2xs dark:bg-blue-600'
+                          : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {filterOption.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {isPhoneLoading ? (
                 <div className="p-6">
                   <LoadingSkeleton count={3} />
                 </div>
-              ) : pendingPhoneRequests.length === 0 ? (
+              ) : displayedPhoneRequests.length === 0 ? (
                 <div className="p-8">
                   <EmptyState
-                    title="No pending requests"
-                    description={`No pending phone change requests currently require action in ${adminDeptName}.`}
+                    title={`No ${phoneFilter === 'all' ? '' : `${phoneFilter} `}requests`}
+                    description={`No ${phoneFilter === 'all' ? '' : `${phoneFilter} `}phone change requests found in ${adminDeptName}.`}
                   />
                 </div>
               ) : (
                 <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {pendingPhoneRequests.map((req) => {
+                  {displayedPhoneRequests.map((req) => {
                     const reqId = (req as { request_id?: string }).request_id || req.$id;
                     const requestedDate = req.requested_at || req.created_at || req.$createdAt;
+                    const statusBadgeClass =
+                      req.status === 'pending'
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                        : req.status === 'approved'
+                        ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                        : req.status === 'completed'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300';
+                    const statusLabel =
+                      req.status.charAt(0).toUpperCase() + req.status.slice(1);
                     return (
                       <li
                         key={reqId}
@@ -716,8 +806,10 @@ export default function AdminDashboardPage(): React.ReactElement {
                             <span className="font-semibold text-slate-900 dark:text-white">
                               {req.student_name || req.student_user_id || 'Student'}
                             </span>
-                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                              Pending
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusBadgeClass}`}
+                            >
+                              {statusLabel}
                             </span>
                           </div>
                           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -740,28 +832,35 @@ export default function AdminDashboardPage(): React.ReactElement {
                               Reason: &ldquo;{req.reason}&rdquo;
                             </p>
                           )}
+                          {req.status === 'rejected' && req.decision_reason && (
+                            <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                              Rejection Reason: {req.decision_reason}
+                            </p>
+                          )}
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={isReviewSubmitting}
-                            onClick={() => handleQuickApprovePhone(reqId)}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
-                          >
-                            <CheckCircle size={14} weight="bold" />
-                            Approve
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isReviewSubmitting}
-                            onClick={() => setRejectModalRequest(req)}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
-                          >
-                            <XCircle size={14} weight="bold" />
-                            Reject
-                          </button>
-                        </div>
+                        {req.status === 'pending' && (
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={isReviewSubmitting}
+                              onClick={() => handleQuickApprovePhone(reqId)}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50 dark:bg-emerald-500 dark:hover:bg-emerald-600"
+                            >
+                              <CheckCircle size={14} weight="bold" />
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isReviewSubmitting}
+                              onClick={() => setRejectModalRequest(req)}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-2xs transition hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:bg-slate-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                            >
+                              <XCircle size={14} weight="bold" />
+                              Reject
+                            </button>
+                          </div>
+                        )}
                       </li>
                     );
                   })}

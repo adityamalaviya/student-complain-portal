@@ -340,3 +340,6 @@ export const SupportComplaintSchema = z.object({
 });
 
 export type SupportComplaintInput = z.infer<typeof SupportComplaintSchema>;
+
+export * from './department.schema';
+

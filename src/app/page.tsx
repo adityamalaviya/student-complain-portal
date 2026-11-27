@@ -1,28 +1,12 @@
 'use client';
 
-import React, { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import React from 'react';
 import Link from 'next/link';
 import { Buildings, ArrowRight, ShieldCheck, CheckCircle } from '@phosphor-icons/react';
-import { useAuth } from '@/lib/hooks';
+import { useAuthGuard } from '@/lib/hooks';
 
 export default function HomePage(): React.ReactElement {
-  const router = useRouter();
-  const { user, profile, loading, isOnboarded, isAdmin, isPrincipal } = useAuth();
-
-  useEffect(() => {
-    if (!loading && user) {
-      if (isPrincipal) {
-        router.replace('/principal');
-      } else if (isAdmin) {
-        router.push('/admin');
-      } else if (isOnboarded) {
-        router.push('/dashboard');
-      } else {
-        router.push('/onboarding');
-      }
-    }
-  }, [loading, user, isOnboarded, isAdmin, isPrincipal, router]);
+  useAuthGuard('guest_or_redirect');
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-center antialiased dark:bg-gray-950">

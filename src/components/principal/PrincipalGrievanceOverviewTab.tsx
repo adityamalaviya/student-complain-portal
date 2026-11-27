@@ -19,7 +19,7 @@ import {
   LoadingSkeleton,
 } from '@/components';
 import { resolveDepartment } from '@/lib/utils';
-import type { PrincipalDashboardData, DepartmentId } from '@/types';
+import type { PrincipalDashboardData, DepartmentId, Department } from '@/types';
 
 const CANONICAL_DEPARTMENTS: readonly DepartmentId[] = [
   'dept_comp',
@@ -47,6 +47,7 @@ function formatTimestamp(dateString?: string): string {
 
 export interface PrincipalGrievanceOverviewTabProps {
   dashboardData: PrincipalDashboardData | null;
+  departments?: Department[];
   isLoading: boolean;
   error: string | null;
   departmentFilter: string;
@@ -62,6 +63,7 @@ export interface PrincipalGrievanceOverviewTabProps {
 
 export function PrincipalGrievanceOverviewTab({
   dashboardData,
+  departments,
   isLoading,
   error,
   departmentFilter,
@@ -69,6 +71,28 @@ export function PrincipalGrievanceOverviewTab({
   onRetry,
   onIssueWarning,
 }: PrincipalGrievanceOverviewTabProps): React.ReactElement {
+  const displayedDepartments = useMemo(() => {
+    if (departments && departments.length > 0) {
+      return departments
+        .filter((d) => d.is_active !== false)
+        .map((d) => ({
+          id: d.$id,
+          name: d.name,
+          is_academic: d.is_academic,
+          is_maintenance: d.is_maintenance,
+        }));
+    }
+    return CANONICAL_DEPARTMENTS.map((deptId) => {
+      const dept = resolveDepartment(deptId);
+      return {
+        id: deptId,
+        name: dept?.name || deptId,
+        is_academic: dept?.is_academic ?? false,
+        is_maintenance: dept?.is_maintenance ?? true,
+      };
+    });
+  }, [departments]);
+
   const filteredComplaints = useMemo(() => {
     if (!dashboardData?.recent_complaints) return [];
     if (departmentFilter === 'all') return dashboardData.recent_complaints;
@@ -106,8 +130,8 @@ export function PrincipalGrievanceOverviewTab({
           Department Performance Metrics
         </h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {CANONICAL_DEPARTMENTS.map((deptId) => {
-            const dept = resolveDepartment(deptId);
+          {displayedDepartments.map((dept) => {
+            const deptId = dept.id;
             const breakdown = dashboardData?.metrics?.department_breakdown?.[deptId] || {
               total: 0,
               pending: 0,
@@ -125,7 +149,7 @@ export function PrincipalGrievanceOverviewTab({
               >
                 <div>
                   <div className="flex items-start justify-between gap-2">
-                    <DepartmentBadge departmentId={deptId} size="md" />
+                    <DepartmentBadge departmentId={deptId} name={dept.name} size="md" />
                     <span className="font-mono text-xs font-semibold text-slate-500 dark:text-slate-400">
                       {breakdown.total} total
                     </span>
@@ -133,12 +157,12 @@ export function PrincipalGrievanceOverviewTab({
 
                   {/* Department Type Badges */}
                   <div className="mt-3 flex items-center gap-1.5 text-[11px]">
-                    {dept?.is_academic && (
+                    {dept.is_academic && (
                       <span className="rounded bg-blue-50 px-1.5 py-0.5 text-blue-700 font-medium dark:bg-blue-950/60 dark:text-blue-300">
                         Academic
                       </span>
                     )}
-                    {dept?.is_maintenance && (
+                    {dept.is_maintenance && (
                       <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700 font-medium dark:bg-emerald-950/60 dark:text-emerald-300">
                         Maintenance
                       </span>
@@ -372,14 +396,11 @@ export function PrincipalGrievanceOverviewTab({
               className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs transition focus:border-blue-700 focus:outline-hidden dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
             >
               <option value="all">All Departments</option>
-              {CANONICAL_DEPARTMENTS.map((deptId) => {
-                const dept = resolveDepartment(deptId);
-                return (
-                  <option key={deptId} value={deptId}>
-                    {dept?.name}
-                  </option>
-                );
-              })}
+              {displayedDepartments.map((dept) => (
+                <option key={dept.id} value={dept.id}>
+                  {dept.name}
+                </option>
+              ))}
             </select>
           </div>
         </div>

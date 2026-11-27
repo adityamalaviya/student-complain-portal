@@ -15,6 +15,7 @@ import type { AcademicDepartmentId, DepartmentId, EnrollmentMapping } from '../.
 export interface DepartmentDescriptor {
   id: DepartmentId;
   name: string;
+  code?: string;
   is_academic: boolean;
   is_maintenance: boolean;
   is_active: boolean;

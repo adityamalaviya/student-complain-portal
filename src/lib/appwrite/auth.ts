@@ -9,6 +9,7 @@ export async function signInWithGoogle(
 ): Promise<void> {
   if (typeof window === 'undefined') return;
 
+  clearCachedJWT();
   const origin = window.location.origin;
   const successUrl = redirectSuccessUrl || `${origin}/auth/callback`;
   const failureUrl = redirectFailureUrl || `${origin}/sign-in?error=oauth_failed`;
@@ -25,15 +26,20 @@ export async function signInWithGoogle(
 }
 
 export async function createSession(userId: string, secret: string): Promise<Models.Session> {
+  clearCachedJWT();
   return account.createSession(userId, secret);
 }
 
 let cachedJwt: string | null = null;
 let jwtExpiresAt = 0;
+let jwtGeneration = 0;
+let pendingJwtPromise: Promise<string | null> | null = null;
 
 export function clearCachedJWT(): void {
+  jwtGeneration += 1;
   cachedJwt = null;
   jwtExpiresAt = 0;
+  pendingJwtPromise = null;
 }
 
 export async function signOut(): Promise<void> {
@@ -61,15 +67,33 @@ export async function createJWT(): Promise<string | null> {
     return cachedJwt;
   }
 
-  try {
-    const response = await account.createJWT();
-    cachedJwt = response.jwt;
-    // Cache for 10 minutes (Appwrite JWTs are valid for 15 minutes)
-    jwtExpiresAt = now + 10 * 60 * 1000;
-    return cachedJwt;
-  } catch {
-    cachedJwt = null;
-    jwtExpiresAt = 0;
-    return null;
+  if (pendingJwtPromise) {
+    return pendingJwtPromise;
   }
+
+  const requestGeneration = jwtGeneration;
+  pendingJwtPromise = (async (): Promise<string | null> => {
+    try {
+      const response = await account.createJWT();
+      if (requestGeneration !== jwtGeneration) {
+        return null;
+      }
+      cachedJwt = response.jwt;
+      // Cache for 10 minutes (Appwrite JWTs are valid for 15 minutes)
+      jwtExpiresAt = Date.now() + 10 * 60 * 1000;
+      return cachedJwt;
+    } catch {
+      if (requestGeneration === jwtGeneration) {
+        cachedJwt = null;
+        jwtExpiresAt = 0;
+      }
+      return null;
+    } finally {
+      if (requestGeneration === jwtGeneration) {
+        pendingJwtPromise = null;
+      }
+    }
+  })();
+
+  return pendingJwtPromise;
 }

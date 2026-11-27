@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   X,
   Phone,
@@ -17,6 +17,7 @@ import {
   apiCompletePhoneChange,
   apiListPhoneChangeRequests,
 } from '@/lib/api';
+import { getPhoneChangeWorkflowState, normalizePhoneInput } from '@/lib/utils';
 import type { PhoneChangeRequest } from '@/types';
 
 interface PhoneChangeModalProps {
@@ -24,7 +25,7 @@ interface PhoneChangeModalProps {
   onClose: () => void;
   currentPhoneNumber: string;
   academicDepartmentName: string;
-  onPhoneUpdated?: (newPhone: string) => void;
+  onPhoneUpdated?: (newPhone: string) => Promise<void> | void;
 }
 
 const PHONE_REGEX = /^[6-9]\d{9}$/;
@@ -40,6 +41,7 @@ export function PhoneChangeModal({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [completedPhone, setCompletedPhone] = useState<string | null>(null);
 
   // Form states
   const [reason, setReason] = useState<string>('');
@@ -48,46 +50,70 @@ export function PhoneChangeModal({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [forceNewRequest, setForceNewRequest] = useState<boolean>(false);
 
+  const isSubmittingRef = useRef<boolean>(false);
+  const loadSeqRef = useRef<number>(0);
+
   // Load existing requests for this student
   const loadRequests = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeqRef.current;
     setIsLoading(true);
     setErrorMessage(null);
     try {
       const res = await apiListPhoneChangeRequests();
+      if (seq !== loadSeqRef.current) return;
       if (res.success && res.data) {
         setRequests(res.data.requests || []);
+      } else if (res.error) {
+        setErrorMessage(res.error);
       }
     } catch {
-      setErrorMessage('Unable to load phone change request history.');
+      if (seq === loadSeqRef.current) {
+        setErrorMessage('Unable to load phone change request history.');
+      }
     } finally {
-      setIsLoading(false);
+      if (seq === loadSeqRef.current) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      void loadRequests();
-      setReason('');
-      setRequestedPhone('');
-      setNewPhoneNumber('');
-      setErrorMessage(null);
-      setSuccessMessage(null);
-      setForceNewRequest(false);
+    if (!isOpen) {
+      loadSeqRef.current += 1;
+      return;
     }
+    void loadRequests();
+    setReason('');
+    setRequestedPhone('');
+    setNewPhoneNumber('');
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setCompletedPhone(null);
+    setForceNewRequest(false);
+    isSubmittingRef.current = false;
   }, [isOpen, loadRequests]);
+
+  // Handle ESC key to dismiss dialog
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && isOpen && !isSubmitting && !isSubmittingRef.current) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return (): void => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isSubmitting, onClose]);
 
   if (!isOpen) return null;
 
-  // Active request determination
-  const activeRequest = requests[0];
-  const hasPending = activeRequest?.status === 'pending';
-  const hasApprovedPermission =
-    activeRequest?.status === 'approved' && !activeRequest.permission_consumed;
-  const isRejected = activeRequest?.status === 'rejected';
+  // Explicit state-machine resolution for student phone change flow
+  const activeRequest = requests[0] ?? null;
+  const workflowState = getPhoneChangeWorkflowState(activeRequest, forceNewRequest);
 
   // Handler: Submit phone change request
   const handleSubmitRequest = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
+    if (isSubmittingRef.current || isSubmitting) return;
     setErrorMessage(null);
 
     const trimmedReason = reason.trim();
@@ -95,17 +121,27 @@ export function PhoneChangeModal({
       setErrorMessage('Reason must be at least 10 characters long.');
       return;
     }
-
-    if (requestedPhone.trim().length > 0 && !PHONE_REGEX.test(requestedPhone.trim())) {
-      setErrorMessage('Requested phone number must be exactly 10 digits starting with 6, 7, 8, or 9.');
+    if (trimmedReason.length > 1000) {
+      setErrorMessage('Reason cannot exceed 1000 characters.');
       return;
     }
 
+    const trimmedRequestedPhone = requestedPhone.trim();
+    if (trimmedRequestedPhone.length > 0 && !PHONE_REGEX.test(trimmedRequestedPhone)) {
+      setErrorMessage('Requested phone number must be exactly 10 digits starting with 6, 7, 8, or 9.');
+      return;
+    }
+    if (trimmedRequestedPhone.length > 0 && trimmedRequestedPhone === currentPhoneNumber) {
+      setErrorMessage('Requested phone number cannot be the same as your current phone number.');
+      return;
+    }
+
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       const res = await apiRequestPhoneChange({
         reason: trimmedReason,
-        ...(requestedPhone.trim().length > 0 ? { requested_phone_number: requestedPhone.trim() } : {}),
+        ...(trimmedRequestedPhone.length > 0 ? { requested_phone_number: trimmedRequestedPhone } : {}),
       });
 
       if (res.success && res.data) {
@@ -120,6 +156,7 @@ export function PhoneChangeModal({
     } catch {
       setErrorMessage('Network error submitting request. Please try again.');
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -127,7 +164,7 @@ export function PhoneChangeModal({
   // Handler: Complete phone change using one-time permission
   const handleCompleteUpdate = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (!activeRequest) return;
+    if (!activeRequest || isSubmittingRef.current || isSubmitting) return;
     setErrorMessage(null);
 
     const trimmedPhone = newPhoneNumber.trim();
@@ -141,6 +178,7 @@ export function PhoneChangeModal({
       return;
     }
 
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       const res = await apiCompletePhoneChange({
@@ -149,9 +187,10 @@ export function PhoneChangeModal({
       });
 
       if (res.success && res.data) {
+        setCompletedPhone(trimmedPhone);
         setSuccessMessage('Phone number updated successfully! The number is now locked.');
         if (onPhoneUpdated) {
-          onPhoneUpdated(trimmedPhone);
+          await onPhoneUpdated(trimmedPhone);
         }
         await loadRequests();
       } else {
@@ -160,6 +199,7 @@ export function PhoneChangeModal({
     } catch {
       setErrorMessage('Network error updating phone number. Please try again.');
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -169,6 +209,11 @@ export function PhoneChangeModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="phone-change-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !isSubmitting) {
+          onClose();
+        }
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150"
     >
       <div className="relative w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900">
@@ -193,7 +238,9 @@ export function PhoneChangeModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            disabled={isSubmitting}
+            aria-label="Close modal"
+            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:hover:bg-slate-800 dark:hover:text-slate-200"
           >
             <X size={18} weight="bold" />
           </button>
@@ -234,7 +281,31 @@ export function PhoneChangeModal({
             <div className="flex items-center justify-center py-8 text-slate-400">
               <CircleNotch size={24} className="animate-spin text-blue-600" />
             </div>
-          ) : hasApprovedPermission ? (
+          ) : completedPhone ? (
+            /* STATE 0: COMPLETED CONFIRMATION */
+            <div className="space-y-4">
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
+                <div className="flex items-center gap-2 font-semibold">
+                  <CheckCircle size={18} weight="bold" className="text-emerald-600 dark:text-emerald-400" />
+                  <span>Phone Number Updated &amp; Locked</span>
+                </div>
+                <p className="mt-1 text-emerald-800 dark:text-emerald-300">
+                  Your registered mobile number is now updated to{' '}
+                  <span className="font-mono font-semibold">+91 {completedPhone}</span> and locked against modification.
+                </p>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-700"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          ) : workflowState === 'approved_ready' && activeRequest ? (
             /* STATE 1: ONE-TIME PERMISSION GRANTED */
             <div className="space-y-4">
               <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
@@ -252,7 +323,7 @@ export function PhoneChangeModal({
                 )}
               </div>
 
-              <form onSubmit={handleCompleteUpdate} className="space-y-3">
+              <form onSubmit={handleCompleteUpdate} noValidate className="space-y-3">
                 <div>
                   <label htmlFor="new_phone_input" className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
                     New 10-Digit Mobile Number
@@ -264,12 +335,15 @@ export function PhoneChangeModal({
                     <input
                       id="new_phone_input"
                       type="tel"
-                      maxLength={10}
+                      inputMode="numeric"
                       value={newPhoneNumber}
-                      onChange={(e) => setNewPhoneNumber(e.target.value.replace(/\D/g, ''))}
+                      onChange={(e) => {
+                        setNewPhoneNumber(normalizePhoneInput(e.target.value, newPhoneNumber));
+                        if (errorMessage) setErrorMessage(null);
+                      }}
                       placeholder={activeRequest.requested_phone_number || '9876543210'}
                       className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-11 pr-3 text-sm font-mono text-slate-900 focus:border-blue-500 focus:outline-hidden focus:ring-1 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-                      required
+                      aria-required="true"
                     />
                   </div>
                   <p className="mt-1 text-[11px] text-slate-500">
@@ -287,7 +361,7 @@ export function PhoneChangeModal({
                   </button>
                   <button
                     type="submit"
-                    disabled={isSubmitting || !PHONE_REGEX.test(newPhoneNumber)}
+                    disabled={isSubmitting}
                     className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 disabled:opacity-50"
                   >
                     {isSubmitting ? (
@@ -305,7 +379,7 @@ export function PhoneChangeModal({
                 </div>
               </form>
             </div>
-          ) : hasPending ? (
+          ) : workflowState === 'pending_review' && activeRequest ? (
             /* STATE 2: PENDING REVIEW */
             <div className="space-y-4">
               <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
@@ -337,7 +411,7 @@ export function PhoneChangeModal({
                 </button>
               </div>
             </div>
-          ) : isRejected && !forceNewRequest ? (
+          ) : workflowState === 'rejected' && activeRequest ? (
             /* STATE 3: REJECTED */
             <div className="space-y-4">
               <div className="rounded-lg border border-red-200 bg-red-50/70 p-4 text-xs text-red-900 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
@@ -372,7 +446,7 @@ export function PhoneChangeModal({
             </div>
           ) : (
             /* STATE 4: SUBMIT NEW REQUEST FORM */
-            <form onSubmit={handleSubmitRequest} className="space-y-4">
+            <form onSubmit={handleSubmitRequest} noValidate className="space-y-4">
               <div>
                 <label htmlFor="reason_input" className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
                   Reason for Phone Number Change <span className="text-red-500">*</span>
@@ -381,10 +455,13 @@ export function PhoneChangeModal({
                   id="reason_input"
                   rows={3}
                   value={reason}
-                  onChange={(e) => setReason(e.target.value)}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    if (errorMessage) setErrorMessage(null);
+                  }}
                   placeholder="Explain why your mobile number has changed (e.g., lost SIM, network port, or new personal device)..."
                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-hidden focus:ring-1 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-                  required
+                  aria-required="true"
                 />
                 <div className="mt-1 flex justify-between text-[11px] text-slate-400">
                   <span>Minimum 10 characters</span>
@@ -403,9 +480,12 @@ export function PhoneChangeModal({
                   <input
                     id="requested_phone_input"
                     type="tel"
-                    maxLength={10}
+                    inputMode="numeric"
                     value={requestedPhone}
-                    onChange={(e) => setRequestedPhone(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => {
+                      setRequestedPhone(normalizePhoneInput(e.target.value, requestedPhone));
+                      if (errorMessage) setErrorMessage(null);
+                    }}
                     placeholder="9876543210"
                     className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-11 pr-3 text-xs font-mono text-slate-900 focus:border-blue-500 focus:outline-hidden focus:ring-1 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                   />
@@ -429,7 +509,7 @@ export function PhoneChangeModal({
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting || reason.trim().length < 10}
+                  disabled={isSubmitting}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-blue-800 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
                 >
                   {isSubmitting ? (

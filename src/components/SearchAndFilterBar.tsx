@@ -32,7 +32,7 @@ export function SearchAndFilterBar({
     <div className="mb-7 space-y-4">
       {/* Feed Tabs (Academic Department Scoped Only) */}
       <div className="flex items-center justify-between border-b border-slate-200 pb-px dark:border-slate-800">
-        <nav className="flex items-center gap-6 sm:gap-8">
+        <nav className="flex flex-wrap items-center gap-4 sm:gap-8">
           <button
             type="button"
             onClick={() => onFeedTypeChange('all')}
@@ -104,7 +104,7 @@ export function SearchAndFilterBar({
         </div>
 
         {/* Status Filter Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs sm:pb-0">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <button
             type="button"
             onClick={() => onStatusFilterChange('all')}
