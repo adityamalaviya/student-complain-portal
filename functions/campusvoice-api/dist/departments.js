@@ -140,6 +140,24 @@ export function resolveLegacyDepartmentCode(code) {
     return resolved ? resolved.department : null;
 }
 /**
+ * Returns the canonical enrollment or system code for a canonical department ID.
+ */
+export function getCanonicalDepartmentCode(departmentId, mappings = ENROLLMENT_CODE_MAPPINGS) {
+    if (!departmentId)
+        return null;
+    const trimmed = departmentId.trim();
+    for (const mapping of Object.values(mappings)) {
+        if (mapping.department_id === trimmed) {
+            return mapping.enrollment_code;
+        }
+    }
+    if (trimmed === 'dept_water')
+        return 'WATER';
+    if (trimmed === 'dept_sanit')
+        return 'SANIT';
+    return null;
+}
+/**
  * Converts a descriptor to the API Department representation.
  */
 export function toDepartmentModel(dept) {

@@ -12,6 +12,7 @@ import {
 } from '@phosphor-icons/react';
 import { EmptyState, ErrorState } from '@/components';
 import {
+  getCanonicalDepartmentCode,
   groupAdminAssignments,
   resolveDepartment,
   type AdminAssignmentScopeDisplay,
@@ -72,6 +73,29 @@ export function PrincipalAdminAssignmentsTab({
     const activeOnly = assignments.filter((a) => a.is_active);
     return groupAdminAssignments(activeOnly);
   }, [assignments]);
+
+  // Filter out any legacy duplicates (e.g. '06', '07' or duplicate names)
+  const displayDepartments = useMemo(() => {
+    const seen = new Set<string>();
+    const filtered: Department[] = [];
+
+    for (const dept of departments) {
+      if (['06', '07', '09', '19', 'water', 'sanitation'].includes(dept.$id.toLowerCase())) {
+        continue;
+      }
+      const canonicalCode = getCanonicalDepartmentCode(dept.$id);
+      const code = (dept.code || canonicalCode || dept.$id.replace(/^dept_/, '')).toUpperCase();
+      const normName = dept.name.toLowerCase().trim().replace(/\s+department$/, '');
+
+      const key = `${code}::${normName}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      filtered.push(dept);
+    }
+    return filtered;
+  }, [departments]);
 
   // Index active grouped admins by department_id
   const adminsByDeptId = useMemo(() => {
@@ -147,7 +171,7 @@ export function PrincipalAdminAssignmentsTab({
         </div>
       ) : error ? (
         <ErrorState title="Failed to load departments" message={error} onRetry={onRefresh} />
-      ) : departments.length === 0 ? (
+      ) : displayDepartments.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-8 dark:border-slate-800 dark:bg-slate-900">
           <EmptyState
             title="No Departments Found"
@@ -156,10 +180,12 @@ export function PrincipalAdminAssignmentsTab({
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
-          {departments.map((dept) => {
+          {displayDepartments.map((dept) => {
             const resolved = resolveDepartment(dept.$id);
+            const canonicalCode = getCanonicalDepartmentCode(dept.$id);
             const deptCode =
               dept.code ||
+              canonicalCode ||
               resolved?.code ||
               dept.$id.replace(/^dept_/, '').toUpperCase();
             const deptAdmins = adminsByDeptId.get(dept.$id) || [];

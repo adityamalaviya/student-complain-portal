@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, CircleNotch, WarningCircle, CheckSquare, Square } from '@phosphor-icons/react';
 import { apiCreateDepartment, apiUpdateDepartment } from '@/lib/api';
+import { getCanonicalDepartmentCode } from '@/lib/utils';
 import type { Department } from '@/types';
 
 export interface CreateEditDepartmentModalProps {
@@ -45,7 +46,8 @@ export function CreateEditDepartmentModal({
 
       if (mode === 'edit' && department) {
         setName(department.name || '');
-        setCode(department.code || department.$id.replace(/^dept_/, '').toUpperCase());
+        const canonicalCode = getCanonicalDepartmentCode(department.$id);
+        setCode(department.code || canonicalCode || department.$id.replace(/^dept_/, '').toUpperCase());
         setAdminEmail(initialAdminEmail || '');
         setMaintenanceScope(
           initialScopes ? initialScopes.maintenance : (department.is_maintenance ?? true)
