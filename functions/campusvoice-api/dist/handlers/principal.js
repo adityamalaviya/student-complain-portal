@@ -1,6 +1,6 @@
 import { ID, Query } from 'node-appwrite';
 import { getAppwriteConfig, getServerClient } from '../db.js';
-import { calculateComplaintDelay, INSTITUTIONAL_DEPARTMENTS, isComplaintDelayed, normalizeComplaintStatus, readBooleanField, readNumberField, readStringField, resolveDepartment, } from '../departments.js';
+import { calculateComplaintDelay, INSTITUTIONAL_DEPARTMENTS, isComplaintDelayed, normalizeComplaintStatus, readBooleanField, readNumberField, readStringField, resolveDepartment, getCanonicalDepartmentCode, } from '../departments.js';
 import { getWarningState, hasCompleteStudentProfileFields, validateWarningResponse, } from '../stateMachines.js';
 import { appendAuditLog } from './audit.js';
 function toComplaintModel(doc) {
@@ -53,6 +53,41 @@ function toAdminAssignmentModel(doc) {
         assigned_by: readStringField(doc, 'assigned_by'),
         created_at: readStringField(doc, 'created_at') || doc.$createdAt,
     };
+}
+async function safeCreateAdminAssignmentDoc(databases, databaseId, collectionId, docId, data) {
+    const payload = {
+        user_id: data.userId || 'pending_oauth',
+        email: data.email,
+        department_id: data.departmentId,
+        department_name: data.departmentName || data.departmentId,
+        is_active: true,
+        assigned_by: data.assignedBy,
+        created_at: data.createdAt,
+        scope: data.scope,
+        academic_department_id: data.scope === 'academic' ? data.departmentId : data.departmentId,
+        maintenance_department_id: data.scope === 'maintenance' ? data.departmentId : data.departmentId,
+    };
+    try {
+        return await databases.createDocument(databaseId, collectionId, docId, payload, []);
+    }
+    catch (err) {
+        const errStr = String(err);
+        if (errStr.includes('Attribute') && errStr.includes('not found')) {
+            const stripped = {
+                user_id: data.userId || 'pending_oauth',
+                email: data.email,
+                department_id: data.departmentId,
+                department_name: data.departmentName || data.departmentId,
+                is_active: true,
+                assigned_by: data.assignedBy,
+                created_at: data.createdAt,
+            };
+            if (!errStr.includes('scope'))
+                stripped.scope = data.scope;
+            return await databases.createDocument(databaseId, collectionId, docId, stripped, []);
+        }
+        throw err;
+    }
 }
 function toAuditLogModel(doc) {
     return {
@@ -598,16 +633,15 @@ export async function handleAssignAdmin(context, caller, data, deps) {
         }
         const effectiveUserId = targetUserId ||
             (targetProfileDoc ? readStringField(targetProfileDoc, 'user_id') || targetProfileDoc.$id : '');
-        const newAssignment = await databases.createDocument(config.databaseId, config.departmentAdminsCollectionId, docId, {
-            user_id: effectiveUserId,
+        const newAssignment = await safeCreateAdminAssignmentDoc(databases, config.databaseId, config.departmentAdminsCollectionId, docId, {
+            userId: effectiveUserId,
             email,
-            department_id: resolvedDept.id,
+            departmentId: resolvedDept.id,
+            departmentName: resolvedDept.name,
             scope,
-            is_active: true,
-            assigned_by: caller.id,
-            created_at: now,
-        }, [] // Strictly empty permissions ($permissions = [])
-        );
+            assignedBy: caller.id,
+            createdAt: now,
+        });
         // Update user profile role to department_admin if profile exists
         const profileDocId = targetProfileDoc?.$id || effectiveUserId;
         if (profileDocId) {
@@ -911,15 +945,15 @@ export async function handleCreateDepartment(context, caller, data, deps) {
             scopesToAssign.push('academic');
         for (const scope of scopesToAssign) {
             const assignDocId = `da_${ID.unique().slice(0, 32)}`;
-            const assignDoc = await databases.createDocument(config.databaseId, config.departmentAdminsCollectionId, assignDocId, {
-                user_id: effectiveUserId,
+            const assignDoc = await safeCreateAdminAssignmentDoc(databases, config.databaseId, config.departmentAdminsCollectionId, assignDocId, {
+                userId: effectiveUserId,
                 email: adminEmail,
-                department_id: deptDocId,
+                departmentId: deptDocId,
+                departmentName: name,
                 scope,
-                is_active: true,
-                assigned_by: caller.id,
-                created_at: now,
-            }, []);
+                assignedBy: caller.id,
+                createdAt: now,
+            });
             createdAssignments.push(toAdminAssignmentModel(assignDoc));
         }
         if (targetProfileDoc) {
@@ -1053,9 +1087,42 @@ export async function handleUpdateDepartment(context, caller, data, deps) {
             }, 404);
         }
         if (code) {
+            const canonicalCode = getCanonicalDepartmentCode(departmentId);
+            const isCanonicalCodeForThisDept = Boolean(canonicalCode && canonicalCode === code);
             const existingWithCode = await databases.listDocuments(config.databaseId, config.departmentsCollectionId, [Query.equal('code', code), Query.limit(10)]);
-            const conflict = existingWithCode.documents.find((d) => d.$id !== departmentId);
-            if (conflict) {
+            const otherDocs = existingWithCode.documents.filter((d) => d.$id !== departmentId);
+            const activeConflict = otherDocs.find((d) => readBooleanField(d, 'is_active') !== false);
+            if (activeConflict) {
+                return res.json({
+                    success: false,
+                    error: `Another department already uses code '${code}'.`,
+                    code: 'DEPARTMENT_CODE_EXISTS',
+                }, 409);
+            }
+            const inactiveConflicts = otherDocs.filter((d) => readBooleanField(d, 'is_active') === false);
+            // If updating to this canonical department's own code (e.g. 06 for dept_civil),
+            // release the code from any inactive legacy duplicate documents
+            if (isCanonicalCodeForThisDept && inactiveConflicts.length > 0) {
+                for (const inDoc of inactiveConflicts) {
+                    try {
+                        if (databases.deleteDocument && !INSTITUTIONAL_DEPARTMENTS.some((c) => c.id === inDoc.$id)) {
+                            await databases.deleteDocument(config.databaseId, config.departmentsCollectionId, inDoc.$id);
+                        }
+                        else {
+                            await databases.updateDocument(config.databaseId, config.departmentsCollectionId, inDoc.$id, { code: null, is_active: false });
+                        }
+                    }
+                    catch {
+                        try {
+                            await databases.updateDocument(config.databaseId, config.departmentsCollectionId, inDoc.$id, { code: null, is_active: false });
+                        }
+                        catch {
+                            // ignore
+                        }
+                    }
+                }
+            }
+            else if (inactiveConflicts.length > 0) {
                 return res.json({
                     success: false,
                     error: `Another department already uses code '${code}'.`,
@@ -1069,22 +1136,35 @@ export async function handleUpdateDepartment(context, caller, data, deps) {
         const updatedIsAcademic = isAcademic ?? (existingDoc ? (readBooleanField(existingDoc, 'is_academic') ?? canonical?.is_academic ?? false) : canonical?.is_academic ?? false);
         const updatedIsMaintenance = isMaintenance ?? (existingDoc ? (readBooleanField(existingDoc, 'is_maintenance') ?? canonical?.is_maintenance ?? true) : canonical?.is_maintenance ?? true);
         let savedDeptDoc;
-        if (existingDoc) {
-            savedDeptDoc = await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, {
-                name: updatedName,
-                code: updatedCode,
-                is_academic: updatedIsAcademic,
-                is_maintenance: updatedIsMaintenance,
-            });
+        try {
+            if (existingDoc) {
+                savedDeptDoc = await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, {
+                    name: updatedName,
+                    code: updatedCode,
+                    is_academic: updatedIsAcademic,
+                    is_maintenance: updatedIsMaintenance,
+                });
+            }
+            else {
+                savedDeptDoc = await databases.createDocument(config.databaseId, config.departmentsCollectionId, departmentId, {
+                    name: updatedName,
+                    code: updatedCode,
+                    is_academic: updatedIsAcademic,
+                    is_maintenance: updatedIsMaintenance,
+                    is_active: true,
+                }, []);
+            }
         }
-        else {
-            savedDeptDoc = await databases.createDocument(config.databaseId, config.departmentsCollectionId, departmentId, {
-                name: updatedName,
-                code: updatedCode,
-                is_academic: updatedIsAcademic,
-                is_maintenance: updatedIsMaintenance,
-                is_active: true,
-            }, []);
+        catch (saveDeptErr) {
+            const errStr = String(saveDeptErr);
+            if (errStr.includes('code') && (errStr.includes('already exists') || errStr.includes('Duplicate') || errStr.includes('409') || errStr.includes('unique'))) {
+                return res.json({
+                    success: false,
+                    error: `Another department already uses code '${updatedCode}'.`,
+                    code: 'DEPARTMENT_CODE_EXISTS',
+                }, 409);
+            }
+            throw saveDeptErr;
         }
         const updatedAssignments = [];
         if (adminEmail !== undefined || rawScopes !== undefined) {
@@ -1125,15 +1205,15 @@ export async function handleUpdateDepartment(context, caller, data, deps) {
                         readStringField(d, 'scope') === scope);
                     if (!alreadyExists) {
                         const assignDocId = `da_${ID.unique().slice(0, 32)}`;
-                        const newDoc = await databases.createDocument(config.databaseId, config.departmentAdminsCollectionId, assignDocId, {
-                            user_id: effectiveUserId,
+                        const newDoc = await safeCreateAdminAssignmentDoc(databases, config.databaseId, config.departmentAdminsCollectionId, assignDocId, {
+                            userId: effectiveUserId,
                             email: targetEmail,
-                            department_id: departmentId,
+                            departmentId,
+                            departmentName: updatedName,
                             scope,
-                            is_active: true,
-                            assigned_by: caller.id,
-                            created_at: now,
-                        }, []);
+                            assignedBy: caller.id,
+                            createdAt: now,
+                        });
                         updatedAssignments.push(toAdminAssignmentModel(newDoc));
                     }
                     else {
@@ -1186,10 +1266,13 @@ export async function handleUpdateDepartment(context, caller, data, deps) {
         }, 200);
     }
     catch (err) {
-        error(`[principal] Error updating department: ${String(err)}`);
+        const errMessage = err instanceof Error ? err.message : String(err);
+        error(`[principal] Error updating department: ${errMessage}`);
         return res.json({
             success: false,
-            error: 'Unable to update department.',
+            error: errMessage.includes('required') || errMessage.includes('Attribute')
+                ? `Unable to update department: ${errMessage}`
+                : 'Unable to update department.',
             code: 'INTERNAL_ERROR',
         }, 500);
     }
@@ -1233,7 +1316,23 @@ export async function handleDeleteDepartment(context, caller, data, deps) {
             }, 404);
         }
         if (deptDoc) {
-            await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, { is_active: false });
+            const isCanonical = INSTITUTIONAL_DEPARTMENTS.some((c) => c.id === departmentId);
+            if (!isCanonical) {
+                try {
+                    if (databases.deleteDocument) {
+                        await databases.deleteDocument(config.databaseId, config.departmentsCollectionId, departmentId);
+                    }
+                    else {
+                        await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, { is_active: false, code: null });
+                    }
+                }
+                catch {
+                    await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, { is_active: false, code: null });
+                }
+            }
+            else {
+                await databases.updateDocument(config.databaseId, config.departmentsCollectionId, departmentId, { is_active: false });
+            }
         }
         else if (canonical) {
             await databases.createDocument(config.databaseId, config.departmentsCollectionId, departmentId, {
